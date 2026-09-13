@@ -333,6 +333,7 @@ class TriggerExpectation(str, Enum):
 
 class TriggerEvidenceKind(str, Enum):
     MOUNTED_PATH = "mounted_path"
+    CODEX_ROLLOUT = "codex_rollout"
     SKILL_TOOL = "skill_tool"
     VIBE_SKILL_TOOL = "vibe_skill_tool"
 

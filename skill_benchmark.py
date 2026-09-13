@@ -9018,6 +9018,122 @@ def codex_env_for_home(codex_home: Path) -> tuple[dict[str, str], dict[str, Any]
     return env, meta
 
 
+CODEX_SESSIONS_DIRNAME = "sessions"
+CODEX_ROLLOUT_SKILL_TAG = "<skill>"
+_CODEX_SKILL_TAG_PATTERNS = {
+    tag: re.compile(rf"<{tag}>(.*?)</{tag}>", re.DOTALL) for tag in ("name", "path")
+}
+
+
+@_dataclass(frozen=True)
+class CodexRollout:
+    """Where the persisted transcript of one `codex exec --json` thread was
+    looked for, and what it held. Codex writes it under
+    `$CODEX_HOME/sessions/<y>/<m>/<d>/rollout-<stamp>-<thread_id>.jsonl`; the
+    thread id comes from the stream's `thread.started` event. `status` is
+    `found`, `not_found`, or `no_thread_id`; `home` names which CODEX_HOME held
+    it (`isolated` for the run's scratch home, `ambient` for the caller's)."""
+
+    status: str
+    home: str | None = None
+    file_name: str | None = None
+    text: str | None = None
+
+    def metadata(self) -> dict[str, Any]:
+        """The JSON-safe record a trigger row keeps so a reader can tell whether
+        the rollout detector had anything to read."""
+        meta: dict[str, Any] = {"codex_rollout_status": self.status}
+        if self.home is not None:
+            meta["codex_rollout_home"] = self.home
+        if self.file_name is not None:
+            meta["codex_rollout_file"] = self.file_name
+        return meta
+
+
+def codex_thread_id(stdout: str) -> str | None:
+    """The thread id Codex announces in its `thread.started` event."""
+    for record in iter_json_objects(stdout):
+        if isinstance(record, dict) and record.get("type") == "thread.started":
+            thread_id = record.get("thread_id")
+            if isinstance(thread_id, str) and thread_id.strip():
+                return thread_id.strip()
+            return None
+    return None
+
+
+def codex_rollout_path(codex_home: Path, thread_id: str) -> Path | None:
+    sessions = codex_home / CODEX_SESSIONS_DIRNAME
+    if not sessions.is_dir():
+        return None
+    suffix = f"-{thread_id}.jsonl"
+    matches = sorted(
+        path for path in sessions.rglob("rollout-*.jsonl")
+        if path.is_file() and path.name.endswith(suffix))
+    return matches[0] if matches else None
+
+
+def locate_codex_rollout(stdout: str, isolated_home: Path | None = None) -> CodexRollout:
+    """Find the rollout for the thread `stdout` announces. The run's isolated
+    CODEX_HOME is searched first, then the ambient `$CODEX_HOME` (default
+    `~/.codex`) for a `--codex-cmd` wrapper that ignored the isolated home. A
+    thread id is unique, so either hit is this run's own transcript."""
+    thread_id = codex_thread_id(stdout)
+    if thread_id is None:
+        return CodexRollout(status="no_thread_id")
+    homes: list[tuple[str, Path]] = []
+    if isolated_home is not None:
+        homes.append(("isolated", isolated_home))
+    homes.append(("ambient", Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))))
+    for label, home in homes:
+        path = codex_rollout_path(home, thread_id)
+        if path is not None:
+            return CodexRollout(status="found", home=label, file_name=path.name,
+                                text=path.read_text(encoding="utf-8", errors="replace"))
+    return CodexRollout(status="not_found")
+
+
+def _codex_skill_tag(text: str, tag: str) -> str | None:
+    match = _CODEX_SKILL_TAG_PATTERNS[tag].search(text)
+    return match.group(1).strip() if match else None
+
+
+def codex_rollout_skill_loads(rollout_text: str, skill_names: list[str], copied_paths: list[Path]) -> list[str]:
+    """Skill loads a Codex rollout proves. Two shapes count: the CLI's own
+    `<skill>` injection (a user-role `response_item` whose text opens with
+    `<skill>` and names a mounted skill, with any `<path>` under the mount), and
+    a tool call (`function_call`, `custom_tool_call`, `local_shell_call`) whose
+    arguments name the mounted SKILL.md or its directory. Developer-role skill
+    listings, assistant prose, and tool outputs mention names and paths without
+    loading anything, so they never count."""
+    needles = [str(p) for p in copied_paths] + [str(p.parent) for p in copied_paths]
+    names = set(skill_names)
+    evidence: list[str] = []
+    for record in iter_json_objects(rollout_text):
+        if not isinstance(record, dict) or record.get("type") != "response_item":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        item_type = str(payload.get("type") or "")
+        if item_type == "message":
+            if payload.get("role") != "user":
+                continue
+            for block in payload.get("content") or []:
+                text = str(block.get("text") or "") if isinstance(block, dict) else ""
+                if not text.startswith(CODEX_ROLLOUT_SKILL_TAG):
+                    continue
+                name = _codex_skill_tag(text, "name")
+                path = _codex_skill_tag(text, "path")
+                if name in names and (path is None or any(n and n in path for n in needles)):
+                    evidence.append(f"rollout skill injection: {name}" + (f" ({path})" if path else ""))
+        elif item_type.endswith("_call"):
+            haystack = json.dumps(payload, ensure_ascii=False)
+            hit = next((n for n in needles if n and n in haystack), None)
+            if hit is not None:
+                evidence.append(f"rollout {item_type}: {hit}"[:500])
+    return evidence[:5]
+
+
 def _strip_json_comments(text: str) -> str:
     """Match Gemini's JSONC comment support without changing string bytes."""
     out: list[str] = []

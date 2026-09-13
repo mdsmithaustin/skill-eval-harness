@@ -21,8 +21,12 @@ Five adapters ship:
               OAuth/keychain logins still work.
 - `codex`   — Codex CLI (`codex exec --json` by default), with skills mounted
               under an isolated external `$CODEX_HOME/skills` and exposed as a
-              skills-only read root. It is detected through the shared
-              path-evidence detector. Override the command with `--codex-cmd`
+              skills-only read root. Loads are read from the session
+              rollout (`$CODEX_HOME/sessions/.../rollout-*-<thread_id>.jsonl`:
+              the CLI's `<skill>` injection or a tool call reading SKILL.md),
+              falling back to the shared path-evidence detector when no rollout
+              exists; rows record `codex_rollout_status` and the evidence kind
+              so a reader can tell which decided. Override the command with `--codex-cmd`
               when a local wrapper or a newer CLI surface is needed.
 - `vibe`    — Mistral Vibe CLI (`vibe --prompt ...`), with skills mounted under
               workspace `.agents/skills` and `VIBE_HOME` isolated outside the
@@ -93,17 +97,20 @@ from skill_benchmark import (
     VIBE_DEFAULT_CMD,
     VIBE_READ_ONLY_TOOLS,
     AblationError,
+    CodexRollout,
     PiStream,
     ProcessInvocationPlan,
     build_canonical_skill_tree,
     build_vibe_cli_argv,
     canonical_json_sha256,
     codex_env_for_home,
+    codex_rollout_skill_loads,
     detect_trigger_detection,
     detect_trigger_records,
     frontmatter_value,
     invoke_argv_with_timeout,
     iter_json_objects,
+    locate_codex_rollout,
     materialize_trigger_ablation,
     mount_skill_tree,
     normalize_trace_records,
@@ -535,15 +542,32 @@ class CodexAdapter(AgentAdapter):
                     argv, input_text="", cwd=workspace, timeout_s=timeout,
                     environment=env))
             )
+            # The rollout lives under the isolated home, which is removed
+            # below, so it is read here and handed to detect() as the payload.
+            rollout = locate_codex_rollout(result.stdout, codex_home)
         finally:
             shutil.rmtree(codex_home, ignore_errors=True)
         if result.observation_complete:
             result = result.with_provider_error(
                 codex_stream_protocol_error(result.stdout))
-        return result.with_metadata(
+        return result.with_provider_payload(rollout).with_metadata(
             {k: v for k, v in meta.items() if k != "codex_home"},
             codex_home_outside_workdir=True,
+            **rollout.metadata(),
         )
+
+    def detect(self, invocation: InvocationOutcome, skill_names: list[str], copied: list[Path]) -> TriggerDetection:
+        # Primary evidence: the session rollout, where the CLI records its own
+        # `<skill>` injection even when the JSON stream shows no tool event.
+        # Fallback: the shared path detector over the stream. The evidence kind
+        # (`codex_rollout` vs `mounted_path`) and `codex_rollout_status` in the
+        # row say which detector decided.
+        rollout = invocation.provider_payload
+        if isinstance(rollout, CodexRollout) and rollout.text is not None:
+            evidence = codex_rollout_skill_loads(rollout.text, skill_names, copied)
+            if evidence:
+                return TriggerDetection.from_texts(TriggerEvidenceKind.CODEX_ROLLOUT, evidence)
+        return super().detect(invocation, skill_names, copied)
 
 
 class PiAdapter(AgentAdapter):
