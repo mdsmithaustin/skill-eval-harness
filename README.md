@@ -411,6 +411,15 @@ runs/<case_id>/<variant>/run-1/artifact-commit.json # required-file SHA-256 inve
 runs/answer-design.json                          # exact expected answer experiment and eval-contract digest
 ```
 
+`trace.jsonl` is the agent CLI's own stream, preserved verbatim, and it is read with the
+stream rule: a line that repeats an object key (`codex exec --json` repeats `id` on some
+event lines) is kept with the last value winning, the same rule as Python's `json.loads`,
+and the row's `metrics.json` (or a trigger row's metadata) lists what was kept under
+`stream_duplicate_keys` as `line N: key`. A line that is not JSON is still skipped and
+counted in `parse_errors`. Everything the harness authors or validates (manifests,
+prepared tasks, `events.json`, `metrics.json`, `metadata.json`, judge rows, reports, the
+Codex session rollout) is read with the strict rule, where a repeated key is rejected.
+
 Current answer and Jetty writers record independent process, provider-response, trace,
 and artifact-set evidence. Tool/command/file/retry/skill measurements are available only
 when the first three channels are complete; readers derive artifact completeness by

@@ -118,6 +118,7 @@ from skill_benchmark import (
     repo_root_for_manifest,
     safe_trace_label,
     skill_tree_hash,
+    stream_duplicate_keys,
     stream_usage_and_cost,
     strict_json_loads,
     trace_dialect_for,
@@ -195,7 +196,7 @@ def validate_invoke_result(agent: str, result: InvocationOutcome | dict[str, Any
 
 def json_stream_protocol_error(stdout: str, agent: str) -> str | None:
     """Reject malformed/empty event streams as incomplete observations."""
-    records, errors = parse_trace_jsonl_text(stdout)
+    records, errors = parse_trace_jsonl_text(stdout, strict=False)
     if errors:
         return f"{agent} JSON stream is malformed: {errors[0]}"
     if not records:
@@ -208,7 +209,7 @@ def codex_stream_protocol_error(stdout: str) -> str | None:
     error = json_stream_protocol_error(stdout, "codex")
     if error is not None:
         return error
-    records, _ = parse_trace_jsonl_text(stdout)
+    records, _ = parse_trace_jsonl_text(stdout, strict=False)
     terminals = [i for i, record in enumerate(records)
                  if str(record.get("type") or "").casefold() == "turn.completed"]
     if terminals != [len(records) - 1]:
@@ -221,7 +222,7 @@ def vibe_stream_protocol_error(stdout: str) -> str | None:
     error = json_stream_protocol_error(stdout, "vibe")
     if error is not None:
         return error
-    records, _ = parse_trace_jsonl_text(stdout)
+    records, _ = parse_trace_jsonl_text(stdout, strict=False)
     terminal_answer = (records[-1].get("role") == "assistant"
                        and isinstance(records[-1].get("content"), str)
                        and bool(records[-1]["content"].strip()))
@@ -455,7 +456,7 @@ class ClaudeAdapter(AgentAdapter):
             result = result.as_agent_window_complete()
         if result.observation_complete:
             error = json_stream_protocol_error(result.stdout, self.name)
-            records, _ = parse_trace_jsonl_text(result.stdout)
+            records, _ = parse_trace_jsonl_text(result.stdout, strict=False)
             terminal = next((record for record in reversed(records)
                              if record.get("type") == "result"), None)
             if error is None and terminal is None:
@@ -474,7 +475,7 @@ class ClaudeAdapter(AgentAdapter):
 
     @staticmethod
     def _result_subtype(stdout: str) -> str | None:
-        for event in iter_json_objects(stdout):
+        for event in iter_json_objects(stdout, strict=False):
             if isinstance(event, dict) and event.get("type") == "result":
                 return event.get("subtype")
         return None
@@ -483,7 +484,7 @@ class ClaudeAdapter(AgentAdapter):
         # Primary evidence: the Skill tool invoked with a mounted skill's name.
         # Fallback: the shared path detector (the model Read the mounted files).
         evidence: list[str] = []
-        for event in iter_json_objects(invocation.stdout):
+        for event in iter_json_objects(invocation.stdout, strict=False):
             if not isinstance(event, dict) or event.get("type") != "assistant":
                 continue
             for block in (event.get("message") or {}).get("content") or []:
@@ -889,11 +890,16 @@ def observe_cell_query(
         redact_sensitive_text(invocation.provider_error, secrets)
         if invocation.provider_error is not None else None
     )
+    invocation_metadata = dict(invocation.metadata)
+    duplicate_keys = stream_duplicate_keys(invocation.stdout)
+    if duplicate_keys:
+        # The stream rule kept these lines (last value wins); the row says so.
+        invocation_metadata["stream_duplicate_keys"] = duplicate_keys[:20]
     redacted_invocation = invocation.with_wire_text(
         stdout=redacted_stdout,
         stderr=redacted_stderr,
         provider_error=redacted_provider_error,
-    ).with_metadata(redact_sensitive_value(dict(invocation.metadata), secrets))
+    ).with_metadata(redact_sensitive_value(invocation_metadata, secrets))
     redacted_detection = TriggerDetection(tuple(
         TriggerEvidence(item.kind, redact_sensitive_text(item.text, secrets))
         for item in detection.evidence

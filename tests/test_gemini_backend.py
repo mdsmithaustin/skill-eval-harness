@@ -1373,8 +1373,9 @@ class GeminiAnswerBackendTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "APIError: denied")
 
     def test_strict_json_failures_still_commit_raw_failure_artifacts(self):
-        for payload in ('{"type":"init","type":"init"}\n',
-                        '{"type":"result","value":NaN}\n'):
+        # A repeated object key used to be the second payload here; the stream
+        # rule now keeps such a line (see the duplicate-key test below).
+        for payload in ('{"type":"result","value":NaN}\n',):
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as td:
                 root = Path(td)
                 fake = root / "fake_gemini.py"
@@ -1394,6 +1395,26 @@ class GeminiAnswerBackendTests(unittest.TestCase):
                 metadata = json.loads((base / "metadata.json").read_text())
                 self.assertFalse(metadata["provider_response_complete"])
                 self.assertTrue(metadata["parse_errors"])
+
+    def test_duplicate_object_key_on_the_stream_is_kept_not_a_parse_failure(self):
+        # Gemini's stdout is an external CLI stream: a repeated key resolves
+        # last-value-wins and is recorded, so the line is not thrown away. The
+        # run still fails here only because the stream has no terminal result.
+        payload = '{"type":"init","session_id":"s","type":"init"}\n'
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake = root / "fake_gemini.py"
+            _write_executable(fake, f"import sys\nsys.stdout.write({payload!r})\n")
+            outcome = sb.GeminiBackend().invoke_answer(
+                sb.InvocationRequest("prompt", root / "workspace", None, 30),
+                gemini_cmd=str(fake))
+            base = root / "run"
+            sb.write_runner_outcome(base, outcome)
+            self.assertIsInstance(outcome, rc.ProviderFailed)
+            self.assertNotIn("duplicate", str(outcome.reason))
+            metrics = json.loads((base / "metrics.json").read_text())
+            self.assertNotIn("parse_errors", metrics)
+            self.assertEqual(metrics["stream_duplicate_keys"], ["line 1: type"])
 
     def test_invalid_utf8_provider_bytes_still_commit_failure_artifacts(self):
         with tempfile.TemporaryDirectory() as td:

@@ -766,10 +766,12 @@ class CodexRolloutDetectionTests(unittest.TestCase):
         adapter = tm.CodexAdapter(codex_cmd="codex exec --json")
         return adapter, workspace, adapter.mount(root / "tree", workspace)
 
-    def _observe(self, td: str, *, rollout: bool | str = True, stream_extra=None):
+    def _observe(self, td: str, *, rollout: bool | str = True, stream_extra=None,
+                 events: str | None = None):
         """Run one mocked Codex invocation. `rollout` is True (the fixture),
         False (none written), or a rollout text; `stream_extra` is a stream
-        line, or a callable given the mounted paths that returns one."""
+        line, or a callable given the mounted paths that returns one; `events`
+        replaces the default event-stream fixture."""
         root = Path(td)
         adapter, workspace, copied = self._mounted(root)
         extra = stream_extra(copied) if callable(stream_extra) else (stream_extra or "")
@@ -783,7 +785,7 @@ class CodexRolloutDetectionTests(unittest.TestCase):
                 day.mkdir(parents=True)
                 text = self._rollout(home) if rollout is True else rollout
                 (day / f"rollout-2026-09-13T13-30-23-{CODEX_THREAD_ID}.jsonl").write_text(text, encoding="utf-8")
-            lines = self._events().splitlines()
+            lines = (events if events is not None else self._events()).splitlines()
             if extra:
                 lines.insert(len(lines) - 1, extra)
             return InvocationOutcome.from_process(
@@ -821,6 +823,66 @@ class CodexRolloutDetectionTests(unittest.TestCase):
         self.assertEqual({item.kind for item in detection.evidence}, {TriggerEvidenceKind.MOUNTED_PATH})
         self.assertEqual(invocation.metadata["codex_rollout_status"], "not_found")
         self.assertNotIn("codex_rollout_home", invocation.metadata)
+
+    def test_stream_line_with_a_duplicate_id_does_not_lose_the_row(self):
+        # Observed live 2026-09-13: 10 of 30 Codex trigger rows died with
+        # `ValueError: duplicate object key: 'id'` because `codex exec --json`
+        # repeats `id` inside some items. The stream is the CLI's, not ours:
+        # the line is kept (last value wins) and the row says which lines were.
+        events = (CODEX_FIXTURES / "exec-duplicate-id-events.jsonl").read_text(encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "duplicate object key: 'id'"):
+            list(sb.iter_json_objects(events))   # the artifact rule still rejects it
+        with tempfile.TemporaryDirectory() as td:
+            invocation, detection, copied, _ = self._observe(td, rollout=True, events=events)
+        self.assertTrue(invocation.observation_complete, invocation.provider_error)
+        self.assertIsNone(invocation.provider_error)
+        self.assertEqual(sb.codex_thread_id(events), CODEX_THREAD_ID)
+        self.assertEqual(invocation.metadata["codex_rollout_status"], "found")
+        self.assertTrue(detection.triggered)
+        self.assertEqual({item.kind for item in detection.evidence}, {TriggerEvidenceKind.CODEX_ROLLOUT})
+        # The same stream through the shared path detector: the `ls` command is
+        # not a skill read, so nothing fires and nothing raises.
+        self.assertFalse(sb.detect_trigger_detection(events, copied).triggered)
+
+    def test_row_records_which_stream_lines_the_lenient_rule_kept(self):
+        events = (CODEX_FIXTURES / "exec-duplicate-id-events.jsonl").read_text(encoding="utf-8")
+
+        def fake_run(plan):
+            return InvocationOutcome.from_process(stdout=events, stderr="", returncode=0, elapsed_ms=1)
+
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(tm.CodexAdapter, "_run_argv", staticmethod(fake_run)), \
+             mock.patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "ambient-codex")}):
+            tree = Path(td) / "tree"
+            skill = tree / "unslop"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("---\nname: unslop\ndescription: Cut AI tells.\n---\n", encoding="utf-8")
+            row = tm.run_cell_query(
+                tm.CodexAdapter(codex_cmd="codex exec --json"), tree, "Use $unslop", True, None, 12,
+                metadata={"skill_tree_hash": sb.skill_tree_hash(tree)},
+            )
+        self.assertTrue(row["observation_complete"])
+        # The in-memory row holds the frozen mapping (a tuple); it persists as a JSON array.
+        self.assertEqual(list(row["invocation_metadata"]["stream_duplicate_keys"]), ["line 3: id"])
+        self.assertEqual(list(row["stream_duplicate_keys"]), ["line 3: id"])
+        self.assertEqual(row["usage_normalized"]["input_tokens"], 22215)   # telemetry survived too
+        clean = (CODEX_FIXTURES / "exec-skill-events.jsonl").read_text(encoding="utf-8")
+        self.assertEqual(sb.stream_duplicate_keys(clean), [])
+
+    def test_rollout_detector_keeps_the_strict_artifact_rule(self):
+        # The rollout is a persisted file, not the live stream. A sample of 40
+        # real rollouts (111,825 lines) had no duplicate-key line, so it keeps
+        # the artifact rule: a repeated key there is a defect, not tolerated.
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            rollout = self._rollout(home)
+            lines = rollout.splitlines()
+            lines.insert(2, json.dumps({"timestamp": "t", "ordinal": 9, "type": "event_msg",
+                                        "payload": {"type": "x"}})[:-1] + ',"type":"event_msg"}')
+            copied = [home / "skills" / "unslop" / "SKILL.md"]
+            with self.assertRaisesRegex(ValueError, "duplicate object key: 'type'"):
+                sb.codex_rollout_skill_loads("\n".join(lines) + "\n", ["unslop"], copied)
+            self.assertTrue(sb.codex_rollout_skill_loads(rollout, ["unslop"], copied))
 
     def test_rollout_without_a_mounted_skill_load_stays_negative(self):
         other = (CODEX_FIXTURES / "rollout-skill-injection.jsonl").read_text(encoding="utf-8")

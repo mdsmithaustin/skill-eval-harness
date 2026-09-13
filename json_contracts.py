@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, NoReturn
 
 
@@ -44,8 +45,14 @@ def unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def strict_json_loads(value: str | bytes | bytearray) -> Any:
-    """Parse strict, persistable JSON without last-key-wins shadowing."""
+def _persistable_json_loads(
+    value: str | bytes | bytearray,
+    object_pairs_hook: Callable[[list[tuple[str, Any]]], dict[str, Any]],
+    label: str,
+) -> Any:
+    """The shared body of both JSON boundaries: reject non-finite constants and
+    prove the parsed value can be re-serialized into a harness artifact. Only
+    the duplicate-key rule differs between the two boundaries."""
     def reject_constant(constant: str) -> Any:
         raise json.JSONDecodeError(
             f"non-finite numeric constant is not valid JSON: {constant}", "", 0)
@@ -53,15 +60,66 @@ def strict_json_loads(value: str | bytes | bytearray) -> Any:
     try:
         parsed = json.loads(
             value,
-            object_pairs_hook=unique_json_object,
+            object_pairs_hook=object_pairs_hook,
             parse_constant=reject_constant,
         )
-        validate_json_value(parsed, "strict JSON")
+        validate_json_value(parsed, label)
         return parsed
     except json.JSONDecodeError:
         raise
     except (OverflowError, RecursionError, TypeError, ValueError) as exc:
         raise json.JSONDecodeError(str(exc), "", 0) from exc
+
+
+def strict_json_loads(value: str | bytes | bytearray) -> Any:
+    """Parse strict, persistable JSON without last-key-wins shadowing.
+
+    This is the boundary for artifacts the harness authors or validates
+    (manifests, prepared tasks, run sidecars, judge rows, reports): a repeated
+    object key there is a defect in the artifact and is rejected. Bytes an
+    external agent CLI wrote go through `parse_stream_json` instead.
+    """
+    return _persistable_json_loads(value, unique_json_object, "strict JSON")
+
+
+@dataclass(frozen=True)
+class StreamJSONParse:
+    """One parsed line of an external CLI stream plus the duplicate object
+    keys the last-value-wins rule resolved, in document order."""
+
+    value: Any
+    duplicate_keys: tuple[str, ...]
+
+
+def parse_stream_json(value: str | bytes | bytearray) -> StreamJSONParse:
+    """Parse one JSON value an external agent CLI emitted on its live stream.
+
+    The harness does not author those bytes, so a repeated object key is not
+    an artifact defect to reject: `codex exec --json` repeats `id` on some
+    event lines, and rejecting the line threw away the whole row. Duplicate
+    keys resolve last-value-wins, the same rule as stdlib `json.loads`, and the
+    repeated key names are returned so a row can record that the lenient rule
+    was exercised. Everything else is as strict as `strict_json_loads`:
+    non-finite constants and non-persistable values are still rejected because
+    the parsed value is re-serialized into harness artifacts.
+    """
+    duplicates: list[str] = []
+
+    def last_value_wins(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                duplicates.append(key)
+            result[key] = item
+        return result
+
+    parsed = _persistable_json_loads(value, last_value_wins, "stream JSON")
+    return StreamJSONParse(parsed, tuple(duplicates))
+
+
+def stream_json_loads(value: str | bytes | bytearray) -> Any:
+    """`parse_stream_json` for callers that only need the value."""
+    return parse_stream_json(value).value
 
 
 def _validate_json_value(

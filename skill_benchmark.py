@@ -152,6 +152,8 @@ from jetty_contracts import (
     lifecycle_from_status,
 )
 from json_contracts import (
+    parse_stream_json,
+    stream_json_loads,
     strict_json_loads,
     thaw_json_value,
     unique_json_object,
@@ -548,14 +550,20 @@ def emit_report(report: Any, out: str | Path | None) -> None:
         print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
 
 
-def iter_json_objects(text: str):
+def iter_json_objects(text: str, *, strict: bool = True):
     """Yield each parseable JSON value found line-by-line in a runner's stream,
     silently skipping non-JSON lines. The one scanning loop shared by trigger
     detection, stream telemetry, and the agent adapters — previously five
-    hand-rolled copies of the same try/except."""
+    hand-rolled copies of the same try/except.
+
+    `strict=True` applies the artifact rule (a repeated object key raises);
+    `strict=False` applies the external-CLI stream rule (`stream_json_loads`:
+    last value wins), for bytes an agent CLI emitted and the harness does not
+    control. A line that is not JSON is skipped either way."""
+    loads = strict_json_loads if strict else stream_json_loads
     for line in text.splitlines():
         try:
-            yield strict_json_loads(line)
+            yield loads(line)
         except json.JSONDecodeError as exc:
             if (exc.__cause__ is not None
                     or "duplicate object key" in exc.msg
@@ -6439,7 +6447,7 @@ def raw_trace_record_for_ref(run_base: Path | None, ref: Any) -> dict[str, Any] 
     for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
         if i == line_no:
             try:
-                record = strict_json_loads(line)
+                record = stream_json_loads(line)   # same rule that produced the raw_ref
             except json.JSONDecodeError:
                 return None
             return record if isinstance(record, dict) else None
@@ -6576,7 +6584,7 @@ def detect_trigger_records(records: Iterable[dict[str, Any]], copied_paths: list
 def detect_trigger_detection(stdout: str, copied_paths: list[Path],
                              *, source: str = "generic") -> TriggerDetection:
     """Typed skill-invocation detector for a raw JSON event stream."""
-    records = [event for event in iter_json_objects(stdout) if isinstance(event, dict)]
+    records = [event for event in iter_json_objects(stdout, strict=False) if isinstance(event, dict)]
     return detect_trigger_records(records, copied_paths, source=source)
 
 
@@ -7341,22 +7349,36 @@ def stringify_trace_value(value: Any) -> str:
 
 
 def parse_trace_jsonl_text_with_lines(
-    text: str, *, strict_json_errors: bool = True,
-) -> tuple[list[dict[str, Any]], list[str], list[int]]:
+    text: str, *, strict_json_errors: bool = True, strict: bool = True,
+) -> tuple[list[dict[str, Any]], list[str], list[int], list[str]]:
     """Parse JSONL while retaining each object's physical source line.
 
     Blank, malformed, and non-object lines do not become records, but they do
     occupy source lines. Keeping that mapping makes every emitted raw_ref
     resolvable against the original trace.jsonl rather than a filtered ordinal.
+
+    `strict=True` is the artifact rule (`strict_json_loads`: a repeated object
+    key is a defect). `strict=False` is the external-CLI stream rule
+    (`parse_stream_json`: a repeated key resolves last-value-wins and is
+    reported in the fourth result as `line N: key`), so a valid line an agent
+    CLI emitted is never dropped. Every other failure is unchanged: a line that
+    is not JSON is skipped and recorded, and a non-finite constant raises (or
+    is recorded when `strict_json_errors` is off).
     """
     records: list[dict[str, Any]] = []
     errors: list[str] = []
     record_lines: list[int] = []
+    duplicate_keys: list[str] = []
     for line_number, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
         try:
-            obj = strict_json_loads(line)
+            if strict:
+                obj = strict_json_loads(line)
+            else:
+                parsed = parse_stream_json(line)
+                obj = parsed.value
+                duplicate_keys.extend(f"line {line_number}: {key}" for key in parsed.duplicate_keys)
         except json.JSONDecodeError as exc:
             if ("duplicate object key" in exc.msg
                     or "non-finite numeric constant" in exc.msg
@@ -7374,16 +7396,30 @@ def parse_trace_jsonl_text_with_lines(
             record_lines.append(line_number)
         else:
             errors.append(f"line {line_number}: JSON value is not an object")
-    return records, errors, record_lines
+    return records, errors, record_lines, duplicate_keys
 
 
-def parse_trace_jsonl_text(text: str) -> tuple[list[dict[str, Any]], list[str]]:
-    records, errors, _ = parse_trace_jsonl_text_with_lines(text)
+def parse_trace_jsonl_text(
+    text: str, *, strict: bool = True,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    records, errors, _, _ = parse_trace_jsonl_text_with_lines(text, strict=strict)
     return records, errors
 
 
+def stream_duplicate_keys(text: str) -> list[str]:
+    """`line N: key` for every duplicate object key the stream rule resolved in
+    an external CLI stream; empty when the strict rule would have accepted
+    every line. Never raises: it only annotates a row."""
+    _, _, _, duplicates = parse_trace_jsonl_text_with_lines(
+        text, strict_json_errors=False, strict=False)
+    return duplicates
+
+
 def load_trace_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
-    return parse_trace_jsonl_text(path.read_text(encoding="utf-8", errors="replace"))
+    # trace.jsonl is the provider's stream preserved verbatim, so it is read
+    # with the stream rule the writer used; the harness-authored sidecars
+    # (events.json, metrics.json, metadata.json) stay on the strict rule.
+    return parse_trace_jsonl_text(path.read_text(encoding="utf-8", errors="replace"), strict=False)
 
 
 def nested_item_type(record: dict[str, Any]) -> str:
@@ -7738,7 +7774,7 @@ def vibe_stream_flat_records(records: list[dict[str, Any]], *,
                     continue
                 if isinstance(arguments, str):
                     try:
-                        arguments = strict_json_loads(arguments)
+                        arguments = stream_json_loads(arguments)
                     except json.JSONDecodeError:
                         invalid(line, "tool call arguments must be a JSON object")
                         continue
@@ -7937,7 +7973,7 @@ def _pi_stream_semantics(records: list[dict[str, Any]], pi_stream: PiStream | No
 
 
 def _generic_usage_and_cost_blocks(raw_text: str, pi_stream: PiStream | None) -> tuple[dict[str, Any], dict[str, Any]]:
-    records = [obj for obj in iter_json_objects(raw_text) if isinstance(obj, dict)]
+    records = [obj for obj in iter_json_objects(raw_text, strict=False) if isinstance(obj, dict)]
     return _generic_stream_usage_and_cost(records)
 
 
@@ -8334,7 +8370,7 @@ class PiStream:
     def parse(cls, raw_text: str) -> PiStream:
         if not isinstance(raw_text, str):
             raise TypeError("Pi stream must be text")
-        records, errors = parse_trace_jsonl_text(raw_text)
+        records, errors = parse_trace_jsonl_text(raw_text, strict=False)
         return cls.from_records(records, errors)
 
 
@@ -8377,8 +8413,8 @@ def write_trace_artifacts(
     run_dir.mkdir(parents=True, exist_ok=True)
     if write_raw_trace:
         (run_dir / "trace.jsonl").write_text(trace_text, encoding="utf-8")
-    parsed_records, parsed_errors, record_lines = parse_trace_jsonl_text_with_lines(
-        trace_text, strict_json_errors=not retain_invalid_provider_trace)
+    parsed_records, parsed_errors, record_lines, duplicate_keys = parse_trace_jsonl_text_with_lines(
+        trace_text, strict_json_errors=not retain_invalid_provider_trace, strict=False)
     if source.casefold() == "pi" and pi_stream is not None:
         records, parse_errors = list(pi_stream.records), list(pi_stream.parse_errors)
         if len(record_lines) != len(records):
@@ -8401,6 +8437,9 @@ def write_trace_artifacts(
     if parse_errors:
         metrics["parse_errors"] = parse_errors[:20]
         metrics["errors"] = int(metrics.get("errors", 0) or 0) + len(parse_errors)
+    if duplicate_keys:
+        # The stream rule kept these lines (last value wins); say so in the row.
+        metrics["stream_duplicate_keys"] = duplicate_keys[:20]
     # A trace-derived count is observed only when at least one valid event was
     # captured and parsing completed. Completion is derived here and reserved:
     # arbitrary caller metrics cannot promote an absent trace.
@@ -8413,7 +8452,7 @@ def write_trace_artifacts(
         "telemetry_schema_version", "usage_normalized", "cost_normalized",
         "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
         "cache_write_tokens", "cache_creation_tokens", "cost_usd", "otel",
-        "parse_errors", "trace_protocol_errors",
+        "parse_errors", "trace_protocol_errors", "stream_duplicate_keys",
         "skill_invoked", "skill_invocation_evidence", "retries",
         "repeated_command_max", "commands", "tool_calls", "file_reads",
         "file_writes", "errors", "schema_version", "source",
@@ -9095,7 +9134,7 @@ class CodexRollout:
 
 def codex_thread_id(stdout: str) -> str | None:
     """The thread id Codex announces in its `thread.started` event."""
-    for record in iter_json_objects(stdout):
+    for record in iter_json_objects(stdout, strict=False):
         if isinstance(record, dict) and record.get("type") == "thread.started":
             thread_id = record.get("thread_id")
             if isinstance(thread_id, str) and thread_id.strip():
@@ -10209,9 +10248,9 @@ def parse_vibe_messages_with_errors(
     if not text:
         return [], ["Vibe stream is empty"]
     try:
-        parsed = strict_json_loads(text)
+        parsed = stream_json_loads(text)
     except json.JSONDecodeError:
-        return parse_trace_jsonl_text(text)
+        return parse_trace_jsonl_text(text, strict=False)
     if isinstance(parsed, list):
         errors = [f"Vibe message {index} is not an object"
                   for index, item in enumerate(parsed, 1)
@@ -10300,7 +10339,7 @@ def vibe_trace_text(messages: list[dict[str, Any]], stdout: str) -> str:
 
 def vibe_skill_tool_evidence(stdout: str, skill_names: list[str]) -> list[str]:
     """Detect only completed, schema-valid Vibe `skill` tool lifecycles."""
-    records, errors = parse_trace_jsonl_text(stdout)
+    records, errors = parse_trace_jsonl_text(stdout, strict=False)
     if errors:
         return []
     events, metrics = normalize_trace_records(records, source="vibe")
@@ -10673,9 +10712,9 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     env: dict[str, Any] | None = None
     stripped = text.strip()
     try:
-        single = strict_json_loads(stripped)
+        single = stream_json_loads(stripped)
     except json.JSONDecodeError:
-        records, errors = parse_trace_jsonl_text(text)
+        records, errors = parse_trace_jsonl_text(text, strict=False)
         results = [record for record in records if record.get("type") == "result"]
         if errors:
             return {"answer": "", "raw_response": text, "cost_usd": None,
@@ -11126,7 +11165,7 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
         "Codex final message is not valid UTF-8"
         if not last_message_utf8_valid else None)
     if result.stdout.strip() and result.stdout_utf8_valid:
-        records, parse_errors = parse_trace_jsonl_text(result.stdout)
+        records, parse_errors = parse_trace_jsonl_text(result.stdout, strict=False)
         trace_protocol_error = (
             _codex_trace_protocol_error(records, None)
             if records and not parse_errors else "invalid Codex JSON stream")
