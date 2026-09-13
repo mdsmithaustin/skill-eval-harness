@@ -563,7 +563,7 @@ For manifest or grading changes, add or update `tests/test_skill_benchmark.py`. 
 ## Non-goals
 
 - Grading and aggregation do not call a model. Model execution happens outside that path, except for the explicit runner/judge commands that exist to call one: `run-codex`, `run-claude`, `run-agent`, `run-jetty`, and `judge` (via `--judge-cmd` or a native `--judge-backend`).
-- The harness does not decide qualitative truth by itself; it emits judge prompts, runs a judge (an opt-in `--judge-cmd`, or a native `--judge-backend` plus `--judge-model`), and merges the returned JSON — recording which backend/model produced each verdict.
+- The harness does not decide qualitative truth by itself; it emits judge prompts, runs a judge (an opt-in `--judge-cmd`, or a native `--judge-backend` plus `--judge-model`), and merges the returned JSON — recording which backend/model produced each verdict. The judge prompt is blind to the arm: it carries no `judge_task_id` or `variant`, and arm-named run-path segments (`with_skill/`, `without_skill/`, `old_skill/`, `ablation:<id>/`) in candidate output, trajectory events, or artifact paths are rewritten to `arm/`, so the `with_skill` and `without_skill` prompts for one case differ only in the candidate output; the task record and result row keep both fields for pairing.
 - Hidden prompts are not protected if you pass `--include-answer-key` to generation jobs.
 - A passing answer benchmark does not prove autonomous skill loading; run `skill-trigger-matrix` (any adapter-backed agent × model) or `skill-pi-trigger-eval` (Pi, with ablation arms) for that.
 

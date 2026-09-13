@@ -167,7 +167,11 @@ from judge_verdict import (
     verdict_from_dict,
 )
 from manifest_contracts import (
+    ABLATION_VARIANT_PREFIX,
     DEFAULT_EXECUTION_VARIANTS,
+    OLD_SKILL,
+    WITH_SKILL,
+    WITHOUT_SKILL,
     CaseId,
     CaseKind,
     CasePopulation,
@@ -11752,12 +11756,30 @@ def verdict_schema_for(assertion: dict[str, Any]) -> dict[str, Any]:
             "properties": {"passed": {"type": "boolean"}, "score": {"type": "number"}, "rationale": {"type": "string"}}}
 
 
+# Arm-named run-directory segments (`<case>/<variant>/run-N/...`). Candidate
+# output, trajectory events, and artifact paths can echo the run's own path, and
+# a judge that reads `with_skill/` in it is no longer blind. Only path segments
+# are neutralized so graded content is otherwise untouched.
+JUDGE_ARM_PATH_SEGMENT = re.compile(
+    r"(?<=[/\\])(?:"
+    + "|".join(re.escape(name) for name in (WITH_SKILL, WITHOUT_SKILL, OLD_SKILL))
+    + "|" + re.escape(ABLATION_VARIANT_PREFIX) + r"[^/\\\s\"]+"
+    + r")(?=[/\\])"
+)
+
+
+def blind_judge_payload_text(text: str) -> str:
+    """Replace arm-named path segments in serialized judge material with `arm`."""
+    return JUDGE_ARM_PATH_SEGMENT.sub("arm", text)
+
+
 def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | None = None, metrics: dict | None = None, artifacts: list | None = None, explore_dir: str | None = None, steps: list | None = None) -> str:
     assertion = task.get("assertion", {})
+    # The judge is blind to the arm: judge_task_id (`case::variant::run-N::…`)
+    # and variant stay on the task record and the result row for pairing, but
+    # neither reaches the model. run_number is arm-neutral (every arm has run-N).
     payload = {
-        "judge_task_id": task.get("judge_task_id"),
         "case_id": task.get("case_id"),
-        "variant": task.get("variant"),
         "run_number": task.get("run_number"),
         "prompt": task.get("prompt"),
         "expected_behavior": task.get("expected_behavior", []),
@@ -11792,6 +11814,7 @@ def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | N
     # G4: hand the model the exact schema the validator enforces (purely additive
     # instruction — the parse path is unchanged).
     schema_hint = "Your output MUST validate against this JSON Schema:\n" + json.dumps(verdict_schema_for(assertion)) + "\n\n"
+    payload_text = blind_judge_payload_text(json.dumps(payload, indent=2, ensure_ascii=False))
     if is_per_step_assertion(assertion):
         return (
             "You are grading one Skill Eval Harness judge assertion PER STEP of the run's trajectory.\n"
@@ -11802,7 +11825,7 @@ def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | N
             "entry per step, using each step's given name, in the given order), rationale (string).\n"
             + context_hint
             + schema_hint
-            + json.dumps(payload, indent=2, ensure_ascii=False)
+            + payload_text
         )
     if assertion.get("graded_dimensions"):
         return (
@@ -11812,7 +11835,7 @@ def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | N
             "Return only JSON with keys: dimension_scores (object mapping each dimension name to a number), rationale (string).\n"
             + context_hint
             + schema_hint
-            + json.dumps(payload, indent=2, ensure_ascii=False)
+            + payload_text
         )
     if assertion.get("dynamic_rubric"):
         minimum = (assertion.get("dynamic_rubric") or {}).get("minimum_criteria", 3)
@@ -11823,7 +11846,7 @@ def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | N
             "Return only JSON with keys: criteria (list of {name (string), met (boolean)}), rationale (string).\n"
             + context_hint
             + schema_hint
-            + json.dumps(payload, indent=2, ensure_ascii=False)
+            + payload_text
         )
     plain_contract = (
         "Return only JSON with keys: score (required normalized number in [0, 1]), "
@@ -11837,7 +11860,7 @@ def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | N
         + plain_contract
         + context_hint
         + schema_hint
-        + json.dumps(payload, indent=2, ensure_ascii=False)
+        + payload_text
     )
 
 

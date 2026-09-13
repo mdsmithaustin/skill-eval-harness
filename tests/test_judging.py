@@ -26,6 +26,7 @@ from helpers import (
     write_demo_manifest as write_manifest,
 )
 
+from helpers import judge_task
 import judge_contracts as jc
 import judge_verdict as jv
 import skill_benchmark as sb
@@ -1675,6 +1676,66 @@ class JudgeAlignmentTests(unittest.TestCase):
         self.assertEqual(sb.kappa_band(0.0), "poor (<= chance)")
         self.assertEqual(sb.kappa_band(-0.2), "poor (<= chance)")
         self.assertIsNone(sb.kappa_band(None))
+
+
+class BlindJudgePromptTests(unittest.TestCase):
+    """The judge grades an arm it cannot name: with_skill/without_skill/old_skill
+    and ablation tasks for one case render byte-identical prompts apart from
+    the candidate output. Arm identity stays on the task record and result row
+    (judge_task_id, variant) so aggregation still pairs verdicts."""
+
+    ARMS = ("with_skill", "without_skill", "old_skill", "ablation:no-examples")
+
+    @staticmethod
+    def _split(prompt: str) -> tuple[str, dict]:
+        # Header text, then the JSON payload (json.dumps escapes newlines inside
+        # strings, so the first blank line before "{" is the payload boundary).
+        head, body = prompt.split("\n\n{\n", 1)
+        return head, json.loads("{\n" + body)
+
+    def test_with_and_without_skill_prompts_are_byte_identical(self):
+        with_skill = judge_task("c", "with_skill", output_path="/runs/c/with_skill/run-1/output.md")
+        without_skill = judge_task("c", "without_skill", output_path="/runs/c/without_skill/run-1/output.md")
+        self.assertNotEqual(with_skill["judge_task_id"], without_skill["judge_task_id"])   # records still pair
+        same_output = "The answer."
+        self.assertEqual(sb.judge_prompt(with_skill, same_output), sb.judge_prompt(without_skill, same_output))
+        a = sb.judge_prompt(with_skill, "first answer")
+        b = sb.judge_prompt(without_skill, "second answer")
+        head_a, payload_a = self._split(a)
+        head_b, payload_b = self._split(b)
+        self.assertEqual(head_a, head_b)
+        self.assertEqual(payload_a.pop("candidate_output"), "first answer")
+        self.assertEqual(payload_b.pop("candidate_output"), "second answer")
+        self.assertEqual(payload_a, payload_b)
+        for prompt in (a, b):
+            self.assertNotIn("with_skill", prompt)
+            self.assertNotIn("judge_task_id", prompt)
+            self.assertNotIn("variant", prompt)
+
+    def test_every_arm_renders_the_same_prompt(self):
+        prompts = {sb.judge_prompt(judge_task("c", arm), "out") for arm in self.ARMS}
+        self.assertEqual(len(prompts), 1)
+
+    def test_arm_named_run_paths_are_neutralized_in_output_and_trajectory(self):
+        # A candidate output or trajectory event that echoes its own run path
+        # would otherwise name the arm.  Both separators, all arm spellings.
+        prompts = set()
+        for arm in self.ARMS:
+            output = f"wrote /runs/c/{arm}/run-1/notes.md and C:\\runs\\c\\{arm}\\run-1\\notes.md"
+            events = [{"type": "file_read", "path": f"/runs/c/{arm}/run-1/workspace/SKILL.md", "status": "completed"}]
+            prompts.add(sb.judge_prompt(judge_task("c", arm), output, trajectory=events))
+        self.assertEqual(len(prompts), 1)
+        prompt = prompts.pop()
+        self.assertIn("/runs/c/arm/run-1/notes.md", prompt)
+        self.assertIn("/runs/c/arm/run-1/workspace/SKILL.md", prompt)
+        for arm in self.ARMS:
+            self.assertNotIn(arm, prompt)
+
+    def test_scrub_touches_only_path_segments(self):
+        # Prose that happens to contain an arm word is graded content, not a path.
+        self.assertEqual(sb.blind_judge_payload_text("done with_skill and care"), "done with_skill and care")
+        self.assertEqual(sb.blind_judge_payload_text("/a/with_skill/b"), "/a/arm/b")
+        self.assertEqual(sb.blind_judge_payload_text("/a/with_skill"), "/a/with_skill")   # not a directory segment
 
 
 if __name__ == "__main__":
