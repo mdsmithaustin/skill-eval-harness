@@ -228,7 +228,8 @@ Rules:
 1. For each `skill_root` referenced by the ablation, copy that root's **complete
    directory** into a fresh temp dir — the whole tree, not a `SKILL.md` plus a
    three-directory whitelist, because the format permits arbitrary files. Roots
-   are kept **separate** (keyed by their relative path), never merged into one
+   are kept **separate** (each under its own skill directory name, the ONE key
+   `skill_root_key` derives for every built tree), never merged into one
    `<skill_name>/SKILL.md`. This replaces `copy_skill_source` /
    `copy_skill_to_config`, which collapse and overwrite roots.
 2. Resolve every component against the **original** copy of its named root to a

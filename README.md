@@ -261,6 +261,8 @@ Each skill repo owns an `evals/shared-benchmark.json` manifest. Add a `harness` 
 
 Use optional `files` for fixture-backed evals. Paths are relative to the manifest's `evals/` directory, validated by `validate`, and emitted by `prepare` as absolute `input_files` for the runner.
 
+`skill_paths` entries are relative to the repo root (the manifest's parent directory, or its grandparent when the manifest is `evals/shared-benchmark.json`) and name either a `SKILL.md` or the skill directory that holds one. Every built tree — the canonical `with_skill` tree, each materialized ablation, an answer runner's workspace, and the skills directory a trigger adapter mounts — places a root under its own skill directory name, which is what Agent Skills discovery expects: `skills/good-pr/SKILL.md` and `skills/good-pr` both mount as `good-pr`. A per-skill manifest at `<skill>/evals/shared-benchmark.json` declares `"skill_paths": ["SKILL.md"]`; that skill directory is the repo root, so its mount name is the frontmatter `name`, never the checkout's directory name. Two roots that would mount under the same name are rejected.
+
 Further optional manifest surfaces (each with a behavior-preserving default; see `docs/migrating-evals.md`):
 
 - `version`: 1 or 2 — `skill-benchmark migrate` upgrades 1 → 2 by stamping the defaults explicitly.

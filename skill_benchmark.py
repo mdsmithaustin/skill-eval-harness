@@ -43,7 +43,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass as _dataclass
 from decimal import ROUND_CEILING, Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn, Protocol, cast
 
 # Direct ``python skill_benchmark.py`` execution must share the canonical module
@@ -1638,12 +1638,12 @@ def prepared_task_rows(
                     "no applicable gate or critical grading oracle")
     repo_root = repo_root_for_manifest(manifest_path)
     real_skill_paths = [str((repo_root / p).resolve()) for p in manifest.get("skill_paths", [])]
-    real_skill_root_keys = [_skill_root_key(p) for p in manifest.get("skill_paths", [])]
+    real_skill_root_keys = skill_root_keys_for(repo_root, manifest.get("skill_paths", []))
     # The old/baseline arm's files, resolved ONCE here so every runner reads the
     # same row field instead of each re-deriving them (the divergence that let
     # Codex mount the current skill for an old_skill arm while Jetty mounted the old).
     old_skill_paths = [str((repo_root / p).resolve()) for p in manifest.get("old_skill_paths", [])]
-    old_skill_root_keys = [_skill_root_key(p) for p in manifest.get("old_skill_paths", [])]
+    old_skill_root_keys = skill_root_keys_for(repo_root, manifest.get("old_skill_paths", []))
     # When an ablation directory is provided, materialize each declared-removal
     # ablation once and point its rows at the altered tree. A caller that has
     # already materialized (e.g. export-jetty, which also needs the trees for
@@ -1700,7 +1700,7 @@ def prepared_task_rows(
                     # Materialized: carry the arm's TYPED provenance straight through —
                     # no dict round-trip, no re-parse (the drop-then-reparse is gone).
                     skill_paths = list(trees[aid].skill_files.values())   # mounted files == ablated tree
-                    skill_root_keys = [_skill_root_key(root) for root in trees[aid].skill_files]
+                    skill_root_keys = skill_root_keys_for(repo_root, list(trees[aid].skill_files))
                     record = trees[aid].arm.provenance
                 else:
                     # Instruction-simulated: no tree, original skill mounted; its typed
@@ -2280,13 +2280,60 @@ def resolve_skill_root(comp: dict[str, Any], skill_paths: list[str]) -> str | No
     return r if r is not None else (skill_paths[0] if skill_paths else None)
 
 
-def _skill_root_key(rel: str) -> str:
-    """Sanitized directory name for a skill root inside a built tree. The SAME
-    function must name the canonical (with_skill) tree and the materialized pre-edit
-    tree, because _hash_tree includes this directory name — any divergence would make
-    canonical_skill_tree_hash != the ablation's parent_skill_hash and break
-    TreeIdentity.same_revision_as."""
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", rel)
+def skill_root_key(repo_root: Path, rel: str) -> str:
+    """Directory name a skill root is mounted under inside every built tree (the
+    canonical with_skill tree, a materialized ablation's pre-edit and edited trees,
+    an answer workspace's skills/, and the skills dir every trigger adapter mounts).
+
+    The key is the skill's own directory name: the parent directory of a SKILL.md
+    path, or the directory itself when the path names one. The Agent Skills
+    specification discovers a skill through a directory named after it, so
+    sanitizing the manifest string instead (`skills_good-pr_SKILL.md`, and
+    `SKILL.md/SKILL.md` for a per-skill manifest's `SKILL.md`) broke discovery for
+    every layout. A root that IS the repo root has no directory segment of its own;
+    its key is the SKILL.md frontmatter `name`, never the checkout's basename, so
+    the tree hash cannot depend on where the repo was cloned.
+
+    This is the ONE owner of the key. _hash_tree includes this directory name, so
+    any second derivation would make canonical_skill_tree_hash != the ablation's
+    parent_skill_hash and break TreeIdentity.same_revision_as. skill_root_keys_for
+    adds the collision gate on top of it."""
+    src = Path(repo_root) / rel
+    rel_dir = PurePosixPath(rel) if src.is_dir() else PurePosixPath(rel).parent
+    name = rel_dir.name
+    if name in {"", "."}:
+        skill_md = src / "SKILL.md" if src.is_dir() else src
+        if skill_md.name != "SKILL.md" or not skill_md.is_file():
+            raise AblationError(
+                f"skill root {rel!r} is the repo root itself, so its mount name comes from "
+                f"SKILL.md frontmatter, but {skill_md} is not a SKILL.md file")
+        value = frontmatter_value(skill_md.read_text(encoding="utf-8", errors="replace"), "name")
+        if not isinstance(value, str) or not value.strip():
+            raise AblationError(
+                f"skill root {rel!r} is the repo root itself, so its mount name comes from "
+                f"SKILL.md frontmatter, but {skill_md} has no non-empty name field")
+        name = value.strip()
+    key = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+    if not key or key in {".", ".."}:
+        raise AblationError(f"skill root {rel!r} does not yield a usable mount directory name ({key!r})")
+    return key
+
+
+def skill_root_keys_for(repo_root: Path, skill_paths: Sequence[str]) -> list[str]:
+    """Mount keys for skill roots, in declaration order, refusing two roots that
+    would share a directory in the built tree (the copier would otherwise raise an
+    unwrapped FileExistsError mid-materialization)."""
+    keys: list[str] = []
+    seen: dict[str, str] = {}
+    for rel in skill_paths:
+        key = skill_root_key(repo_root, rel)
+        if key in seen:
+            raise AblationError(
+                f"skill roots {seen[key]!r} and {rel!r} both mount as {key!r}; each skill "
+                "directory name must be unique across skill_paths, so rename one skill directory")
+        seen[key] = rel
+        keys.append(key)
+    return keys
 
 
 def derived_population(components: list[dict[str, Any]]) -> str:
@@ -2745,14 +2792,9 @@ def _reject_overlapping_skill_roots(repo_root: Path, manifest: dict[str, Any]) -
                 raise AblationError(f"skill roots {ri!r} and {rj!r} are copied from the same directory {di}; the ablated copy and an unablated copy would coexist — declare a single root")
             if di in dj.parents:
                 raise AblationError(f"skill root {ri!r} (dir {di}) is an ancestor of skill root {rj!r}; copying it would include an unablated duplicate of {rj!r} — declare non-overlapping roots")
-    # Distinct roots whose sanitized tree-key collides would overwrite each other in
-    # the built tree (an otherwise-unwrapped FileExistsError); reject as an AblationError.
-    seen_keys: dict[str, str] = {}
-    for r in manifest.get("skill_paths", []):
-        k = _skill_root_key(r)
-        if k in seen_keys:
-            raise AblationError(f"skill roots {seen_keys[k]!r} and {r!r} both map to tree key {k!r}; rename one so their built directories do not collide")
-        seen_keys[k] = r
+    # Distinct roots whose mount key collides would overwrite each other in the
+    # built tree (an otherwise-unwrapped FileExistsError); the key owner rejects that.
+    skill_root_keys_for(repo_root, manifest.get("skill_paths", []))
 
 
 def _copy_skill_root(src_dir: Path, dst_dir: Path) -> None:
@@ -3125,10 +3167,10 @@ def materialize(validated: ValidatedAblation, out_root: Path) -> MaterializedArm
         # Copy EVERY manifest root (not just the ones a component touches) so the
         # ablated arm has the same file surface as with_skill, differing only by
         # the declared edits.
-        for r in (skill_paths or list(dict.fromkeys(root_for(c) for c in comps))):
+        rels = list(skill_paths or dict.fromkeys(root_for(c) for c in comps))
+        for r, key in zip(rels, skill_root_keys_for(repo_root, rels), strict=True):
             src = _safe_under(repo_root, repo_root / r)
             src_dir = src if src.is_dir() else src.parent
-            key = _skill_root_key(r)
             dst_dir = tmp / key
             _copy_skill_root(src_dir, dst_dir)
             main = dst_dir / "SKILL.md" if (src.is_dir() or src.name == "SKILL.md") else dst_dir / src.name
@@ -3253,10 +3295,11 @@ def build_canonical_skill_tree(repo_root: Path, manifest: dict[str, Any], dest_d
     _reject_overlapping_skill_roots(repo_root, manifest)
     _reject_output_root_overlap(dest_dir, repo_root, manifest)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    for r in manifest.get("skill_paths", []):
+    rels = list(manifest.get("skill_paths", []))
+    for r, key in zip(rels, skill_root_keys_for(repo_root, rels), strict=True):
         src = _safe_under(repo_root, repo_root / r)
         src_dir = src if src.is_dir() else src.parent
-        _copy_skill_root(src_dir, dest_dir / _skill_root_key(r))
+        _copy_skill_root(src_dir, dest_dir / key)
     return dest_dir
 
 
