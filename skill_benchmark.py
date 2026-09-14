@@ -680,8 +680,15 @@ def case_prompt(case: dict[str, Any], manifest_path: Path, allow_missing: bool =
 
 
 def repo_root_for_manifest(manifest_path: Path) -> Path:
-    if manifest_path.name == "shared-benchmark.json" and manifest_path.parent.name == "evals":
-        return manifest_path.parent.parent.resolve()
+    """A skill installer copies a skill directory verbatim, so a manifest under
+    <base>/evals/<skill>/ (not just <base>/evals/) lets eval files sit outside
+    the tree that reaches consumers."""
+    if manifest_path.name == "shared-benchmark.json":
+        evals_dir = manifest_path.parent
+        if evals_dir.name != "evals":
+            evals_dir = evals_dir.parent
+        if evals_dir.name == "evals":
+            return evals_dir.parent.resolve()
     return manifest_path.parent.resolve()
 
 

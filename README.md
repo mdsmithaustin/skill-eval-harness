@@ -201,7 +201,7 @@ skill-benchmark --help
 
 ## Manifest format
 
-Each skill repo owns an `evals/shared-benchmark.json` manifest. Add a `harness` block so readers know which external harness/version to install.
+Each skill repo owns a `shared-benchmark.json` manifest in one of two places. The first is `evals/shared-benchmark.json`, at the repo root or inside a skill directory as `skills/<name>/evals/shared-benchmark.json`. The second is `evals/<name>/shared-benchmark.json`, one directory per skill at the repo root. The second layout exists because a skill installer such as `npx skills` copies a skill directory verbatim, so a manifest under `skills/<name>/evals/` ships fixtures, prompts, and oracles to everyone who installs the skill. `evals/<name>/shared-benchmark.json` keeps those files out of the published directory while `"skill_paths": ["skills/<name>/SKILL.md"]` still resolves. Add a `harness` block so readers know which external harness/version to install.
 
 ```json
 {
@@ -259,9 +259,9 @@ Each skill repo owns an `evals/shared-benchmark.json` manifest. Add a `harness` 
 
 `prepare` fails on missing hidden prompts unless `--allow-missing-prompts` is used for dry-run planning.
 
-Use optional `files` for fixture-backed evals. Paths are relative to the manifest's `evals/` directory, validated by `validate`, and emitted by `prepare` as absolute `input_files` for the runner.
+Use optional `files` for fixture-backed evals. Paths are relative to the manifest's own directory, validated by `validate`, and emitted by `prepare` as absolute `input_files` for the runner. `prompt_ref` and script-oracle commands resolve against that same directory, never against the repo root. Under the `evals/<name>/` layout the manifest's own directory is `evals/<name>/`, so a fixture, a private prompt, or an oracle script lives under `evals/<name>/` and moves with the manifest rather than staying beside the skill.
 
-`skill_paths` entries are relative to the repo root (the manifest's parent directory, or its grandparent when the manifest is `evals/shared-benchmark.json`) and name either a `SKILL.md` or the skill directory that holds one. Every built tree — the canonical `with_skill` tree, each materialized ablation, an answer runner's workspace, and the skills directory a trigger adapter mounts — places a root under its own skill directory name, which is what Agent Skills discovery expects: `skills/good-pr/SKILL.md` and `skills/good-pr` both mount as `good-pr`. A per-skill manifest at `<skill>/evals/shared-benchmark.json` declares `"skill_paths": ["SKILL.md"]`; that skill directory is the repo root, so its mount name is the frontmatter `name`, never the checkout's directory name. Two roots that would mount under the same name are rejected.
+`skill_paths` entries are relative to the repo root (`<base>` for a manifest at `<base>/evals/shared-benchmark.json` or `<base>/evals/<name>/shared-benchmark.json`, otherwise the manifest's own directory) and name either a `SKILL.md` or the skill directory that holds one. Every built tree — the canonical `with_skill` tree, each materialized ablation, an answer runner's workspace, and the skills directory a trigger adapter mounts — places a root under its own skill directory name, which is what Agent Skills discovery expects: `skills/good-pr/SKILL.md` and `skills/good-pr` both mount as `good-pr`. A per-skill manifest at `<skill>/evals/shared-benchmark.json` declares `"skill_paths": ["SKILL.md"]`; that skill directory is the repo root, so its mount name is the frontmatter `name`, never the checkout's directory name. Two roots that would mount under the same name are rejected.
 
 Further optional manifest surfaces (each with a behavior-preserving default; see `docs/migrating-evals.md`):
 

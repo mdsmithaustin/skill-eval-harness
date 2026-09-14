@@ -6,7 +6,7 @@ Terms are grouped by what they describe: the units you evaluate, the comparison 
 
 ## Units of evaluation
 
-**Manifest** — the `evals/shared-benchmark.json` file a skill repo owns. It names the skill, declares variants and splits, and lists cases, assertions, and ablations. `validate` checks its shape; every other command reads it.
+**Manifest** — the `shared-benchmark.json` file a skill repo owns, under `evals/` or under `evals/<skill>/`. It names the skill, declares variants and splits, and lists cases, assertions, and ablations. `validate` checks its shape; every other command reads it.
 
 **Case** — one scenario under test, identified by `id`. A case carries a `prompt`, optional fixture `files`, a `split`, taxonomy fields (`domain`, `difficulty`, `success_goals`, `trigger_type`), `expected_behavior`, and `assertions`.
 
@@ -14,7 +14,7 @@ Terms are grouped by what they describe: the units you evaluate, the comparison 
 
 **Prepared-task draft / prepared task** — a draft is permissive planning data and cannot execute. A prepared task is the validated runner input produced at the JSONL boundary: non-empty identifiers, a closed split/variant, positive repetition, safe relative run directory, typed ablation provenance, and no skill paths on `without_skill`. Runners accept only the validated type.
 
-**Fixture** — a real input file referenced by `case.files`, stored under the manifest's `evals/` directory. `prepare` emits fixtures as absolute `input_files` so the runner reads them before answering. Fixtures make a case harder to solve from generic knowledge or from echoing assertion keywords.
+**Fixture** — a real input file referenced by `case.files`, stored under the manifest's own directory. `prepare` emits fixtures as absolute `input_files` so the runner reads them before answering. Fixtures make a case harder to solve from generic knowledge or from echoing assertion keywords.
 
 **Dataset / template** — a `datasets` block plus a case `template` fans one case shape over a row set, filling `{key}` placeholders per row into stable case ids. Materialized early (inside `iter_cases`), so validation, leakage lint, prepare, and grading all see ordinary cases. A YAML manifest with `dataset_files` (JSONL row files) compiles to the same shape in memory.
 
