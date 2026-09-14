@@ -2807,8 +2807,6 @@ def _reject_overlapping_skill_roots(repo_root: Path, manifest: dict[str, Any]) -
                 raise AblationError(f"skill roots {ri!r} and {rj!r} are copied from the same directory {di}; the ablated copy and an unablated copy would coexist — declare a single root")
             if di in dj.parents:
                 raise AblationError(f"skill root {ri!r} (dir {di}) is an ancestor of skill root {rj!r}; copying it would include an unablated duplicate of {rj!r} — declare non-overlapping roots")
-    # Distinct roots whose mount key collides would overwrite each other in the
-    # built tree (an otherwise-unwrapped FileExistsError); the key owner rejects that.
     skill_root_keys_for(repo_root, manifest.get("skill_paths", []))
 
 
@@ -6454,7 +6452,7 @@ def raw_trace_record_for_ref(run_base: Path | None, ref: Any) -> dict[str, Any] 
     for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
         if i == line_no:
             try:
-                record = stream_json_loads(line)   # same rule that produced the raw_ref
+                record = stream_json_loads(line)
             except json.JSONDecodeError:
                 return None
             return record if isinstance(record, dict) else None
@@ -8445,7 +8443,6 @@ def write_trace_artifacts(
         metrics["parse_errors"] = parse_errors[:20]
         metrics["errors"] = int(metrics.get("errors", 0) or 0) + len(parse_errors)
     if duplicate_keys:
-        # The stream rule kept these lines (last value wins); say so in the row.
         metrics["stream_duplicate_keys"] = duplicate_keys[:20]
     # A trace-derived count is observed only when at least one valid event was
     # captured and parsing completed. Completion is derived here and reserved:
@@ -11961,10 +11958,6 @@ def verdict_schema_for(assertion: dict[str, Any]) -> dict[str, Any]:
             "properties": {"passed": {"type": "boolean"}, "score": {"type": "number"}, "rationale": {"type": "string"}}}
 
 
-# Arm-named run-directory segments (`<case>/<variant>/run-N/...`). Candidate
-# output, trajectory events, and artifact paths can echo the run's own path, and
-# a judge that reads `with_skill/` in it is no longer blind. Only path segments
-# are neutralized so graded content is otherwise untouched.
 JUDGE_ARM_PATH_SEGMENT = re.compile(
     r"(?<=[/\\])(?:"
     + "|".join(re.escape(name) for name in (WITH_SKILL, WITHOUT_SKILL, OLD_SKILL))
@@ -11980,9 +11973,6 @@ def blind_judge_payload_text(text: str) -> str:
 
 def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | None = None, metrics: dict | None = None, artifacts: list | None = None, explore_dir: str | None = None, steps: list | None = None) -> str:
     assertion = task.get("assertion", {})
-    # The judge is blind to the arm: judge_task_id (`case::variant::run-N::…`)
-    # and variant stay on the task record and the result row for pairing, but
-    # neither reaches the model. run_number is arm-neutral (every arm has run-N).
     payload = {
         "case_id": task.get("case_id"),
         "run_number": task.get("run_number"),

@@ -768,10 +768,6 @@ class CodexRolloutDetectionTests(unittest.TestCase):
 
     def _observe(self, td: str, *, rollout: bool | str = True, stream_extra=None,
                  events: str | None = None):
-        """Run one mocked Codex invocation. `rollout` is True (the fixture),
-        False (none written), or a rollout text; `stream_extra` is a stream
-        line, or a callable given the mounted paths that returns one; `events`
-        replaces the default event-stream fixture."""
         root = Path(td)
         adapter, workspace, copied = self._mounted(root)
         extra = stream_extra(copied) if callable(stream_extra) else (stream_extra or "")
@@ -800,7 +796,7 @@ class CodexRolloutDetectionTests(unittest.TestCase):
     def test_skill_injection_in_rollout_counts_as_load(self):
         with tempfile.TemporaryDirectory() as td:
             invocation, detection, copied, seen = self._observe(td, rollout=True)
-            self.assertFalse(seen["home"].exists())   # isolated home still removed after capture
+            self.assertFalse(seen["home"].exists())
         self.assertTrue(detection.triggered)
         self.assertEqual({item.kind for item in detection.evidence}, {TriggerEvidenceKind.CODEX_ROLLOUT})
         self.assertIn("unslop", detection.evidence[0].text)
@@ -831,7 +827,7 @@ class CodexRolloutDetectionTests(unittest.TestCase):
         # the line is kept (last value wins) and the row says which lines were.
         events = (CODEX_FIXTURES / "exec-duplicate-id-events.jsonl").read_text(encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "duplicate object key: 'id'"):
-            list(sb.iter_json_objects(events))   # the artifact rule still rejects it
+            list(sb.iter_json_objects(events))
         with tempfile.TemporaryDirectory() as td:
             invocation, detection, copied, _ = self._observe(td, rollout=True, events=events)
         self.assertTrue(invocation.observation_complete, invocation.provider_error)
@@ -840,8 +836,6 @@ class CodexRolloutDetectionTests(unittest.TestCase):
         self.assertEqual(invocation.metadata["codex_rollout_status"], "found")
         self.assertTrue(detection.triggered)
         self.assertEqual({item.kind for item in detection.evidence}, {TriggerEvidenceKind.CODEX_ROLLOUT})
-        # The same stream through the shared path detector: the `ls` command is
-        # not a skill read, so nothing fires and nothing raises.
         self.assertFalse(sb.detect_trigger_detection(events, copied).triggered)
 
     def test_row_records_which_stream_lines_the_lenient_rule_kept(self):
@@ -862,17 +856,13 @@ class CodexRolloutDetectionTests(unittest.TestCase):
                 metadata={"skill_tree_hash": sb.skill_tree_hash(tree)},
             )
         self.assertTrue(row["observation_complete"])
-        # The in-memory row holds the frozen mapping (a tuple); it persists as a JSON array.
         self.assertEqual(list(row["invocation_metadata"]["stream_duplicate_keys"]), ["line 3: id"])
         self.assertEqual(list(row["stream_duplicate_keys"]), ["line 3: id"])
-        self.assertEqual(row["usage_normalized"]["input_tokens"], 22215)   # telemetry survived too
+        self.assertEqual(row["usage_normalized"]["input_tokens"], 22215)
         clean = (CODEX_FIXTURES / "exec-skill-events.jsonl").read_text(encoding="utf-8")
         self.assertEqual(sb.stream_duplicate_keys(clean), [])
 
     def test_rollout_detector_keeps_the_strict_artifact_rule(self):
-        # The rollout is a persisted file, not the live stream. A sample of 40
-        # real rollouts (111,825 lines) had no duplicate-key line, so it keeps
-        # the artifact rule: a repeated key there is a defect, not tolerated.
         with tempfile.TemporaryDirectory() as td:
             home = Path(td)
             rollout = self._rollout(home)
@@ -891,11 +881,11 @@ class CodexRolloutDetectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             invocation, detection, _, _ = self._observe(td, rollout=other)
         self.assertFalse(detection.triggered)
-        self.assertEqual(invocation.metadata["codex_rollout_status"], "found")   # both detectors ran, neither found a load
+        self.assertEqual(invocation.metadata["codex_rollout_status"], "found")
 
     def test_injection_naming_a_mounted_skill_from_elsewhere_is_not_a_load(self):
         mounted = Path("/tmp/trigger-x-codex-home/skills/unslop/SKILL.md")
-        injected = self._rollout(Path("/Users/someone/.agents"))   # same name, path outside the mount
+        injected = self._rollout(Path("/Users/someone/.agents"))
         self.assertEqual(sb.codex_rollout_skill_loads(injected, ["unslop"], [mounted]), [])
         self.assertEqual(sb.codex_rollout_skill_loads(self._rollout(mounted.parents[2]), ["unslop"], [mounted]),
                          [f"rollout skill injection: unslop ({mounted})"])

@@ -161,14 +161,14 @@ class SkillAblationTests(unittest.TestCase):
             text = self.skill_text(res)
             self.assertNotIn("](references/severity.md)", text)
             self.assertIn("the severity guide", text)   # visible text kept; no new prose
-            self.assertTrue((Path(res["dir"]) / "good-pr" / "references" / "severity.md").exists())   # tree key is the skill directory name
+            self.assertTrue((Path(res["dir"]) / "good-pr" / "references" / "severity.md").exists())
 
     def test_reference_content_deletes_file_keeps_pointer(self):
         with tempfile.TemporaryDirectory() as td:
             res = self.materialize_one(Path(td), {"id": "no-sev-file", "removed_component": "severity ref", "mechanism": "reference", "target": {"path": "references/severity.md", "remove": "content"}})
             text = self.skill_text(res)
             self.assertIn("](references/severity.md)", text)
-            self.assertFalse((Path(res["dir"]) / "good-pr" / "references" / "severity.md").exists())   # tree key is the skill directory name
+            self.assertFalse((Path(res["dir"]) / "good-pr" / "references" / "severity.md").exists())
 
     def test_patch_deletion_only_ok_and_plus_rejected(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1418,19 +1418,19 @@ class AblationCoverageTests(unittest.TestCase):
     def test_script_mechanism_removes_file(self):
         with tempfile.TemporaryDirectory() as td:
             res = self.materialize(Path(td), {"id": "no-script", "removed_component": "s", "mechanism": "script", "class": "resource", "target": {"skill_root": "skills/good-pr/SKILL.md", "path": "scripts/run.py"}})
-            base = Path(res["dir"]) / "good-pr"   # tree key is the skill directory name
+            base = Path(res["dir"]) / "good-pr"
             self.assertFalse((base / "scripts" / "run.py").exists())
 
     def test_asset_mechanism_removes_file(self):
         with tempfile.TemporaryDirectory() as td:
             res = self.materialize(Path(td), {"id": "no-asset", "removed_component": "a", "mechanism": "asset", "class": "resource", "target": {"skill_root": "skills/good-pr/SKILL.md", "path": "assets/tmpl.txt"}})
-            base = Path(res["dir"]) / "good-pr"   # tree key is the skill directory name
+            base = Path(res["dir"]) / "good-pr"
             self.assertFalse((base / "assets" / "tmpl.txt").exists())
 
     def test_reference_both_unlinks_and_deletes(self):
         with tempfile.TemporaryDirectory() as td:
             res = self.materialize(Path(td), {"id": "no-sev", "removed_component": "r", "mechanism": "reference", "class": "resource", "target": {"skill_root": "skills/good-pr/SKILL.md", "path": "references/severity.md", "remove": "both"}})
-            base = Path(res["dir"]) / "good-pr"   # tree key is the skill directory name
+            base = Path(res["dir"]) / "good-pr"
             self.assertFalse((base / "references" / "severity.md").exists())
             self.assertNotIn("](references/severity.md)", (base / "SKILL.md").read_text(encoding="utf-8"))
 
@@ -1441,7 +1441,7 @@ class AblationCoverageTests(unittest.TestCase):
                 {"mechanism": "frontmatter_field", "class": "runtime", "target": {"skill_root": "skills/audit/SKILL.md", "field": "allowed-tools"}},
             ]})
             d = Path(res["dir"])
-            pr = d / "good-pr"   # tree keys are the skill directory names
+            pr = d / "good-pr"
             au = d / "audit"
             # both roots present and independently ablated
             self.assertNotIn("Regression-proof requirement", (pr / "SKILL.md").read_text(encoding="utf-8"))
@@ -1744,7 +1744,7 @@ class AblationReviewFixesTests(unittest.TestCase):
             skill = root / "skills" / "good-pr"
             skill.mkdir(parents=True)
             (skill / "SKILL.md").write_text(self.MIN_SKILL, encoding="utf-8")
-            key = sb.skill_root_key(root, "skills/good-pr/SKILL.md")   # the key owner now needs the repo root
+            key = sb.skill_root_key(root, "skills/good-pr/SKILL.md")
             canonical = root / "canonical"
             sb._copy_skill_root(skill, canonical / key)
             base = {
@@ -1937,7 +1937,7 @@ class AblationDifferentialInvariantTests(unittest.TestCase):
             res = sb.materialize_ablation(repo_root, manifest, ablation, root / "abl")
             self.assertEqual(res["parent_skill_hash"], sb.canonical_skill_tree_hash(repo_root, manifest))
             self.assertNotEqual(res["skill_hash"], res["parent_skill_hash"])   # the edit changed the tree
-            self.assertEqual({p.name for p in Path(res["dir"]).iterdir()}, {"good-pr"})   # same key owner names both trees
+            self.assertEqual({p.name for p in Path(res["dir"]).iterdir()}, {"good-pr"})
 
     # --- regression-proof: prove the invariant has teeth against the ORIGINAL bug classes ---
     def test_invariant_catches_added_file(self):
@@ -2205,7 +2205,7 @@ class P3_KeyCollisionTests(unittest.TestCase):
     def test_colliding_sanitized_roots_raise_ablation_error(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); rp = root / "repo"
-            for name in ("skill+x", "skill_x"):   # both skill directory names sanitize to skill_x
+            for name in ("skill+x", "skill_x"):
                 d = rp / name; d.mkdir(parents=True)
                 (d / "SKILL.md").write_text("---\nname: s\ndescription: d. Use it.\n---\n\n# A\n\n## S\n\nx\n", encoding="utf-8")
             (rp / "evals").mkdir()
@@ -2222,10 +2222,6 @@ class P3_KeyCollisionTests(unittest.TestCase):
 
 
 class SkillRootKeyTests(unittest.TestCase):
-    """A skill root mounts under its own directory name — the Agent Skills spec
-    discovers a skill through a directory named after it — and ONE owner
-    (skill_root_key) names that directory in every built tree, so the canonical
-    with_skill hash and a materialized ablation's parent hash still agree."""
 
     SECTION_ABLATION = {"id": "no-rp", "removed_component": "rp", "mechanism": "section", "class": "instructions",
                         "target": {"heading": "## Regression-proof requirement"}}
@@ -2236,15 +2232,12 @@ class SkillRootKeyTests(unittest.TestCase):
         return next(r for r in rows if r["variant"] == variant)
 
     def test_per_skill_manifest_mounts_under_frontmatter_name(self):
-        # (a) <skill>/evals/shared-benchmark.json with skill_paths ["SKILL.md"]: the
-        # skill directory IS the repo root, so the mount name is the frontmatter name,
-        # never "SKILL.md" (the old sanitized string) and never the checkout's basename.
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as wd:
             path = make_eval_repo(Path(td), skill_name="good-pr", skill_paths=["SKILL.md"])
             repo_root = sb.repo_root_for_manifest(path)
-            self.assertEqual(repo_root.name, "repo")                      # the checkout name is NOT the key
+            self.assertEqual(repo_root.name, "repo")
             self.assertEqual(sb.skill_root_key(repo_root, "SKILL.md"), "good-pr")
-            self.assertEqual(sb.skill_root_key(repo_root, "."), "good-pr")  # the directory form of the same root
+            self.assertEqual(sb.skill_root_key(repo_root, "."), "good-pr")
             row = self.row(path, "with_skill")
             self.assertEqual(row["skill_root_keys"], ["good-pr"])
             build = sb.build_skill_workspace(sb.PreparedTask.from_row(row), Path(wd))
@@ -2261,7 +2254,6 @@ class SkillRootKeyTests(unittest.TestCase):
                 sb.skill_root_key(repo_root, "SKILL.md")
 
     def test_nested_skill_md_path_mounts_under_its_directory(self):
-        # (b) skills/good-pr/SKILL.md mounts as good-pr, not skills_good-pr_SKILL.md.
         with tempfile.TemporaryDirectory() as td:
             path = make_eval_repo(Path(td), skill_name="good-pr", skill_paths=["skills/good-pr/SKILL.md"])
             repo_root = sb.repo_root_for_manifest(path)
@@ -2271,7 +2263,6 @@ class SkillRootKeyTests(unittest.TestCase):
             self.assertEqual([p.name for p in tree.iterdir()], ["good-pr"])
 
     def test_directory_path_mounts_under_its_own_name(self):
-        # (c) a skill_paths entry naming the directory rather than its SKILL.md.
         with tempfile.TemporaryDirectory() as td:
             path = make_eval_repo(Path(td), skill_name="good-pr", skill_paths=["skills/good-pr/SKILL.md"])
             manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -2284,8 +2275,6 @@ class SkillRootKeyTests(unittest.TestCase):
             self.assertTrue((tree / "good-pr" / "SKILL.md").is_file())
 
     def test_two_roots_with_the_same_directory_name_are_rejected(self):
-        # (d) distinct roots whose skill directories share a name would overwrite
-        # each other in the built tree; every entry point refuses them the same way.
         with tempfile.TemporaryDirectory() as td:
             paths = ["a/good-pr/SKILL.md", "b/good-pr/SKILL.md"]
             path = make_eval_repo(Path(td), skill_name="good-pr", skill_paths=paths)
@@ -2301,9 +2290,6 @@ class SkillRootKeyTests(unittest.TestCase):
                 sb.prepared_task_rows(path, manifest)
 
     def test_per_skill_layout_ablation_parent_hash_equals_canonical(self):
-        # (e) the pairing invariant for the per-skill layout: the ONE key owner names
-        # both the canonical tree and the materialized pre-edit tree, the prepared
-        # ablation row carries the same key, and the mounted workspace attests.
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as wd:
             root = Path(td)
             path = make_eval_repo(root, skill_name="good-pr", skill_paths=["SKILL.md"],

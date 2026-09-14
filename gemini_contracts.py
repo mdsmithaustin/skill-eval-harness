@@ -21,9 +21,6 @@ from json_contracts import (
 
 
 def _gemini_json_loads(text: str) -> Any:
-    # Gemini's stdout is an external CLI stream: a repeated object key resolves
-    # last-value-wins (json_contracts.parse_stream_json); non-finite constants
-    # and non-persistable values still fail as protocol errors.
     return stream_json_loads(text)
 
 

@@ -543,8 +543,6 @@ class CodexAdapter(AgentAdapter):
                     argv, input_text="", cwd=workspace, timeout_s=timeout,
                     environment=env))
             )
-            # The rollout lives under the isolated home, which is removed
-            # below, so it is read here and handed to detect() as the payload.
             rollout = locate_codex_rollout(result.stdout, codex_home)
         finally:
             shutil.rmtree(codex_home, ignore_errors=True)
@@ -893,7 +891,6 @@ def observe_cell_query(
     invocation_metadata = dict(invocation.metadata)
     duplicate_keys = stream_duplicate_keys(invocation.stdout)
     if duplicate_keys:
-        # The stream rule kept these lines (last value wins); the row says so.
         invocation_metadata["stream_duplicate_keys"] = duplicate_keys[:20]
     redacted_invocation = invocation.with_wire_text(
         stdout=redacted_stdout,

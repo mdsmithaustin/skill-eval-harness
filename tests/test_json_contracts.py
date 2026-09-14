@@ -1,5 +1,3 @@
-"""The two JSON boundaries in json_contracts: the strict artifact rule and the
-external-CLI stream rule differ only in how a repeated object key is treated."""
 from __future__ import annotations
 
 import json
@@ -35,8 +33,8 @@ class StreamRuleTests(unittest.TestCase):
     def test_duplicate_key_resolves_last_value_wins_and_is_reported(self):
         parsed = parse_stream_json('{"id": "first", "n": 1, "id": "last", "id": "final"}')
         self.assertIsInstance(parsed, StreamJSONParse)
-        self.assertEqual(parsed.value, {"id": "final", "n": 1})   # same rule as json.loads
-        self.assertEqual(parsed.duplicate_keys, ("id", "id"))    # one entry per repeat
+        self.assertEqual(parsed.value, {"id": "final", "n": 1})
+        self.assertEqual(parsed.duplicate_keys, ("id", "id"))
         self.assertEqual(json.loads('{"id": "first", "id": "final"}'), {"id": "final"})
 
     def test_nested_duplicates_are_reported_in_document_order(self):
@@ -57,8 +55,6 @@ class StreamRuleTests(unittest.TestCase):
         self.assertEqual(parsed.duplicate_keys, ())
 
     def test_stream_rule_keeps_every_other_strict_check(self):
-        # Only the duplicate-key rule is relaxed: the value must still survive
-        # strict re-serialization into a harness artifact.
         for text in ('{"value": NaN}', '{"value": Infinity}', "not json", ""):
             with self.subTest(text=text), self.assertRaises(json.JSONDecodeError):
                 stream_json_loads(text)

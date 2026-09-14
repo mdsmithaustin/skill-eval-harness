@@ -1425,24 +1425,22 @@ class RunnerOutcomeContractTests(unittest.TestCase):
             self.assertEqual(metrics["stream_duplicate_keys"], ["line 3: id"])
             self.assertNotIn("parse_errors", metrics)
             self.assertTrue(metrics["trace_observation_complete"])
-            self.assertEqual(metrics["commands"], 1)   # the duplicate-id line is the command
+            self.assertEqual(metrics["commands"], 1)
             meta = json.loads((base / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["usage_normalized"]["source"], "trace_normalized")
             self.assertEqual(meta["usage_normalized"]["input_tokens"], 22215)
 
 
 class StreamDuplicateKeyTests(unittest.TestCase):
-    """An external agent CLI's stream is read with the last-value-wins rule
-    (`strict=False`); everything the harness authors keeps the strict rule."""
 
     FIXTURE = ROOT / "tests" / "fixtures" / "codex" / "exec-duplicate-id-events.jsonl"
 
     def test_stream_scan_keeps_the_line_the_artifact_rule_rejects(self):
         text = self.FIXTURE.read_text(encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "duplicate object key: 'id'"):
-            list(sb.iter_json_objects(text))            # artifact rule, unchanged
+            list(sb.iter_json_objects(text))
         with self.assertRaisesRegex(ValueError, "duplicate object key: 'id'"):
-            sb.parse_trace_jsonl_text(text)             # artifact rule, unchanged
+            sb.parse_trace_jsonl_text(text)
         lenient = list(sb.iter_json_objects(text, strict=False))
         self.assertEqual([r["type"] for r in lenient],
                          ["thread.started", "turn.started", "item.completed", "item.completed", "turn.completed"])
@@ -1464,7 +1462,6 @@ class StreamDuplicateKeyTests(unittest.TestCase):
         self.assertTrue(errors[0].startswith("line 1:"), errors)
         with self.assertRaises(ValueError):
             sb.parse_trace_jsonl_text('{"v": NaN}\n', strict=False)
-        # The annotation helper never raises: it only describes what the rule kept.
         self.assertEqual(sb.stream_duplicate_keys('{"v": NaN}\n{"a": 1, "a": 2}\n'), ["line 2: a"])
 
     def test_trace_jsonl_reread_uses_the_rule_that_wrote_the_raw_ref(self):

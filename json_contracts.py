@@ -50,9 +50,6 @@ def _persistable_json_loads(
     object_pairs_hook: Callable[[list[tuple[str, Any]]], dict[str, Any]],
     label: str,
 ) -> Any:
-    """The shared body of both JSON boundaries: reject non-finite constants and
-    prove the parsed value can be re-serialized into a harness artifact. Only
-    the duplicate-key rule differs between the two boundaries."""
     def reject_constant(constant: str) -> Any:
         raise json.JSONDecodeError(
             f"non-finite numeric constant is not valid JSON: {constant}", "", 0)

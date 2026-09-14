@@ -854,10 +854,6 @@ class PerStepValidationTests(unittest.TestCase):
 
 
 class ManifestLayoutTests(unittest.TestCase):
-    """A skill installer copies a skill directory verbatim, so a manifest may
-    live inside the skill tree or beside it under evals/<skill>/. Both layouts
-    resolve to the repo root that skill_paths are relative to, and a path too
-    shallow to hold either shape keeps its plain-parent answer."""
 
     def test_new_per_skill_evals_layout_resolves_to_base(self):
         with tempfile.TemporaryDirectory() as td:
@@ -885,8 +881,6 @@ class ManifestLayoutTests(unittest.TestCase):
             self.assertEqual(sb.repo_root_for_manifest(manifest_path), skill_dir.resolve())
 
     def test_shallow_paths_fall_through_without_raising(self):
-        # Path("x").parents has length 1, so an index-based walk (parents[1])
-        # would raise IndexError instead of falling through.
         bare = Path("shared-benchmark.json")
         self.assertEqual(sb.repo_root_for_manifest(bare), bare.parent.resolve())
         root_level = Path("/shared-benchmark.json")
