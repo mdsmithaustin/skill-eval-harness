@@ -59,7 +59,7 @@ EOF
 ```
 
 The manifest is one template case over those rows. Put it at the repo root (for any
-manifest not named `evals/shared-benchmark.json`, the manifest's own directory is the
+manifest not named `shared-benchmark.json`, the manifest's own directory is the
 repo root, and `skill_paths` resolve from there):
 
 ```bash
