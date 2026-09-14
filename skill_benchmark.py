@@ -11952,7 +11952,7 @@ def verdict_schema_for(assertion: dict[str, Any]) -> dict[str, Any]:
 
 
 JUDGE_ARM_PATH_SEGMENT = re.compile(
-    r"(?<=[/\\])(?:"
+    r"(?:(?<=[/\\\"])|(?<!\S)|(?<=(?<!\\)\\n))(?:"
     + "|".join(re.escape(name) for name in (WITH_SKILL, WITHOUT_SKILL, OLD_SKILL))
     + "|" + re.escape(ABLATION_VARIANT_PREFIX) + r"[^/\\\s\"]+"
     + r")(?=[/\\])"

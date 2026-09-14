@@ -1710,23 +1710,36 @@ class BlindJudgePromptTests(unittest.TestCase):
         prompts = {sb.judge_prompt(judge_task("c", arm), "out") for arm in self.ARMS}
         self.assertEqual(len(prompts), 1)
 
-    def test_arm_named_run_paths_are_neutralized_in_output_and_trajectory(self):
+    def test_arm_named_paths_are_neutralized_in_candidate_output_trajectory_and_artifacts(self):
         prompts = set()
         for arm in self.ARMS:
-            output = f"wrote /runs/c/{arm}/run-1/notes.md and C:\\runs\\c\\{arm}\\run-1\\notes.md"
+            output = (f"wrote {arm}/notes.md\n{arm}/next.md, /runs/c/{arm}/run-1/notes.md, "
+                      f"and C:\\runs\\c\\{arm}\\run-1\\notes.md")
             events = [{"type": "file_read", "path": f"/runs/c/{arm}/run-1/workspace/SKILL.md", "status": "completed"}]
-            prompts.add(sb.judge_prompt(judge_task("c", arm), output, trajectory=events))
+            prompts.add(sb.judge_prompt(
+                judge_task("c", arm), output, trajectory=events,
+                artifacts=[f"{arm}/artifacts/notes.md"]))
         self.assertEqual(len(prompts), 1)
         prompt = prompts.pop()
+        self.assertIn("wrote arm/notes.md\\narm/next.md", prompt)
         self.assertIn("/runs/c/arm/run-1/notes.md", prompt)
         self.assertIn("/runs/c/arm/run-1/workspace/SKILL.md", prompt)
+        self.assertIn('"artifacts": [\n    "arm/artifacts/notes.md"', prompt)
         for arm in self.ARMS:
             self.assertNotIn(arm, prompt)
 
-    def test_scrub_touches_only_path_segments(self):
-        self.assertEqual(sb.blind_judge_payload_text("done with_skill and care"), "done with_skill and care")
-        self.assertEqual(sb.blind_judge_payload_text("/a/with_skill/b"), "/a/arm/b")
-        self.assertEqual(sb.blind_judge_payload_text("/a/with_skill"), "/a/with_skill")
+    def test_prompt_preserves_arm_labels_and_suffix_bearing_names(self):
+        output = "done with_skill and care; old_skill; ablation:no-examples; with_skill-notes.md"
+        artifacts = ["without_skill-notes.md", "old_skill-summary.txt", "ablation:no-examples-summary.txt"]
+        prompt = sb.judge_prompt(judge_task("c", "with_skill"), output, artifacts=artifacts)
+        _, payload = self._split(prompt)
+        self.assertEqual(payload["candidate_output"], output)
+        self.assertEqual(payload["artifacts"], artifacts)
+
+    def test_prompt_preserves_windows_directory_prefixed_with_n(self):
+        output = r"C:\nwith_skill/file.txt"
+        _, payload = self._split(sb.judge_prompt(judge_task("c", "with_skill"), output))
+        self.assertEqual(payload["candidate_output"], output)
 
 
 if __name__ == "__main__":
