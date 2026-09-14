@@ -201,7 +201,7 @@ skill-benchmark --help
 
 ## Manifest format
 
-Each skill repo owns an `evals/shared-benchmark.json` manifest. Add a `harness` block so readers know which external harness/version to install.
+Each skill repo owns a `shared-benchmark.json` manifest in one of two places. The first is `evals/shared-benchmark.json`, at the repo root or inside a skill directory as `skills/<name>/evals/shared-benchmark.json`. The second is `evals/<name>/shared-benchmark.json`, one directory per skill at the repo root. The second layout exists because a skill installer such as `npx skills` copies a skill directory verbatim, so a manifest under `skills/<name>/evals/` ships fixtures, prompts, and oracles to everyone who installs the skill. `evals/<name>/shared-benchmark.json` keeps those files out of the published directory while `"skill_paths": ["skills/<name>/SKILL.md"]` still resolves. Add a `harness` block so readers know which external harness/version to install.
 
 ```json
 {
@@ -259,7 +259,9 @@ Each skill repo owns an `evals/shared-benchmark.json` manifest. Add a `harness` 
 
 `prepare` fails on missing hidden prompts unless `--allow-missing-prompts` is used for dry-run planning.
 
-Use optional `files` for fixture-backed evals. Paths are relative to the manifest's `evals/` directory, validated by `validate`, and emitted by `prepare` as absolute `input_files` for the runner.
+Use optional `files` for fixture-backed evals. Paths are relative to the manifest's own directory, validated by `validate`, and emitted by `prepare` as absolute `input_files` for the runner. `prompt_ref` and script-oracle commands resolve against that same directory, never against the repo root. Under the `evals/<name>/` layout the manifest's own directory is `evals/<name>/`, so a fixture, a private prompt, or an oracle script lives under `evals/<name>/` and moves with the manifest rather than staying beside the skill.
+
+`skill_paths` entries are relative to the repo root (`<base>` for a manifest at `<base>/evals/shared-benchmark.json` or `<base>/evals/<name>/shared-benchmark.json`, otherwise the manifest's own directory) and name either a `SKILL.md` or the skill directory that holds one. Every built tree — the canonical `with_skill` tree, each materialized ablation, an answer runner's workspace, and the skills directory a trigger adapter mounts — places a root under its own skill directory name, which is what Agent Skills discovery expects: `skills/good-pr/SKILL.md` and `skills/good-pr` both mount as `good-pr`. A per-skill manifest at `<skill>/evals/shared-benchmark.json` declares `"skill_paths": ["SKILL.md"]`; that skill directory is the repo root, so its mount name is the frontmatter `name`, never the checkout's directory name. Two roots that would mount under the same name are rejected.
 
 Further optional manifest surfaces (each with a behavior-preserving default; see `docs/migrating-evals.md`):
 
@@ -409,6 +411,15 @@ runs/<case_id>/<variant>/run-1/artifact-commit.json # required-file SHA-256 inve
 runs/answer-design.json                          # exact expected answer experiment and eval-contract digest
 ```
 
+`trace.jsonl` is the agent CLI's own stream, preserved verbatim, and it is read with the
+stream rule: a line that repeats an object key (`codex exec --json` repeats `id` on some
+event lines) is kept with the last value winning, the same rule as Python's `json.loads`,
+and the row's `metrics.json` (or a trigger row's metadata) lists what was kept under
+`stream_duplicate_keys` as `line N: key`. A line that is not JSON is still skipped and
+counted in `parse_errors`. Everything the harness authors or validates (manifests,
+prepared tasks, `events.json`, `metrics.json`, `metadata.json`, judge rows, reports, the
+Codex session rollout) is read with the strict rule, where a repeated key is rejected.
+
 Current answer and Jetty writers record independent process, provider-response, trace,
 and artifact-set evidence. Tool/command/file/retry/skill measurements are available only
 when the first three channels are complete; readers derive artifact completeness by
@@ -542,7 +553,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 
 - **Anthropic skill-creator**: use `grade --write-grading-files` and `export-anthropic` for compatible `grading.json`/`benchmark.json` shapes.
 - **Pi**: use `examples/adewale-workspace/run_pi_smoke.py` for the Adewale multi-repo smoke workflow and `skill-pi-trigger-eval` for autonomous trigger checks.
-- **Gemini CLI**: use `run-agent --agent gemini` and `judge --judge-backend gemini`. Each call gets an isolated `GEMINI_CLI_HOME`, requests disabled provider usage statistics, uses strict official JSON/stream-JSON parsing, and installs a deny-by-default policy (read-only allowlist for answers, no tools for judges). Nested sandboxing is requested only when a supported host engine exists and the selected credential transport is proven portable; artifacts record the engine or disabled reason. Token usage is provider-reported when present; dollar cost stays explicit `missing`. Gemini autonomous trigger support is deliberately not advertised: the current `activate_skill` flow requires consent, and a live headless consent-free activation proof has not passed yet.
+- **Gemini CLI**: use `run-agent --agent gemini` and `judge --judge-backend gemini`. Each call gets an isolated `GEMINI_CLI_HOME`, requests disabled provider usage statistics, accepts external CLI duplicate keys with last-value-wins handling, keeps finite typed provider contracts and harness artifacts strict, and installs a deny-by-default policy (read-only allowlist for answers, no tools for judges). Nested sandboxing is requested only when a supported host engine exists and the selected credential transport is proven portable; artifacts record the engine or disabled reason. Token usage is provider-reported when present; dollar cost stays explicit `missing`. Gemini autonomous trigger support is deliberately not advertised: the current `activate_skill` flow requires consent, and a live headless consent-free activation proof has not passed yet.
 - **Mistral Vibe**: use `run-agent --agent vibe`, `judge --judge-backend vibe`, and `skill-trigger-matrix --agent vibe`. The harness isolates `VIBE_HOME`, passes `--model` as `VIBE_ACTIVE_MODEL`, mounts trigger skills under `.agents/skills`, and requires `MISTRAL_API_KEY` (or a copied `.env` from the current `VIBE_HOME`, falling back to `~/.vibe/.env`) for live runs.
 - **Other runners**: use `prepare` JSONL as the import format and write results back to the run output contract.
 - **Jetty**: use `export-jetty`, `run-jetty`, and `import-jetty-results` for REST runbook-mode execution. Live runs require `--out`, keep an exclusively owned atomic attempt journal with secret-safe provider receipts, and resume acknowledged trajectories after interruption or a local polling deadline; unfinished records exit nonzero and cannot be imported. An uncertain submission is blocked unless the operator explicitly accepts duplicate-spend risk with `--resubmit-unknown`. Response shapes were validated against production `flows-api.jetty.io` on 2026-07-17 (captured fixtures in `tests/fixtures/jetty/`); re-verify anytime with the opt-in live smoke — `RUN_JETTY_SMOKE=1 JETTY_API_TOKEN=... JETTY_SMOKE_COLLECTION=<your-collection> python3 -m unittest discover tests -k smoke_jetty` (five real sandbox runs, never in default CI).
@@ -563,7 +574,7 @@ For manifest or grading changes, add or update `tests/test_skill_benchmark.py`. 
 ## Non-goals
 
 - Grading and aggregation do not call a model. Model execution happens outside that path, except for the explicit runner/judge commands that exist to call one: `run-codex`, `run-claude`, `run-agent`, `run-jetty`, and `judge` (via `--judge-cmd` or a native `--judge-backend`).
-- The harness does not decide qualitative truth by itself; it emits judge prompts, runs a judge (an opt-in `--judge-cmd`, or a native `--judge-backend` plus `--judge-model`), and merges the returned JSON — recording which backend/model produced each verdict.
+- The harness does not decide qualitative truth by itself; it emits judge prompts, runs a judge (an opt-in `--judge-cmd`, or a native `--judge-backend` plus `--judge-model`), and merges the returned JSON — recording which backend/model produced each verdict. The judge prompt is blind to the arm: it carries no `judge_task_id` or `variant`, and arm-named run-path segments (`with_skill/`, `without_skill/`, `old_skill/`, `ablation:<id>/`) in candidate output, trajectory events, or artifact paths are rewritten to `arm/`, so the `with_skill` and `without_skill` prompts for one case with otherwise identical evidence differ only in the candidate output; the task record and result row keep both fields for pairing.
 - Hidden prompts are not protected if you pass `--include-answer-key` to generation jobs.
 - A passing answer benchmark does not prove autonomous skill loading; run `skill-trigger-matrix` (any adapter-backed agent × model) or `skill-pi-trigger-eval` (Pi, with ablation arms) for that.
 

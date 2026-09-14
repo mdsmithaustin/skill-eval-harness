@@ -21,8 +21,12 @@ Five adapters ship:
               OAuth/keychain logins still work.
 - `codex`   — Codex CLI (`codex exec --json` by default), with skills mounted
               under an isolated external `$CODEX_HOME/skills` and exposed as a
-              skills-only read root. It is detected through the shared
-              path-evidence detector. Override the command with `--codex-cmd`
+              skills-only read root. Loads are read from the session
+              rollout (`$CODEX_HOME/sessions/.../rollout-*-<thread_id>.jsonl`:
+              the CLI's explicit `<skill>` injection), falling back to the
+              shared completed path-evidence detector when no injection is
+              found; rows record `codex_rollout_status` and the evidence kind
+              so a reader can tell which decided. Override the command with `--codex-cmd`
               when a local wrapper or a newer CLI surface is needed.
 - `vibe`    — Mistral Vibe CLI (`vibe --prompt ...`), with skills mounted under
               workspace `.agents/skills` and `VIBE_HOME` isolated outside the
@@ -93,17 +97,20 @@ from skill_benchmark import (
     VIBE_DEFAULT_CMD,
     VIBE_READ_ONLY_TOOLS,
     AblationError,
+    CodexRollout,
     PiStream,
     ProcessInvocationPlan,
     build_canonical_skill_tree,
     build_vibe_cli_argv,
     canonical_json_sha256,
     codex_env_for_home,
+    codex_rollout_skill_loads,
     detect_trigger_detection,
     detect_trigger_records,
     frontmatter_value,
     invoke_argv_with_timeout,
     iter_json_objects,
+    locate_codex_rollout,
     materialize_trigger_ablation,
     mount_skill_tree,
     normalize_trace_records,
@@ -111,6 +118,7 @@ from skill_benchmark import (
     repo_root_for_manifest,
     safe_trace_label,
     skill_tree_hash,
+    stream_duplicate_keys,
     stream_usage_and_cost,
     strict_json_loads,
     trace_dialect_for,
@@ -188,7 +196,7 @@ def validate_invoke_result(agent: str, result: InvocationOutcome | dict[str, Any
 
 def json_stream_protocol_error(stdout: str, agent: str) -> str | None:
     """Reject malformed/empty event streams as incomplete observations."""
-    records, errors = parse_trace_jsonl_text(stdout)
+    records, errors = parse_trace_jsonl_text(stdout, strict=False)
     if errors:
         return f"{agent} JSON stream is malformed: {errors[0]}"
     if not records:
@@ -201,7 +209,7 @@ def codex_stream_protocol_error(stdout: str) -> str | None:
     error = json_stream_protocol_error(stdout, "codex")
     if error is not None:
         return error
-    records, _ = parse_trace_jsonl_text(stdout)
+    records, _ = parse_trace_jsonl_text(stdout, strict=False)
     terminals = [i for i, record in enumerate(records)
                  if str(record.get("type") or "").casefold() == "turn.completed"]
     if terminals != [len(records) - 1]:
@@ -214,7 +222,7 @@ def vibe_stream_protocol_error(stdout: str) -> str | None:
     error = json_stream_protocol_error(stdout, "vibe")
     if error is not None:
         return error
-    records, _ = parse_trace_jsonl_text(stdout)
+    records, _ = parse_trace_jsonl_text(stdout, strict=False)
     terminal_answer = (records[-1].get("role") == "assistant"
                        and isinstance(records[-1].get("content"), str)
                        and bool(records[-1]["content"].strip()))
@@ -448,7 +456,7 @@ class ClaudeAdapter(AgentAdapter):
             result = result.as_agent_window_complete()
         if result.observation_complete:
             error = json_stream_protocol_error(result.stdout, self.name)
-            records, _ = parse_trace_jsonl_text(result.stdout)
+            records, _ = parse_trace_jsonl_text(result.stdout, strict=False)
             terminal = next((record for record in reversed(records)
                              if record.get("type") == "result"), None)
             if error is None and terminal is None:
@@ -467,7 +475,7 @@ class ClaudeAdapter(AgentAdapter):
 
     @staticmethod
     def _result_subtype(stdout: str) -> str | None:
-        for event in iter_json_objects(stdout):
+        for event in iter_json_objects(stdout, strict=False):
             if isinstance(event, dict) and event.get("type") == "result":
                 return event.get("subtype")
         return None
@@ -476,7 +484,7 @@ class ClaudeAdapter(AgentAdapter):
         # Primary evidence: the Skill tool invoked with a mounted skill's name.
         # Fallback: the shared path detector (the model Read the mounted files).
         evidence: list[str] = []
-        for event in iter_json_objects(invocation.stdout):
+        for event in iter_json_objects(invocation.stdout, strict=False):
             if not isinstance(event, dict) or event.get("type") != "assistant":
                 continue
             for block in (event.get("message") or {}).get("content") or []:
@@ -535,15 +543,30 @@ class CodexAdapter(AgentAdapter):
                     argv, input_text="", cwd=workspace, timeout_s=timeout,
                     environment=env))
             )
+            rollout = locate_codex_rollout(result.stdout, codex_home)
         finally:
             shutil.rmtree(codex_home, ignore_errors=True)
         if result.observation_complete:
             result = result.with_provider_error(
                 codex_stream_protocol_error(result.stdout))
-        return result.with_metadata(
+        return result.with_provider_payload(rollout).with_metadata(
             {k: v for k, v in meta.items() if k != "codex_home"},
             codex_home_outside_workdir=True,
+            **rollout.metadata(),
         )
+
+    def detect(self, invocation: InvocationOutcome, skill_names: list[str], copied: list[Path]) -> TriggerDetection:
+        # Primary evidence: the session rollout, where the CLI records its own
+        # `<skill>` injection even when the JSON stream shows no tool event.
+        # Fallback: the shared path detector over the stream. The evidence kind
+        # (`codex_rollout` vs `mounted_path`) and `codex_rollout_status` in the
+        # row say which detector decided.
+        rollout = invocation.provider_payload
+        if isinstance(rollout, CodexRollout) and rollout.text is not None:
+            evidence = codex_rollout_skill_loads(rollout.text, skill_names, copied)
+            if evidence:
+                return TriggerDetection.from_texts(TriggerEvidenceKind.CODEX_ROLLOUT, evidence)
+        return super().detect(invocation, skill_names, copied)
 
 
 class PiAdapter(AgentAdapter):
@@ -865,11 +888,15 @@ def observe_cell_query(
         redact_sensitive_text(invocation.provider_error, secrets)
         if invocation.provider_error is not None else None
     )
+    invocation_metadata = dict(invocation.metadata)
+    duplicate_keys = stream_duplicate_keys(invocation.stdout)
+    if duplicate_keys:
+        invocation_metadata["stream_duplicate_keys"] = duplicate_keys[:20]
     redacted_invocation = invocation.with_wire_text(
         stdout=redacted_stdout,
         stderr=redacted_stderr,
         provider_error=redacted_provider_error,
-    ).with_metadata(redact_sensitive_value(dict(invocation.metadata), secrets))
+    ).with_metadata(redact_sensitive_value(invocation_metadata, secrets))
     redacted_detection = TriggerDetection(tuple(
         TriggerEvidence(item.kind, redact_sensitive_text(item.text, secrets))
         for item in detection.evidence

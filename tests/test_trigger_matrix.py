@@ -36,6 +36,7 @@ from agent_capabilities import AGENT_CAPABILITIES
 from trigger_contracts import (
     InvocationOutcome,
     InvocationState,
+    TriggerEvidenceKind,
     TriggerExpectation,
     TriggerObservation,
     TriggerRepetitionIdentity,
@@ -728,6 +729,229 @@ class ClaudeDetectionTests(unittest.TestCase):
             result = tm.ClaudeAdapter().invoke("q", "haiku", Path(td), 1)
         self.assertIs(result.state, InvocationState.PROVIDER_FAILED)
         self.assertIn("protocol error", result.provider_error or "")
+
+
+CODEX_FIXTURES = ROOT / "tests" / "fixtures" / "codex"
+CODEX_THREAD_ID = "01a09c3f-0000-7000-8000-000000000001"
+
+
+class CodexRolloutDetectionTests(unittest.TestCase):
+    """Skill loads read from the Codex session rollout, with the stream-only
+    detector as fallback.
+
+    The fixtures under tests/fixtures/codex are a redacted copy of one real run
+    of `codex exec --json --skip-git-repo-check -m gpt-5.6-sol 'Use $unslop on
+    ...'` (Codex CLI 0.150.1, 2026-09-13). Its event stream carried only
+    thread.started / turn.started / agent_message / turn.completed and no tool
+    event, while the rollout under $CODEX_HOME/sessions showed the CLI injecting
+    the skill body as a user-role response_item opening with `<skill>`. The
+    thread id, paths, cwd, base instructions, encrypted reasoning, and the skill
+    body are replaced or truncated; record types, roles, and field names are
+    verbatim. `/CODEX_HOME` in the rollout fixture stands for the isolated home."""
+
+    def _events(self) -> str:
+        return (CODEX_FIXTURES / "exec-skill-events.jsonl").read_text(encoding="utf-8")
+
+    def _rollout(self, home: Path) -> str:
+        text = (CODEX_FIXTURES / "rollout-skill-injection.jsonl").read_text(encoding="utf-8")
+        return text.replace("/CODEX_HOME", str(home))
+
+    def _mounted(self, root: Path):
+        tree = root / "tree" / "unslop"
+        tree.mkdir(parents=True)
+        (tree / "SKILL.md").write_text(
+            "---\nname: unslop\ndescription: Cut AI tells from any writing.\n---\n\n# Unslop\n", encoding="utf-8")
+        workspace = root / "workspace"
+        workspace.mkdir()
+        adapter = tm.CodexAdapter(codex_cmd="codex exec --json")
+        return adapter, workspace, adapter.mount(root / "tree", workspace)
+
+    def _observe(self, td: str, *, rollout: bool | str = True, stream_extra=None,
+                 events: str | None = None):
+        root = Path(td)
+        adapter, workspace, copied = self._mounted(root)
+        extra = stream_extra(copied) if callable(stream_extra) else (stream_extra or "")
+        seen: dict = {}
+
+        def fake_run(plan):
+            home = Path(dict(plan.environment)["CODEX_HOME"])
+            seen["home"] = home
+            if rollout:
+                day = home / "sessions" / "2026" / "09" / "13"
+                day.mkdir(parents=True)
+                text = self._rollout(home) if rollout is True else (
+                    rollout(copied) if callable(rollout) else rollout)
+                (day / f"rollout-2026-09-13T13-30-23-{CODEX_THREAD_ID}.jsonl").write_text(text, encoding="utf-8")
+            lines = (events if events is not None else self._events()).splitlines()
+            if extra:
+                lines.insert(len(lines) - 1, extra)
+            return InvocationOutcome.from_process(
+                stdout="\n".join(lines) + "\n", stderr="", returncode=0, elapsed_ms=1)
+
+        with mock.patch.object(tm.CodexAdapter, "_run_argv", staticmethod(fake_run)), \
+             mock.patch.dict(os.environ, {"CODEX_HOME": str(root / "ambient-codex")}):
+            invocation = adapter.invoke("Use $unslop on this sentence", None, workspace, 5)
+            detection = adapter.detect(invocation, ["unslop"], copied)
+        return invocation, detection, copied, seen
+
+    def test_skill_injection_in_rollout_counts_as_load(self):
+        with tempfile.TemporaryDirectory() as td:
+            invocation, detection, copied, seen = self._observe(td, rollout=True)
+            self.assertFalse(seen["home"].exists())
+        self.assertTrue(detection.triggered)
+        self.assertEqual({item.kind for item in detection.evidence}, {TriggerEvidenceKind.CODEX_ROLLOUT})
+        self.assertIn("unslop", detection.evidence[0].text)
+        self.assertEqual(invocation.metadata["codex_rollout_status"], "found")
+        self.assertEqual(invocation.metadata["codex_rollout_home"], "isolated")
+        self.assertTrue(invocation.metadata["codex_rollout_file"].endswith(f"-{CODEX_THREAD_ID}.jsonl"))
+        # The stream alone shows no tool event: the rollout is what decided.
+        stream_only = tm.CodexAdapter().detect(completed_invocation(self._events()), ["unslop"], copied)
+        self.assertFalse(stream_only.triggered)
+
+    def test_missing_rollout_falls_back_to_path_evidence(self):
+        def read_of_mounted(copied):
+            return json.dumps({"type": "item.completed", "item": {
+                "id": "item_1", "type": "command_execution", "status": "completed",
+                "exit_code": 0, "command": f"cat {copied[0]}"}})
+
+        with tempfile.TemporaryDirectory() as td:
+            invocation, detection, _, _ = self._observe(td, rollout=False, stream_extra=read_of_mounted)
+        self.assertTrue(detection.triggered)
+        self.assertEqual({item.kind for item in detection.evidence}, {TriggerEvidenceKind.MOUNTED_PATH})
+        self.assertEqual(invocation.metadata["codex_rollout_status"], "not_found")
+        self.assertNotIn("codex_rollout_home", invocation.metadata)
+
+    def test_failed_rollout_skill_read_does_not_trigger(self):
+        def failed_read(copied):
+            def item(payload: dict) -> str:
+                return json.dumps({"timestamp": "t", "ordinal": 1,
+                                   "type": "response_item", "payload": payload})
+
+            return "\n".join([
+                item({"type": "function_call", "name": "shell", "call_id": "c1",
+                      "arguments": json.dumps({"command": ["cat", str(copied[0])]})}),
+                item({"type": "function_call_output", "call_id": "c1",
+                      "output": "Process exited with code 1. Permission denied."}),
+            ])
+
+        with tempfile.TemporaryDirectory() as td:
+            invocation, detection, _, _ = self._observe(td, rollout=failed_read)
+        self.assertTrue(invocation.observation_complete, invocation.provider_error)
+        self.assertEqual(invocation.metadata["codex_rollout_status"], "found")
+        self.assertFalse(detection.triggered)
+        self.assertEqual(detection.evidence, ())
+
+    def test_stream_line_with_a_duplicate_id_does_not_lose_the_row(self):
+        # Observed live 2026-09-13: 10 of 30 Codex trigger rows died with
+        # `ValueError: duplicate object key: 'id'` because `codex exec --json`
+        # repeats `id` inside some items. The stream is the CLI's, not ours:
+        # the line is kept (last value wins) and the row says which lines were.
+        events = (CODEX_FIXTURES / "exec-duplicate-id-events.jsonl").read_text(encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "duplicate object key: 'id'"):
+            list(sb.iter_json_objects(events))
+        with tempfile.TemporaryDirectory() as td:
+            invocation, detection, copied, _ = self._observe(td, rollout=True, events=events)
+        self.assertTrue(invocation.observation_complete, invocation.provider_error)
+        self.assertIsNone(invocation.provider_error)
+        self.assertEqual(sb.codex_thread_id(events), CODEX_THREAD_ID)
+        self.assertEqual(invocation.metadata["codex_rollout_status"], "found")
+        self.assertTrue(detection.triggered)
+        self.assertEqual({item.kind for item in detection.evidence}, {TriggerEvidenceKind.CODEX_ROLLOUT})
+        self.assertFalse(sb.detect_trigger_detection(events, copied).triggered)
+
+    def test_row_records_which_stream_lines_the_lenient_rule_kept(self):
+        events = (CODEX_FIXTURES / "exec-duplicate-id-events.jsonl").read_text(encoding="utf-8")
+
+        def fake_run(plan):
+            return InvocationOutcome.from_process(stdout=events, stderr="", returncode=0, elapsed_ms=1)
+
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(tm.CodexAdapter, "_run_argv", staticmethod(fake_run)), \
+             mock.patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "ambient-codex")}):
+            tree = Path(td) / "tree"
+            skill = tree / "unslop"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("---\nname: unslop\ndescription: Cut AI tells.\n---\n", encoding="utf-8")
+            row = tm.run_cell_query(
+                tm.CodexAdapter(codex_cmd="codex exec --json"), tree, "Use $unslop", True, None, 12,
+                metadata={"skill_tree_hash": sb.skill_tree_hash(tree)},
+            )
+        self.assertTrue(row["observation_complete"])
+        self.assertEqual(list(row["invocation_metadata"]["stream_duplicate_keys"]), ["line 3: id"])
+        self.assertEqual(list(row["stream_duplicate_keys"]), ["line 3: id"])
+        self.assertEqual(row["usage_normalized"]["input_tokens"], 22215)
+        clean = (CODEX_FIXTURES / "exec-skill-events.jsonl").read_text(encoding="utf-8")
+        self.assertEqual(sb.stream_duplicate_keys(clean), [])
+
+    def test_rollout_detector_keeps_the_strict_artifact_rule(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            rollout = self._rollout(home)
+            lines = rollout.splitlines()
+            lines.insert(2, json.dumps({"timestamp": "t", "ordinal": 9, "type": "event_msg",
+                                        "payload": {"type": "x"}})[:-1] + ',"type":"event_msg"}')
+            copied = [home / "skills" / "unslop" / "SKILL.md"]
+            with self.assertRaisesRegex(ValueError, "duplicate object key: 'type'"):
+                sb.codex_rollout_skill_loads("\n".join(lines) + "\n", ["unslop"], copied)
+            self.assertTrue(sb.codex_rollout_skill_loads(rollout, ["unslop"], copied))
+
+    def test_rollout_without_a_mounted_skill_load_stays_negative(self):
+        other = (CODEX_FIXTURES / "rollout-skill-injection.jsonl").read_text(encoding="utf-8")
+        other = other.replace("<name>unslop</name>", "<name>other-skill</name>").replace(
+            "/CODEX_HOME/skills/unslop/SKILL.md", "/elsewhere/skills/other-skill/SKILL.md")
+        with tempfile.TemporaryDirectory() as td:
+            invocation, detection, _, _ = self._observe(td, rollout=other)
+        self.assertFalse(detection.triggered)
+        self.assertEqual(invocation.metadata["codex_rollout_status"], "found")
+
+    def test_injection_naming_a_mounted_skill_from_elsewhere_is_not_a_load(self):
+        mounted = Path("/tmp/trigger-x-codex-home/skills/unslop/SKILL.md")
+        injected = self._rollout(Path("/Users/someone/.agents"))
+        self.assertEqual(sb.codex_rollout_skill_loads(injected, ["unslop"], [mounted]), [])
+        self.assertEqual(sb.codex_rollout_skill_loads(self._rollout(mounted.parents[2]), ["unslop"], [mounted]),
+                         [f"rollout skill injection: unslop ({mounted})"])
+
+    def test_rollout_tool_calls_and_listings_do_not_count_as_loads(self):
+        mounted = Path("/tmp/trigger-x-codex-home/skills/unslop/SKILL.md")
+
+        def item(payload: dict) -> str:
+            return json.dumps({"timestamp": "t", "ordinal": 1, "type": "response_item", "payload": payload})
+
+        call = item({"type": "function_call", "name": "shell", "call_id": "c1",
+                     "arguments": json.dumps({"command": ["cat", str(mounted)]})})
+        failed_read = item({"type": "function_call_output", "call_id": "c1",
+                            "output": "Permission denied."})
+        listing_call = item({"type": "function_call", "name": "shell", "call_id": "c2",
+                             "arguments": json.dumps({"command": ["ls", str(mounted.parent)]})})
+        listing_output = item({"type": "function_call_output", "call_id": "c2",
+                               "output": "SKILL.md"})
+        listing = item({"type": "message", "role": "developer", "content": [
+            {"type": "input_text", "text": f"- unslop: Cut AI tells. (file: {mounted})"}]})
+        prose = item({"type": "message", "role": "assistant", "content": [
+            {"type": "output_text", "text": f"I would load {mounted}"}]})
+        for record in (call, failed_read, call + "\n" + failed_read, listing_call,
+                       listing_output, listing_call + "\n" + listing_output, listing, prose):
+            self.assertEqual(sb.codex_rollout_skill_loads(record, ["unslop"], [mounted]), [])
+
+    def test_thread_id_and_ambient_home_lookup(self):
+        self.assertEqual(sb.codex_thread_id(self._events()), CODEX_THREAD_ID)
+        self.assertIsNone(sb.codex_thread_id('{"type":"turn.completed"}\n'))
+        self.assertEqual(sb.locate_codex_rollout('{"type":"turn.completed"}\n', None).status, "no_thread_id")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ambient = root / "ambient"
+            day = ambient / "sessions" / "2026" / "09" / "13"
+            day.mkdir(parents=True)
+            (day / f"rollout-2026-09-13T13-30-23-{CODEX_THREAD_ID}.jsonl").write_text(
+                self._rollout(ambient), encoding="utf-8")
+            (root / "isolated").mkdir()
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(ambient)}):
+                found = sb.locate_codex_rollout(self._events(), root / "isolated")
+                self.assertEqual((found.status, found.home), ("found", "ambient"))
+                self.assertIn(sb.CODEX_ROLLOUT_SKILL_TAG, found.text)
+                (root / "other").mkdir()
+                with mock.patch.dict(os.environ, {"CODEX_HOME": str(root / "other")}):
+                    self.assertEqual(sb.locate_codex_rollout(self._events(), root / "isolated").status, "not_found")
 
 
 class CodexAdapterTests(unittest.TestCase):

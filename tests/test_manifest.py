@@ -1,4 +1,4 @@
-"""Manifest shape, datasets, migration, leakage/readiness, and eval-hygiene audits.
+"""Manifest shape, layout, datasets, migration, leakage/readiness, and eval-hygiene audits.
 
 Classes moved verbatim from the PR-named test files (test_audit_fixes,
 test_roadmap_features, test_followup_features, test_external_review_gaps,
@@ -18,6 +18,7 @@ from helpers import (
 from helpers import (
     attest_answer_design,
     make_eval_repo,
+    skill_markdown,
 )
 from helpers import (
     demo_manifest as base_manifest,
@@ -850,6 +851,72 @@ class PerStepValidationTests(unittest.TestCase):
             path = write_manifest(Path(td), manifest)
             with self.assertRaises(SystemExit):
                 sb.validate_manifest(path)
+
+
+class ManifestLayoutTests(unittest.TestCase):
+
+    def test_new_per_skill_evals_layout_resolves_to_base(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            manifest_path = base / "evals" / "unslop" / "shared-benchmark.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text("{}", encoding="utf-8")
+            self.assertEqual(sb.repo_root_for_manifest(manifest_path), base.resolve())
+
+    def test_old_repo_evals_layout_resolves_to_base(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            manifest_path = base / "evals" / "shared-benchmark.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text("{}", encoding="utf-8")
+            self.assertEqual(sb.repo_root_for_manifest(manifest_path), base.resolve())
+
+    def test_old_per_skill_evals_layout_resolves_to_skill_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            skill_dir = base / "skills" / "foo"
+            manifest_path = skill_dir / "evals" / "shared-benchmark.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text("{}", encoding="utf-8")
+            self.assertEqual(sb.repo_root_for_manifest(manifest_path), skill_dir.resolve())
+
+    def test_shallow_paths_fall_through_without_raising(self):
+        bare = Path("shared-benchmark.json")
+        self.assertEqual(sb.repo_root_for_manifest(bare), bare.parent.resolve())
+        root_level = Path("/shared-benchmark.json")
+        self.assertEqual(sb.repo_root_for_manifest(root_level), root_level.parent.resolve())
+
+    def test_doubled_evals_segment_resolves_to_outer_evals(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            manifest_path = base / "evals" / "evals" / "shared-benchmark.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text("{}", encoding="utf-8")
+            self.assertEqual(sb.repo_root_for_manifest(manifest_path), (base / "evals").resolve())
+
+    def test_non_shared_benchmark_name_resolves_to_its_own_parent(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            manifest_path = base / "evals" / "unslop" / "other-manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text("{}", encoding="utf-8")
+            self.assertEqual(sb.repo_root_for_manifest(manifest_path), manifest_path.parent.resolve())
+
+    def test_prepare_resolves_skill_path_from_external_evals_layout(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            skill_path = root / "skills" / "unslop" / "SKILL.md"
+            skill_path.parent.mkdir(parents=True)
+            skill_path.write_text(skill_markdown("unslop", "Cut AI tells. Use for writing."), encoding="utf-8")
+            manifest_path = root / "evals" / "unslop" / "shared-benchmark.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest = base_manifest(skill_name="unslop", skill_paths=["skills/unslop/SKILL.md"])
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            rows = sb.prepared_task_rows(manifest_path, sb.validate_manifest(manifest_path), split="tune")
+            row = next(r for r in rows if r["variant"] == "with_skill")
+            self.assertEqual(row["skill_paths"], [str((root / "skills" / "unslop" / "SKILL.md").resolve())])
+            self.assertEqual(row["skill_root_keys"], ["unslop"])
 
 
 if __name__ == "__main__":

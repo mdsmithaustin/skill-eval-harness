@@ -140,7 +140,8 @@ InvocationRequest
   policy, trust, conditional sandbox, workspace expansion, session, extension, and prompt/model
   flags. Prefix launchers are rejected because they can reinterpret appended arguments; the chosen
   executable itself remains an explicit operator authority recorded in artifacts.
-- `gemini_contracts.py` strictly parses duplicate-free, finite JSON into frozen provider values.
+- `gemini_contracts.py` reads external Gemini CLI JSON with last-value-wins handling for duplicate
+  keys, while finite typed provider contracts and every harness-authored or validated artifact stay strict.
   Stream success requires one `init`, one terminal successful `result`, a non-empty final assistant
   message, paired tool start/result identifiers, and no provider error. Usage is numeric only when
   Gemini supplies a valid token accounting object. A malformed exit-zero envelope therefore becomes

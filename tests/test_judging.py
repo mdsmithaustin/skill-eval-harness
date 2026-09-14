@@ -19,6 +19,7 @@ from helpers import (
     demo_manifest as base_manifest,
 )
 from helpers import (
+    judge_task,
     trace_event,
     write_run,
 )
@@ -1675,6 +1676,70 @@ class JudgeAlignmentTests(unittest.TestCase):
         self.assertEqual(sb.kappa_band(0.0), "poor (<= chance)")
         self.assertEqual(sb.kappa_band(-0.2), "poor (<= chance)")
         self.assertIsNone(sb.kappa_band(None))
+
+
+class BlindJudgePromptTests(unittest.TestCase):
+
+    ARMS = ("with_skill", "without_skill", "old_skill", "ablation:no-examples")
+
+    @staticmethod
+    def _split(prompt: str) -> tuple[str, dict]:
+        head, body = prompt.split("\n\n{\n", 1)
+        return head, json.loads("{\n" + body)
+
+    def test_with_and_without_skill_prompts_are_byte_identical(self):
+        with_skill = judge_task("c", "with_skill", output_path="/runs/c/with_skill/run-1/output.md")
+        without_skill = judge_task("c", "without_skill", output_path="/runs/c/without_skill/run-1/output.md")
+        self.assertNotEqual(with_skill["judge_task_id"], without_skill["judge_task_id"])
+        same_output = "The answer."
+        self.assertEqual(sb.judge_prompt(with_skill, same_output), sb.judge_prompt(without_skill, same_output))
+        a = sb.judge_prompt(with_skill, "first answer")
+        b = sb.judge_prompt(without_skill, "second answer")
+        head_a, payload_a = self._split(a)
+        head_b, payload_b = self._split(b)
+        self.assertEqual(head_a, head_b)
+        self.assertEqual(payload_a.pop("candidate_output"), "first answer")
+        self.assertEqual(payload_b.pop("candidate_output"), "second answer")
+        self.assertEqual(payload_a, payload_b)
+        for prompt in (a, b):
+            self.assertNotIn("with_skill", prompt)
+            self.assertNotIn("judge_task_id", prompt)
+            self.assertNotIn("variant", prompt)
+
+    def test_every_arm_renders_the_same_prompt(self):
+        prompts = {sb.judge_prompt(judge_task("c", arm), "out") for arm in self.ARMS}
+        self.assertEqual(len(prompts), 1)
+
+    def test_arm_named_paths_are_neutralized_in_candidate_output_trajectory_and_artifacts(self):
+        prompts = set()
+        for arm in self.ARMS:
+            output = (f"wrote {arm}/notes.md\n{arm}/next.md, /runs/c/{arm}/run-1/notes.md, "
+                      f"and C:\\runs\\c\\{arm}\\run-1\\notes.md")
+            events = [{"type": "file_read", "path": f"/runs/c/{arm}/run-1/workspace/SKILL.md", "status": "completed"}]
+            prompts.add(sb.judge_prompt(
+                judge_task("c", arm), output, trajectory=events,
+                artifacts=[f"{arm}/artifacts/notes.md"]))
+        self.assertEqual(len(prompts), 1)
+        prompt = prompts.pop()
+        self.assertIn("wrote arm/notes.md\\narm/next.md", prompt)
+        self.assertIn("/runs/c/arm/run-1/notes.md", prompt)
+        self.assertIn("/runs/c/arm/run-1/workspace/SKILL.md", prompt)
+        self.assertIn('"artifacts": [\n    "arm/artifacts/notes.md"', prompt)
+        for arm in self.ARMS:
+            self.assertNotIn(arm, prompt)
+
+    def test_prompt_preserves_arm_labels_and_suffix_bearing_names(self):
+        output = "done with_skill and care; old_skill; ablation:no-examples; with_skill-notes.md"
+        artifacts = ["without_skill-notes.md", "old_skill-summary.txt", "ablation:no-examples-summary.txt"]
+        prompt = sb.judge_prompt(judge_task("c", "with_skill"), output, artifacts=artifacts)
+        _, payload = self._split(prompt)
+        self.assertEqual(payload["candidate_output"], output)
+        self.assertEqual(payload["artifacts"], artifacts)
+
+    def test_prompt_preserves_windows_directory_prefixed_with_n(self):
+        output = r"C:\nwith_skill/file.txt"
+        _, payload = self._split(sb.judge_prompt(judge_task("c", "with_skill"), output))
+        self.assertEqual(payload["candidate_output"], output)
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ and tests; an unknown or multiply owned command cannot fall through a string-bas
 
 ## Manifest
 
-`evals/shared-benchmark.json` is the source of truth. It names the skill, the files under
+The `shared-benchmark.json` manifest, under `evals/` or under `evals/<skill>/`, is the source of truth. It names the skill, the files under
 test (`skill_paths`), the comparison arms (`variants`), the split policy, the `cases`, and
 the `ablations`. `validate_manifest` rejects a manifest whose fixtures are missing, whose
 regex assertions do not compile, or whose hidden cases lack a private prompt reference.
@@ -184,16 +184,21 @@ CompleteArtifactSet`. A malformed marker and a valid marker whose files were int
 tampered with are therefore different states. Existing dictionary readers retain
 `artifact_set_complete` as a compatibility projection and expose the reasoned state alongside it.
 Likewise, `read_event_log_base` produces `MissingEventLog | InvalidEventLog | LoadedEventLog`;
-`read_events_base` is only the legacy tuple adapter. Strict JSON parsing lives in
-`json_contracts.py`, so every disk reader shares duplicate-key and non-finite-number rejection.
+`read_events_base` is only the legacy tuple adapter. JSON parsing lives in
+`json_contracts.py` as two rules that differ only on a repeated object key: `strict_json_loads`
+rejects it and is the rule for every artifact the harness authors or validates, while
+`parse_stream_json`/`stream_json_loads` resolves it last-value-wins (stdlib semantics) and is the
+rule for bytes an external agent CLI wrote (`codex exec --json` repeats `id`), reporting the
+repeated names so a row can record them under `stream_duplicate_keys`. Both reject non-finite
+numbers. `iter_json_objects` and `parse_trace_jsonl_text` select the rule with `strict`.
 
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:10472`), Claude (`run_claude:10658`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:10671`), Claude (`run_claude:10857`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:13248`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4028` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:13459`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:4088` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -290,7 +295,7 @@ those pairs; missing/ineligible arms remain in `pairing` diagnostics and duplica
 `build_slice_summary` breaks results down
 by domain, difficulty, trigger type, and success goal. Case flags mark saturated, no-lift,
 flaky, and with-skill-failed cases. These flags, the leakage lint
-(`prompt_assertion_leakage_findings:813`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:832`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as

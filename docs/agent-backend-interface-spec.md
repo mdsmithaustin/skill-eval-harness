@@ -380,7 +380,7 @@ Live smoke tests remain opt-in by env var, one per adapter:
 3. **Shared judge backend CLI** — initial implementation done.
    - `--judge-backend claude|codex|gemini|vibe|cmd` selects the backend.
    - `--judge-cmd` remains `backend=cmd` for arbitrary providers.
-4. **Gemini adapter** — answer runner and judge implemented with strict official wire contracts and isolated CLI state.
+4. **Gemini adapter** — answer runner and judge implemented with typed provider contracts and isolated CLI state. External CLI duplicate keys use the last value; finite values and lifecycle contracts remain strict.
    - Trigger adapter remains gated on proven headless Agent Skills activation.
 5. **Mistral Vibe adapter** — implemented with local/fake contracts and token-backed smoke evidence for Vibe 2.19.1.
    - Answer runner and judge use `--output json|streaming` and isolated `VIBE_HOME`.

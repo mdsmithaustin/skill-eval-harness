@@ -1402,6 +1402,79 @@ class RunnerOutcomeContractTests(unittest.TestCase):
             self.assertEqual(meta["cost_normalized"], {"source": "missing"})
             self.assertEqual(json.loads((base / "metrics.json").read_text())["schema_version"], 2)
 
+    def test_codex_answer_run_keeps_a_stream_line_with_a_duplicate_id(self):
+        # Observed live 2026-09-13: `codex exec --json` repeats `id` on some event
+        # lines. The artifact rule rejected the line and threw the whole row away
+        # (no metrics at all); the stream rule keeps it and says so in the row.
+        fixture = ROOT / "tests" / "fixtures" / "codex" / "exec-duplicate-id-events.jsonl"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tasks, run_dir = self._one_with_skill_task(root)
+            fake_codex = root / "fake_codex.py"
+            fake_codex.write_text(
+                "import pathlib, sys\n_ = sys.stdin.read()\n"
+                "pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('token from codex')\n"
+                f"sys.stdout.write(pathlib.Path({str(fixture)!r}).read_text(encoding='utf-8'))\n",
+                encoding="utf-8")
+            runs = root / "runs"
+            sb.run_codex(SimpleNamespace(tasks=str(tasks), runs=str(runs),
+                                         codex_cmd=f"{sys.executable} {fake_codex}", timeout=30))
+            base = runs / run_dir
+            self.assertIn("token from codex", (base / "output.md").read_text(encoding="utf-8"))
+            metrics = json.loads((base / "metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(metrics["stream_duplicate_keys"], ["line 3: id"])
+            self.assertNotIn("parse_errors", metrics)
+            self.assertTrue(metrics["trace_observation_complete"])
+            self.assertEqual(metrics["commands"], 1)
+            meta = json.loads((base / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["usage_normalized"]["source"], "trace_normalized")
+            self.assertEqual(meta["usage_normalized"]["input_tokens"], 22215)
+
+
+class StreamDuplicateKeyTests(unittest.TestCase):
+
+    FIXTURE = ROOT / "tests" / "fixtures" / "codex" / "exec-duplicate-id-events.jsonl"
+
+    def test_stream_scan_keeps_the_line_the_artifact_rule_rejects(self):
+        text = self.FIXTURE.read_text(encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "duplicate object key: 'id'"):
+            list(sb.iter_json_objects(text))
+        with self.assertRaisesRegex(ValueError, "duplicate object key: 'id'"):
+            sb.parse_trace_jsonl_text(text)
+        lenient = list(sb.iter_json_objects(text, strict=False))
+        self.assertEqual([r["type"] for r in lenient],
+                         ["thread.started", "turn.started", "item.completed", "item.completed", "turn.completed"])
+        self.assertEqual(lenient[2]["item"]["id"], "item_0")
+        records, errors = sb.parse_trace_jsonl_text(text, strict=False)
+        self.assertEqual(len(records), 5)
+        self.assertEqual(errors, [])
+        _, _, lines, duplicates = sb.parse_trace_jsonl_text_with_lines(text, strict=False)
+        self.assertEqual(lines, [1, 2, 3, 4, 5])
+        self.assertEqual(duplicates, ["line 3: id"])
+        self.assertEqual(sb.stream_duplicate_keys(text), ["line 3: id"])
+
+    def test_stream_rule_still_skips_non_json_and_rejects_non_finite(self):
+        text = "not json\n" + self.FIXTURE.read_text(encoding="utf-8")
+        self.assertEqual(len(list(sb.iter_json_objects(text, strict=False))), 5)
+        records, errors = sb.parse_trace_jsonl_text(text, strict=False)
+        self.assertEqual(len(records), 5)
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("line 1:"), errors)
+        with self.assertRaises(ValueError):
+            sb.parse_trace_jsonl_text('{"v": NaN}\n', strict=False)
+        self.assertEqual(sb.stream_duplicate_keys('{"v": NaN}\n{"a": 1, "a": 2}\n'), ["line 2: a"])
+
+    def test_trace_jsonl_reread_uses_the_rule_that_wrote_the_raw_ref(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            (base / "trace.jsonl").write_text(self.FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+            record = sb.raw_trace_record_for_ref(base, {"file": "trace.jsonl", "line": 3})
+            self.assertIsNotNone(record)
+            self.assertEqual(record["item"]["command"], "ls")
+            records, errors = sb.load_trace_jsonl(base / "trace.jsonl")
+            self.assertEqual((len(records), errors), (5, []))
+
+
 
 class TraceDialectRegistryTests(unittest.TestCase):
     """ONE registry of per-provider trace semantics — how raw records flatten

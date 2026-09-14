@@ -43,7 +43,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass as _dataclass
 from decimal import ROUND_CEILING, Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn, Protocol, cast
 
 # Direct ``python skill_benchmark.py`` execution must share the canonical module
@@ -152,6 +152,8 @@ from jetty_contracts import (
     lifecycle_from_status,
 )
 from json_contracts import (
+    parse_stream_json,
+    stream_json_loads,
     strict_json_loads,
     thaw_json_value,
     unique_json_object,
@@ -167,7 +169,11 @@ from judge_verdict import (
     verdict_from_dict,
 )
 from manifest_contracts import (
+    ABLATION_VARIANT_PREFIX,
     DEFAULT_EXECUTION_VARIANTS,
+    OLD_SKILL,
+    WITH_SKILL,
+    WITHOUT_SKILL,
     CaseId,
     CaseKind,
     CasePopulation,
@@ -544,14 +550,20 @@ def emit_report(report: Any, out: str | Path | None) -> None:
         print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
 
 
-def iter_json_objects(text: str):
+def iter_json_objects(text: str, *, strict: bool = True):
     """Yield each parseable JSON value found line-by-line in a runner's stream,
     silently skipping non-JSON lines. The one scanning loop shared by trigger
     detection, stream telemetry, and the agent adapters — previously five
-    hand-rolled copies of the same try/except."""
+    hand-rolled copies of the same try/except.
+
+    `strict=True` applies the artifact rule (a repeated object key raises);
+    `strict=False` applies the external-CLI stream rule (`stream_json_loads`:
+    last value wins), for bytes an agent CLI emitted and the harness does not
+    control. A line that is not JSON is skipped either way."""
+    loads = strict_json_loads if strict else stream_json_loads
     for line in text.splitlines():
         try:
-            yield strict_json_loads(line)
+            yield loads(line)
         except json.JSONDecodeError as exc:
             if (exc.__cause__ is not None
                     or "duplicate object key" in exc.msg
@@ -668,8 +680,15 @@ def case_prompt(case: dict[str, Any], manifest_path: Path, allow_missing: bool =
 
 
 def repo_root_for_manifest(manifest_path: Path) -> Path:
-    if manifest_path.name == "shared-benchmark.json" and manifest_path.parent.name == "evals":
-        return manifest_path.parent.parent.resolve()
+    """A skill installer copies a skill directory verbatim, so a manifest under
+    <base>/evals/<skill>/ (not just <base>/evals/) lets eval files sit outside
+    the tree that reaches consumers."""
+    if manifest_path.name == "shared-benchmark.json":
+        evals_dir = manifest_path.parent
+        if evals_dir.name != "evals":
+            evals_dir = evals_dir.parent
+        if evals_dir.name == "evals":
+            return evals_dir.parent.resolve()
     return manifest_path.parent.resolve()
 
 
@@ -1634,12 +1653,12 @@ def prepared_task_rows(
                     "no applicable gate or critical grading oracle")
     repo_root = repo_root_for_manifest(manifest_path)
     real_skill_paths = [str((repo_root / p).resolve()) for p in manifest.get("skill_paths", [])]
-    real_skill_root_keys = [_skill_root_key(p) for p in manifest.get("skill_paths", [])]
+    real_skill_root_keys = skill_root_keys_for(repo_root, manifest.get("skill_paths", []))
     # The old/baseline arm's files, resolved ONCE here so every runner reads the
     # same row field instead of each re-deriving them (the divergence that let
     # Codex mount the current skill for an old_skill arm while Jetty mounted the old).
     old_skill_paths = [str((repo_root / p).resolve()) for p in manifest.get("old_skill_paths", [])]
-    old_skill_root_keys = [_skill_root_key(p) for p in manifest.get("old_skill_paths", [])]
+    old_skill_root_keys = skill_root_keys_for(repo_root, manifest.get("old_skill_paths", []))
     # When an ablation directory is provided, materialize each declared-removal
     # ablation once and point its rows at the altered tree. A caller that has
     # already materialized (e.g. export-jetty, which also needs the trees for
@@ -1696,7 +1715,7 @@ def prepared_task_rows(
                     # Materialized: carry the arm's TYPED provenance straight through —
                     # no dict round-trip, no re-parse (the drop-then-reparse is gone).
                     skill_paths = list(trees[aid].skill_files.values())   # mounted files == ablated tree
-                    skill_root_keys = [_skill_root_key(root) for root in trees[aid].skill_files]
+                    skill_root_keys = skill_root_keys_for(repo_root, list(trees[aid].skill_files))
                     record = trees[aid].arm.provenance
                 else:
                     # Instruction-simulated: no tree, original skill mounted; its typed
@@ -2276,13 +2295,60 @@ def resolve_skill_root(comp: dict[str, Any], skill_paths: list[str]) -> str | No
     return r if r is not None else (skill_paths[0] if skill_paths else None)
 
 
-def _skill_root_key(rel: str) -> str:
-    """Sanitized directory name for a skill root inside a built tree. The SAME
-    function must name the canonical (with_skill) tree and the materialized pre-edit
-    tree, because _hash_tree includes this directory name — any divergence would make
-    canonical_skill_tree_hash != the ablation's parent_skill_hash and break
-    TreeIdentity.same_revision_as."""
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", rel)
+def skill_root_key(repo_root: Path, rel: str) -> str:
+    """Directory name a skill root is mounted under inside every built tree (the
+    canonical with_skill tree, a materialized ablation's pre-edit and edited trees,
+    an answer workspace's skills/, and the skills dir every trigger adapter mounts).
+
+    The key is the skill's own directory name: the parent directory of a SKILL.md
+    path, or the directory itself when the path names one. The Agent Skills
+    specification discovers a skill through a directory named after it, so
+    sanitizing the manifest string instead (`skills_good-pr_SKILL.md`, and
+    `SKILL.md/SKILL.md` for a per-skill manifest's `SKILL.md`) broke discovery for
+    every layout. A root that IS the repo root has no directory segment of its own;
+    its key is the SKILL.md frontmatter `name`, never the checkout's basename, so
+    the tree hash cannot depend on where the repo was cloned.
+
+    This is the ONE owner of the key. _hash_tree includes this directory name, so
+    any second derivation would make canonical_skill_tree_hash != the ablation's
+    parent_skill_hash and break TreeIdentity.same_revision_as. skill_root_keys_for
+    adds the collision gate on top of it."""
+    src = Path(repo_root) / rel
+    rel_dir = PurePosixPath(rel) if src.is_dir() else PurePosixPath(rel).parent
+    name = rel_dir.name
+    if name in {"", "."}:
+        skill_md = src / "SKILL.md" if src.is_dir() else src
+        if skill_md.name != "SKILL.md" or not skill_md.is_file():
+            raise AblationError(
+                f"skill root {rel!r} is the repo root itself, so its mount name comes from "
+                f"SKILL.md frontmatter, but {skill_md} is not a SKILL.md file")
+        value = frontmatter_value(skill_md.read_text(encoding="utf-8", errors="replace"), "name")
+        if not isinstance(value, str) or not value.strip():
+            raise AblationError(
+                f"skill root {rel!r} is the repo root itself, so its mount name comes from "
+                f"SKILL.md frontmatter, but {skill_md} has no non-empty name field")
+        name = value.strip()
+    key = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+    if not key or key in {".", ".."}:
+        raise AblationError(f"skill root {rel!r} does not yield a usable mount directory name ({key!r})")
+    return key
+
+
+def skill_root_keys_for(repo_root: Path, skill_paths: Sequence[str]) -> list[str]:
+    """Mount keys for skill roots, in declaration order, refusing two roots that
+    would share a directory in the built tree (the copier would otherwise raise an
+    unwrapped FileExistsError mid-materialization)."""
+    keys: list[str] = []
+    seen: dict[str, str] = {}
+    for rel in skill_paths:
+        key = skill_root_key(repo_root, rel)
+        if key in seen:
+            raise AblationError(
+                f"skill roots {seen[key]!r} and {rel!r} both mount as {key!r}; each skill "
+                "directory name must be unique across skill_paths, so rename one skill directory")
+        seen[key] = rel
+        keys.append(key)
+    return keys
 
 
 def derived_population(components: list[dict[str, Any]]) -> str:
@@ -2741,14 +2807,7 @@ def _reject_overlapping_skill_roots(repo_root: Path, manifest: dict[str, Any]) -
                 raise AblationError(f"skill roots {ri!r} and {rj!r} are copied from the same directory {di}; the ablated copy and an unablated copy would coexist — declare a single root")
             if di in dj.parents:
                 raise AblationError(f"skill root {ri!r} (dir {di}) is an ancestor of skill root {rj!r}; copying it would include an unablated duplicate of {rj!r} — declare non-overlapping roots")
-    # Distinct roots whose sanitized tree-key collides would overwrite each other in
-    # the built tree (an otherwise-unwrapped FileExistsError); reject as an AblationError.
-    seen_keys: dict[str, str] = {}
-    for r in manifest.get("skill_paths", []):
-        k = _skill_root_key(r)
-        if k in seen_keys:
-            raise AblationError(f"skill roots {seen_keys[k]!r} and {r!r} both map to tree key {k!r}; rename one so their built directories do not collide")
-        seen_keys[k] = r
+    skill_root_keys_for(repo_root, manifest.get("skill_paths", []))
 
 
 def _copy_skill_root(src_dir: Path, dst_dir: Path) -> None:
@@ -3121,10 +3180,10 @@ def materialize(validated: ValidatedAblation, out_root: Path) -> MaterializedArm
         # Copy EVERY manifest root (not just the ones a component touches) so the
         # ablated arm has the same file surface as with_skill, differing only by
         # the declared edits.
-        for r in (skill_paths or list(dict.fromkeys(root_for(c) for c in comps))):
+        rels = list(skill_paths or dict.fromkeys(root_for(c) for c in comps))
+        for r, key in zip(rels, skill_root_keys_for(repo_root, rels), strict=True):
             src = _safe_under(repo_root, repo_root / r)
             src_dir = src if src.is_dir() else src.parent
-            key = _skill_root_key(r)
             dst_dir = tmp / key
             _copy_skill_root(src_dir, dst_dir)
             main = dst_dir / "SKILL.md" if (src.is_dir() or src.name == "SKILL.md") else dst_dir / src.name
@@ -3249,10 +3308,11 @@ def build_canonical_skill_tree(repo_root: Path, manifest: dict[str, Any], dest_d
     _reject_overlapping_skill_roots(repo_root, manifest)
     _reject_output_root_overlap(dest_dir, repo_root, manifest)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    for r in manifest.get("skill_paths", []):
+    rels = list(manifest.get("skill_paths", []))
+    for r, key in zip(rels, skill_root_keys_for(repo_root, rels), strict=True):
         src = _safe_under(repo_root, repo_root / r)
         src_dir = src if src.is_dir() else src.parent
-        _copy_skill_root(src_dir, dest_dir / _skill_root_key(r))
+        _copy_skill_root(src_dir, dest_dir / key)
     return dest_dir
 
 
@@ -6392,7 +6452,7 @@ def raw_trace_record_for_ref(run_base: Path | None, ref: Any) -> dict[str, Any] 
     for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
         if i == line_no:
             try:
-                record = strict_json_loads(line)
+                record = stream_json_loads(line)
             except json.JSONDecodeError:
                 return None
             return record if isinstance(record, dict) else None
@@ -6529,7 +6589,7 @@ def detect_trigger_records(records: Iterable[dict[str, Any]], copied_paths: list
 def detect_trigger_detection(stdout: str, copied_paths: list[Path],
                              *, source: str = "generic") -> TriggerDetection:
     """Typed skill-invocation detector for a raw JSON event stream."""
-    records = [event for event in iter_json_objects(stdout) if isinstance(event, dict)]
+    records = [event for event in iter_json_objects(stdout, strict=False) if isinstance(event, dict)]
     return detect_trigger_records(records, copied_paths, source=source)
 
 
@@ -7294,22 +7354,36 @@ def stringify_trace_value(value: Any) -> str:
 
 
 def parse_trace_jsonl_text_with_lines(
-    text: str, *, strict_json_errors: bool = True,
-) -> tuple[list[dict[str, Any]], list[str], list[int]]:
+    text: str, *, strict_json_errors: bool = True, strict: bool = True,
+) -> tuple[list[dict[str, Any]], list[str], list[int], list[str]]:
     """Parse JSONL while retaining each object's physical source line.
 
     Blank, malformed, and non-object lines do not become records, but they do
     occupy source lines. Keeping that mapping makes every emitted raw_ref
     resolvable against the original trace.jsonl rather than a filtered ordinal.
+
+    `strict=True` is the artifact rule (`strict_json_loads`: a repeated object
+    key is a defect). `strict=False` is the external-CLI stream rule
+    (`parse_stream_json`: a repeated key resolves last-value-wins and is
+    reported in the fourth result as `line N: key`), so a valid line an agent
+    CLI emitted is never dropped. Every other failure is unchanged: a line that
+    is not JSON is skipped and recorded, and a non-finite constant raises (or
+    is recorded when `strict_json_errors` is off).
     """
     records: list[dict[str, Any]] = []
     errors: list[str] = []
     record_lines: list[int] = []
+    duplicate_keys: list[str] = []
     for line_number, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
         try:
-            obj = strict_json_loads(line)
+            if strict:
+                obj = strict_json_loads(line)
+            else:
+                parsed = parse_stream_json(line)
+                obj = parsed.value
+                duplicate_keys.extend(f"line {line_number}: {key}" for key in parsed.duplicate_keys)
         except json.JSONDecodeError as exc:
             if ("duplicate object key" in exc.msg
                     or "non-finite numeric constant" in exc.msg
@@ -7327,16 +7401,30 @@ def parse_trace_jsonl_text_with_lines(
             record_lines.append(line_number)
         else:
             errors.append(f"line {line_number}: JSON value is not an object")
-    return records, errors, record_lines
+    return records, errors, record_lines, duplicate_keys
 
 
-def parse_trace_jsonl_text(text: str) -> tuple[list[dict[str, Any]], list[str]]:
-    records, errors, _ = parse_trace_jsonl_text_with_lines(text)
+def parse_trace_jsonl_text(
+    text: str, *, strict: bool = True,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    records, errors, _, _ = parse_trace_jsonl_text_with_lines(text, strict=strict)
     return records, errors
 
 
+def stream_duplicate_keys(text: str) -> list[str]:
+    """`line N: key` for every duplicate object key the stream rule resolved in
+    an external CLI stream; empty when the strict rule would have accepted
+    every line. Never raises: it only annotates a row."""
+    _, _, _, duplicates = parse_trace_jsonl_text_with_lines(
+        text, strict_json_errors=False, strict=False)
+    return duplicates
+
+
 def load_trace_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
-    return parse_trace_jsonl_text(path.read_text(encoding="utf-8", errors="replace"))
+    # trace.jsonl is the provider's stream preserved verbatim, so it is read
+    # with the stream rule the writer used; the harness-authored sidecars
+    # (events.json, metrics.json, metadata.json) stay on the strict rule.
+    return parse_trace_jsonl_text(path.read_text(encoding="utf-8", errors="replace"), strict=False)
 
 
 def nested_item_type(record: dict[str, Any]) -> str:
@@ -7691,7 +7779,7 @@ def vibe_stream_flat_records(records: list[dict[str, Any]], *,
                     continue
                 if isinstance(arguments, str):
                     try:
-                        arguments = strict_json_loads(arguments)
+                        arguments = stream_json_loads(arguments)
                     except json.JSONDecodeError:
                         invalid(line, "tool call arguments must be a JSON object")
                         continue
@@ -7890,7 +7978,7 @@ def _pi_stream_semantics(records: list[dict[str, Any]], pi_stream: PiStream | No
 
 
 def _generic_usage_and_cost_blocks(raw_text: str, pi_stream: PiStream | None) -> tuple[dict[str, Any], dict[str, Any]]:
-    records = [obj for obj in iter_json_objects(raw_text) if isinstance(obj, dict)]
+    records = [obj for obj in iter_json_objects(raw_text, strict=False) if isinstance(obj, dict)]
     return _generic_stream_usage_and_cost(records)
 
 
@@ -8287,7 +8375,7 @@ class PiStream:
     def parse(cls, raw_text: str) -> PiStream:
         if not isinstance(raw_text, str):
             raise TypeError("Pi stream must be text")
-        records, errors = parse_trace_jsonl_text(raw_text)
+        records, errors = parse_trace_jsonl_text(raw_text, strict=False)
         return cls.from_records(records, errors)
 
 
@@ -8330,8 +8418,8 @@ def write_trace_artifacts(
     run_dir.mkdir(parents=True, exist_ok=True)
     if write_raw_trace:
         (run_dir / "trace.jsonl").write_text(trace_text, encoding="utf-8")
-    parsed_records, parsed_errors, record_lines = parse_trace_jsonl_text_with_lines(
-        trace_text, strict_json_errors=not retain_invalid_provider_trace)
+    parsed_records, parsed_errors, record_lines, duplicate_keys = parse_trace_jsonl_text_with_lines(
+        trace_text, strict_json_errors=not retain_invalid_provider_trace, strict=False)
     if source.casefold() == "pi" and pi_stream is not None:
         records, parse_errors = list(pi_stream.records), list(pi_stream.parse_errors)
         if len(record_lines) != len(records):
@@ -8354,6 +8442,8 @@ def write_trace_artifacts(
     if parse_errors:
         metrics["parse_errors"] = parse_errors[:20]
         metrics["errors"] = int(metrics.get("errors", 0) or 0) + len(parse_errors)
+    if duplicate_keys:
+        metrics["stream_duplicate_keys"] = duplicate_keys[:20]
     # A trace-derived count is observed only when at least one valid event was
     # captured and parsing completed. Completion is derived here and reserved:
     # arbitrary caller metrics cannot promote an absent trace.
@@ -8366,7 +8456,7 @@ def write_trace_artifacts(
         "telemetry_schema_version", "usage_normalized", "cost_normalized",
         "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
         "cache_write_tokens", "cache_creation_tokens", "cost_usd", "otel",
-        "parse_errors", "trace_protocol_errors",
+        "parse_errors", "trace_protocol_errors", "stream_duplicate_keys",
         "skill_invoked", "skill_invocation_evidence", "retries",
         "repeated_command_max", "commands", "tool_calls", "file_reads",
         "file_writes", "errors", "schema_version", "source",
@@ -9012,6 +9102,115 @@ def codex_env_for_home(codex_home: Path) -> tuple[dict[str, str], dict[str, Any]
     # directory and should not become a handle for later artifact readers.
     meta = {**seeded, "codex_home": "<isolated CODEX_HOME outside workdir>"}
     return env, meta
+
+
+CODEX_SESSIONS_DIRNAME = "sessions"
+CODEX_ROLLOUT_SKILL_TAG = "<skill>"
+_CODEX_SKILL_TAG_PATTERNS = {
+    tag: re.compile(rf"<{tag}>(.*?)</{tag}>", re.DOTALL) for tag in ("name", "path")
+}
+
+
+@_dataclass(frozen=True)
+class CodexRollout:
+    """Where the persisted transcript of one `codex exec --json` thread was
+    looked for, and what it held. Codex writes it under
+    `$CODEX_HOME/sessions/<y>/<m>/<d>/rollout-<stamp>-<thread_id>.jsonl`; the
+    thread id comes from the stream's `thread.started` event. `status` is
+    `found`, `not_found`, or `no_thread_id`; `home` names which CODEX_HOME held
+    it (`isolated` for the run's scratch home, `ambient` for the caller's)."""
+
+    status: str
+    home: str | None = None
+    file_name: str | None = None
+    text: str | None = None
+
+    def metadata(self) -> dict[str, Any]:
+        """The JSON-safe record a trigger row keeps so a reader can tell whether
+        the rollout detector had anything to read."""
+        meta: dict[str, Any] = {"codex_rollout_status": self.status}
+        if self.home is not None:
+            meta["codex_rollout_home"] = self.home
+        if self.file_name is not None:
+            meta["codex_rollout_file"] = self.file_name
+        return meta
+
+
+def codex_thread_id(stdout: str) -> str | None:
+    """The thread id Codex announces in its `thread.started` event."""
+    for record in iter_json_objects(stdout, strict=False):
+        if isinstance(record, dict) and record.get("type") == "thread.started":
+            thread_id = record.get("thread_id")
+            if isinstance(thread_id, str) and thread_id.strip():
+                return thread_id.strip()
+            return None
+    return None
+
+
+def codex_rollout_path(codex_home: Path, thread_id: str) -> Path | None:
+    sessions = codex_home / CODEX_SESSIONS_DIRNAME
+    if not sessions.is_dir():
+        return None
+    suffix = f"-{thread_id}.jsonl"
+    matches = sorted(
+        path for path in sessions.rglob("rollout-*.jsonl")
+        if path.is_file() and path.name.endswith(suffix))
+    return matches[0] if matches else None
+
+
+def locate_codex_rollout(stdout: str, isolated_home: Path | None = None) -> CodexRollout:
+    """Find the rollout for the thread `stdout` announces. The run's isolated
+    CODEX_HOME is searched first, then the ambient `$CODEX_HOME` (default
+    `~/.codex`) for a `--codex-cmd` wrapper that ignored the isolated home. A
+    thread id is unique, so either hit is this run's own transcript."""
+    thread_id = codex_thread_id(stdout)
+    if thread_id is None:
+        return CodexRollout(status="no_thread_id")
+    homes: list[tuple[str, Path]] = []
+    if isolated_home is not None:
+        homes.append(("isolated", isolated_home))
+    homes.append(("ambient", Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))))
+    for label, home in homes:
+        path = codex_rollout_path(home, thread_id)
+        if path is not None:
+            return CodexRollout(status="found", home=label, file_name=path.name,
+                                text=path.read_text(encoding="utf-8", errors="replace"))
+    return CodexRollout(status="not_found")
+
+
+def _codex_skill_tag(text: str, tag: str) -> str | None:
+    match = _CODEX_SKILL_TAG_PATTERNS[tag].search(text)
+    return match.group(1).strip() if match else None
+
+
+def codex_rollout_skill_loads(rollout_text: str, skill_names: list[str], copied_paths: list[Path]) -> list[str]:
+    """Skill loads a Codex rollout proves through the CLI's own `<skill>`
+    injection. The injection is a user-role `response_item` whose text opens
+    with `<skill>`, names a mounted skill, and, when present, carries a `<path>`
+    under the mount. Tool calls, listings, prose, and outputs can mention a skill without
+    loading it, so they do not count here."""
+    needles = [str(p) for p in copied_paths] + [str(p.parent) for p in copied_paths]
+    names = set(skill_names)
+    evidence: list[str] = []
+    for record in iter_json_objects(rollout_text):
+        if not isinstance(record, dict) or record.get("type") != "response_item":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        item_type = str(payload.get("type") or "")
+        if item_type == "message":
+            if payload.get("role") != "user":
+                continue
+            for block in payload.get("content") or []:
+                text = str(block.get("text") or "") if isinstance(block, dict) else ""
+                if not text.startswith(CODEX_ROLLOUT_SKILL_TAG):
+                    continue
+                name = _codex_skill_tag(text, "name")
+                path = _codex_skill_tag(text, "path")
+                if name in names and (path is None or any(n and n in path for n in needles)):
+                    evidence.append(f"rollout skill injection: {name}" + (f" ({path})" if path else ""))
+    return evidence[:5]
 
 
 def _strip_json_comments(text: str) -> str:
@@ -10046,9 +10245,9 @@ def parse_vibe_messages_with_errors(
     if not text:
         return [], ["Vibe stream is empty"]
     try:
-        parsed = strict_json_loads(text)
+        parsed = stream_json_loads(text)
     except json.JSONDecodeError:
-        return parse_trace_jsonl_text(text)
+        return parse_trace_jsonl_text(text, strict=False)
     if isinstance(parsed, list):
         errors = [f"Vibe message {index} is not an object"
                   for index, item in enumerate(parsed, 1)
@@ -10137,7 +10336,7 @@ def vibe_trace_text(messages: list[dict[str, Any]], stdout: str) -> str:
 
 def vibe_skill_tool_evidence(stdout: str, skill_names: list[str]) -> list[str]:
     """Detect only completed, schema-valid Vibe `skill` tool lifecycles."""
-    records, errors = parse_trace_jsonl_text(stdout)
+    records, errors = parse_trace_jsonl_text(stdout, strict=False)
     if errors:
         return []
     events, metrics = normalize_trace_records(records, source="vibe")
@@ -10510,9 +10709,9 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     env: dict[str, Any] | None = None
     stripped = text.strip()
     try:
-        single = strict_json_loads(stripped)
+        single = stream_json_loads(stripped)
     except json.JSONDecodeError:
-        records, errors = parse_trace_jsonl_text(text)
+        records, errors = parse_trace_jsonl_text(text, strict=False)
         results = [record for record in records if record.get("type") == "result"]
         if errors:
             return {"answer": "", "raw_response": text, "cost_usd": None,
@@ -10963,7 +11162,7 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
         "Codex final message is not valid UTF-8"
         if not last_message_utf8_valid else None)
     if result.stdout.strip() and result.stdout_utf8_valid:
-        records, parse_errors = parse_trace_jsonl_text(result.stdout)
+        records, parse_errors = parse_trace_jsonl_text(result.stdout, strict=False)
         trace_protocol_error = (
             _codex_trace_protocol_error(records, None)
             if records and not parse_errors else "invalid Codex JSON stream")
@@ -11752,12 +11951,23 @@ def verdict_schema_for(assertion: dict[str, Any]) -> dict[str, Any]:
             "properties": {"passed": {"type": "boolean"}, "score": {"type": "number"}, "rationale": {"type": "string"}}}
 
 
+JUDGE_ARM_PATH_SEGMENT = re.compile(
+    r"(?:(?<=[/\\\"])|(?<!\S)|(?<=(?<!\\)\\n))(?:"
+    + "|".join(re.escape(name) for name in (WITH_SKILL, WITHOUT_SKILL, OLD_SKILL))
+    + "|" + re.escape(ABLATION_VARIANT_PREFIX) + r"[^/\\\s\"]+"
+    + r")(?=[/\\])"
+)
+
+
+def blind_judge_payload_text(text: str) -> str:
+    """Replace arm-named path segments in serialized judge material with `arm`."""
+    return JUDGE_ARM_PATH_SEGMENT.sub("arm", text)
+
+
 def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | None = None, metrics: dict | None = None, artifacts: list | None = None, explore_dir: str | None = None, steps: list | None = None) -> str:
     assertion = task.get("assertion", {})
     payload = {
-        "judge_task_id": task.get("judge_task_id"),
         "case_id": task.get("case_id"),
-        "variant": task.get("variant"),
         "run_number": task.get("run_number"),
         "prompt": task.get("prompt"),
         "expected_behavior": task.get("expected_behavior", []),
@@ -11792,6 +12002,7 @@ def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | N
     # G4: hand the model the exact schema the validator enforces (purely additive
     # instruction — the parse path is unchanged).
     schema_hint = "Your output MUST validate against this JSON Schema:\n" + json.dumps(verdict_schema_for(assertion)) + "\n\n"
+    payload_text = blind_judge_payload_text(json.dumps(payload, indent=2, ensure_ascii=False))
     if is_per_step_assertion(assertion):
         return (
             "You are grading one Skill Eval Harness judge assertion PER STEP of the run's trajectory.\n"
@@ -11802,7 +12013,7 @@ def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | N
             "entry per step, using each step's given name, in the given order), rationale (string).\n"
             + context_hint
             + schema_hint
-            + json.dumps(payload, indent=2, ensure_ascii=False)
+            + payload_text
         )
     if assertion.get("graded_dimensions"):
         return (
@@ -11812,7 +12023,7 @@ def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | N
             "Return only JSON with keys: dimension_scores (object mapping each dimension name to a number), rationale (string).\n"
             + context_hint
             + schema_hint
-            + json.dumps(payload, indent=2, ensure_ascii=False)
+            + payload_text
         )
     if assertion.get("dynamic_rubric"):
         minimum = (assertion.get("dynamic_rubric") or {}).get("minimum_criteria", 3)
@@ -11823,7 +12034,7 @@ def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | N
             "Return only JSON with keys: criteria (list of {name (string), met (boolean)}), rationale (string).\n"
             + context_hint
             + schema_hint
-            + json.dumps(payload, indent=2, ensure_ascii=False)
+            + payload_text
         )
     plain_contract = (
         "Return only JSON with keys: score (required normalized number in [0, 1]), "
@@ -11837,7 +12048,7 @@ def judge_prompt(task: dict[str, Any], output_text: str, *, trajectory: list | N
         + plain_contract
         + context_hint
         + schema_hint
-        + json.dumps(payload, indent=2, ensure_ascii=False)
+        + payload_text
     )
 
 
