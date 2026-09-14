@@ -779,7 +779,8 @@ class CodexRolloutDetectionTests(unittest.TestCase):
             if rollout:
                 day = home / "sessions" / "2026" / "09" / "13"
                 day.mkdir(parents=True)
-                text = self._rollout(home) if rollout is True else rollout
+                text = self._rollout(home) if rollout is True else (
+                    rollout(copied) if callable(rollout) else rollout)
                 (day / f"rollout-2026-09-13T13-30-23-{CODEX_THREAD_ID}.jsonl").write_text(text, encoding="utf-8")
             lines = (events if events is not None else self._events()).splitlines()
             if extra:
@@ -819,6 +820,26 @@ class CodexRolloutDetectionTests(unittest.TestCase):
         self.assertEqual({item.kind for item in detection.evidence}, {TriggerEvidenceKind.MOUNTED_PATH})
         self.assertEqual(invocation.metadata["codex_rollout_status"], "not_found")
         self.assertNotIn("codex_rollout_home", invocation.metadata)
+
+    def test_failed_rollout_skill_read_does_not_trigger(self):
+        def failed_read(copied):
+            def item(payload: dict) -> str:
+                return json.dumps({"timestamp": "t", "ordinal": 1,
+                                   "type": "response_item", "payload": payload})
+
+            return "\n".join([
+                item({"type": "function_call", "name": "shell", "call_id": "c1",
+                      "arguments": json.dumps({"command": ["cat", str(copied[0])]})}),
+                item({"type": "function_call_output", "call_id": "c1",
+                      "output": "Process exited with code 1. Permission denied."}),
+            ])
+
+        with tempfile.TemporaryDirectory() as td:
+            invocation, detection, _, _ = self._observe(td, rollout=failed_read)
+        self.assertTrue(invocation.observation_complete, invocation.provider_error)
+        self.assertEqual(invocation.metadata["codex_rollout_status"], "found")
+        self.assertFalse(detection.triggered)
+        self.assertEqual(detection.evidence, ())
 
     def test_stream_line_with_a_duplicate_id_does_not_lose_the_row(self):
         # Observed live 2026-09-13: 10 of 30 Codex trigger rows died with
@@ -890,7 +911,7 @@ class CodexRolloutDetectionTests(unittest.TestCase):
         self.assertEqual(sb.codex_rollout_skill_loads(self._rollout(mounted.parents[2]), ["unslop"], [mounted]),
                          [f"rollout skill injection: unslop ({mounted})"])
 
-    def test_tool_call_reading_skill_md_counts_but_output_and_listing_do_not(self):
+    def test_rollout_tool_calls_and_listings_do_not_count_as_loads(self):
         mounted = Path("/tmp/trigger-x-codex-home/skills/unslop/SKILL.md")
 
         def item(payload: dict) -> str:
@@ -898,14 +919,18 @@ class CodexRolloutDetectionTests(unittest.TestCase):
 
         call = item({"type": "function_call", "name": "shell", "call_id": "c1",
                      "arguments": json.dumps({"command": ["cat", str(mounted)]})})
-        output = item({"type": "function_call_output", "call_id": "c1", "output": f"read {mounted}"})
+        failed_read = item({"type": "function_call_output", "call_id": "c1",
+                            "output": "Permission denied."})
+        listing_call = item({"type": "function_call", "name": "shell", "call_id": "c2",
+                             "arguments": json.dumps({"command": ["ls", str(mounted.parent)]})})
+        listing_output = item({"type": "function_call_output", "call_id": "c2",
+                               "output": "SKILL.md"})
         listing = item({"type": "message", "role": "developer", "content": [
             {"type": "input_text", "text": f"- unslop: Cut AI tells. (file: {mounted})"}]})
         prose = item({"type": "message", "role": "assistant", "content": [
             {"type": "output_text", "text": f"I would load {mounted}"}]})
-        self.assertEqual(sb.codex_rollout_skill_loads(call, ["unslop"], [mounted]),
-                         [f"rollout function_call: {mounted}"])
-        for record in (output, listing, prose):
+        for record in (call, failed_read, call + "\n" + failed_read, listing_call,
+                       listing_output, listing_call + "\n" + listing_output, listing, prose):
             self.assertEqual(sb.codex_rollout_skill_loads(record, ["unslop"], [mounted]), [])
 
     def test_thread_id_and_ambient_home_lookup(self):

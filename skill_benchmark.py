@@ -9184,13 +9184,11 @@ def _codex_skill_tag(text: str, tag: str) -> str | None:
 
 
 def codex_rollout_skill_loads(rollout_text: str, skill_names: list[str], copied_paths: list[Path]) -> list[str]:
-    """Skill loads a Codex rollout proves. Two shapes count: the CLI's own
-    `<skill>` injection (a user-role `response_item` whose text opens with
-    `<skill>` and names a mounted skill, with any `<path>` under the mount), and
-    a tool call (`function_call`, `custom_tool_call`, `local_shell_call`) whose
-    arguments name the mounted SKILL.md or its directory. Developer-role skill
-    listings, assistant prose, and tool outputs mention names and paths without
-    loading anything, so they never count."""
+    """Skill loads a Codex rollout proves through the CLI's own `<skill>`
+    injection. The injection is a user-role `response_item` whose text opens
+    with `<skill>`, names a mounted skill, and, when present, carries a `<path>`
+    under the mount. Tool calls, listings, prose, and outputs can mention a skill without
+    loading it, so they do not count here."""
     needles = [str(p) for p in copied_paths] + [str(p.parent) for p in copied_paths]
     names = set(skill_names)
     evidence: list[str] = []
@@ -9212,11 +9210,6 @@ def codex_rollout_skill_loads(rollout_text: str, skill_names: list[str], copied_
                 path = _codex_skill_tag(text, "path")
                 if name in names and (path is None or any(n and n in path for n in needles)):
                     evidence.append(f"rollout skill injection: {name}" + (f" ({path})" if path else ""))
-        elif item_type.endswith("_call"):
-            haystack = json.dumps(payload, ensure_ascii=False)
-            hit = next((n for n in needles if n and n in haystack), None)
-            if hit is not None:
-                evidence.append(f"rollout {item_type}: {hit}"[:500])
     return evidence[:5]
 
 
