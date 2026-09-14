@@ -13,7 +13,7 @@ Related docs:
 | Dimension | Claude Code | Codex CLI | Gemini CLI | Mistral Vibe | What it means for us |
 |---|---|---|---|---|---|
 | Final answer | Strong: JSON result envelope | Strong: `--output-last-message` sidecar | Strong after strict lifecycle validation: final assistant segment / JSON `response` | Adequate: last assistant `LLMMessage.content` | Every stream-like provider needs a tested terminal-answer rule; raw trace bytes are never answer text. |
-| Judge schema | Strong: `--json-schema` | Strong: `--output-schema` | Harness-only validation after a strict JSON envelope | Harness-only validation | Gemini/Vibe verdicts fail closed in the harness because the provider is not schema-constrained. |
+| Judge schema | Strong: `--json-schema` | Strong: `--output-schema` | Harness verdict validation after typed envelope validation; external duplicate keys use the last value | Harness-only validation | Gemini/Vibe verdicts fail closed in the harness because the provider is not schema-constrained. |
 | Token telemetry | Strong: provider envelope | Partial: JSONL usage events when emitted | Provider stats with per-model totals, when present | Missing in current CLI output | Missing stats remain unavailable, never numeric zero. |
 | Dollar cost | Strong: provider-reported `total_cost_usd` | Missing unless wrapper/estimator supplies it | Missing: no CLI cost field | Missing in current CLI output | Cost-per-signal is strongest for Claude and unavailable for Gemini/Vibe without an estimator. |
 | Prompt transport | stdin in print mode | stdin or prompt arg | prompt arg in headless mode | prompt arg required for reliable headless mode | Gemini/Vibe prompts appear in process argv; saved metadata is redacted, but OS-level argv exposure remains. |
