@@ -23,9 +23,9 @@ Five adapters ship:
               under an isolated external `$CODEX_HOME/skills` and exposed as a
               skills-only read root. Loads are read from the session
               rollout (`$CODEX_HOME/sessions/.../rollout-*-<thread_id>.jsonl`:
-              the CLI's `<skill>` injection or a tool call reading SKILL.md),
-              falling back to the shared path-evidence detector when no rollout
-              exists; rows record `codex_rollout_status` and the evidence kind
+              the CLI's explicit `<skill>` injection), falling back to the
+              shared completed path-evidence detector when no injection is
+              found; rows record `codex_rollout_status` and the evidence kind
               so a reader can tell which decided. Override the command with `--codex-cmd`
               when a local wrapper or a newer CLI surface is needed.
 - `vibe`    — Mistral Vibe CLI (`vibe --prompt ...`), with skills mounted under
