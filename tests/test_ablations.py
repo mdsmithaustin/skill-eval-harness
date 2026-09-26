@@ -2627,11 +2627,6 @@ class ConsumersTakeAPreparedTaskTests(unittest.TestCase):
 
 
 class SubjectVisiblePromptTests(unittest.TestCase):
-    """Harness wrapper text the answering agent sees cannot use Eval vocabulary.
-
-    Case text is opaque payload and is not stripped. Only the wrapper is organic.
-    """
-
     _BANNED = (
         "eval", "test", "judge", "experiment", "rubric", "score",
         "compare", "benchmark", "candidate", "arena",
@@ -2667,8 +2662,8 @@ class SubjectVisiblePromptTests(unittest.TestCase):
     def test_jetty_runbook_has_no_banned_eval_vocabulary(self):
         runbook = sb.canonical_jetty_runbook("claude-code", "m", "anthropic", "s")
         _, frontmatter, body = runbook.split("---\n", 2)
-        # `evaluation: programmatic` is a Jetty runbook frontmatter field (see the
-        # captured tests/fixtures/jetty trajectories), not harness prose.
+        # Jetty's runbook validator requires an `evaluation` frontmatter field
+        # (jettyio/jettyio-skills skills/create-runbook/SKILL.md), so it stays.
         self.assertIn("evaluation: programmatic\n", frontmatter)
         self.assert_organic(frontmatter.replace("evaluation: programmatic\n", ""))
         self.assert_organic(body)
