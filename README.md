@@ -423,8 +423,8 @@ followed; `special`; or `unreadable`, a file the capture could not read or a dir
 not list, with its `mode`) and where its content lives:
 
 - `patch`: a hunk in `candidate.patch`, which `git apply` replays onto the baseline, executable
-  bit included. A chmod-only change is a `modified` entry whose patch entry has only
-  `old mode`/`new mode` lines. The manifest records the patch as `{"path": "candidate.patch", "sha256": ...}`.
+  bit included. A chmod-only change to a patch-eligible text file is a patch entry with only
+  `old mode`/`new mode` lines; other files follow the `blob` and `omitted` rules below. The manifest records the patch as `{"path": "candidate.patch", "sha256": ...}`.
 - `blob`: `candidate-files/<sha256>`, used for binary or non-UTF-8 content, for paths git would
   have to quote, and for a modified text file whose before side exceeds 1 MiB (the after bytes
   are copied). For a deletion the blob holds the bytes before it.
