@@ -408,8 +408,37 @@ runs/<case_id>/<variant>/run-1/events.json       # normalized events used by pro
 runs/<case_id>/<variant>/run-1/metrics.json      # tokens, commands, tool calls, elapsed time, retries
 runs/<case_id>/<variant>/run-1/environment.json  # runner/model/sandbox details where available
 runs/<case_id>/<variant>/run-1/artifact-commit.json # required-file SHA-256 inventory, written last by current runners
+runs/<case_id>/<variant>/run-1/workspace-changes.json  # what the model added, modified, or deleted in its workspace
+runs/<case_id>/<variant>/run-1/candidate.patch         # text edits as one git patch, only when there are any
+runs/<case_id>/<variant>/run-1/candidate-files/<sha256> # copies of binary, non-UTF-8, or unquotable-path files
 runs/answer-design.json                          # exact expected answer experiment and eval-contract digest
 ```
+
+Native answer runners (`run-agent`, `run-codex`, `run-claude`) run the model in a temporary
+workspace and delete it afterwards. Before deletion they diff it against a copy taken right after
+the harness built it, for every outcome including a timeout, so partial edits from a killed run
+are kept. `workspace-changes.json` lists each changed path with its before and after state
+(`file` with `sha256`, `size`, and `text`; `symlink` with its target, never followed; or
+`special`) and where its content lives: `patch` (a hunk in `candidate.patch`, which
+`git apply` replays onto the baseline), `blob` (`candidate-files/<sha256>`; for a deletion, the
+bytes before it), `state` (a symlink or special file, fully described by its states), or `omitted`
+(`oversize` past 1 MiB, `total_cap` past 32 MiB per run, or `unreadable`). Copies are named by
+digest, so a model file called `metadata.json` never appears under that name in the run directory.
+
+An answer cites workspace files by absolute path, for example `/tmp/codex-ws-k3q/x.toml`. To
+find its entry, strip the manifest's `workspace_root` or `workspace_root_realpath` prefix (on
+macOS, `/tmp` and `/var/folders` resolve under `/private`) and look up the rest in
+`changes[].path`. A path absent from `changes` was unchanged or outside the workspace.
+
+Readers report `workspace_changes_captured` and `workspace_changes_state` next to
+`artifact_set_complete`. `captured` means the artifact set is complete, nothing was omitted, and
+the patch and every blob the manifest names are in the commit inventory under their own
+digests; zero changes counts. `partial` means some content was omitted, `failed` means the
+capture itself failed (`capture_error` says at which stage), and `invalid` means the manifest or
+its referenced files do not check out. Runs without a manifest (legacy runs, `run-subagent`,
+Jetty) get neither key. The claim does not affect scoring or `execution_valid`. Codex answer runs
+default to `--sandbox read-only`, so they record an empty, captured change set unless
+`--codex-cmd` relaxes the sandbox.
 
 `trace.jsonl` is the agent CLI's own stream, preserved verbatim, and it is read with the
 stream rule: a line that repeats an object key (`codex exec --json` repeats `id` on some
