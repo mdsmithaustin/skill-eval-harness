@@ -162,7 +162,7 @@ class CaptureTests(unittest.TestCase):
     def test_oversize_and_total_cap_omit_content_and_withhold_the_claim(self):
         def edit(ws: Path) -> None:
             (ws / "a.bin").write_bytes(b"\x00" * 6)
-            (ws / "b.bin").write_bytes(b"\x01" * 6)
+            (ws / "b.bin").write_bytes(b"\x00\x01" * 3)
             (ws / "big.txt").write_bytes(b"0123456789\n")
 
         with tempfile.TemporaryDirectory() as td:
@@ -172,7 +172,7 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(data["changes"], [
                 {"path": "a.bin", "change": "added", "after": binary_file(b"\x00" * 6),
                  "evidence": blob(b"\x00" * 6)},
-                {"path": "b.bin", "change": "added", "after": binary_file(b"\x01" * 6),
+                {"path": "b.bin", "change": "added", "after": binary_file(b"\x00\x01" * 3),
                  "evidence": {"kind": "omitted", "reason": "total_cap"}},
                 {"path": "big.txt", "change": "added", "after": text_file(b"0123456789\n"),
                  "evidence": {"kind": "omitted", "reason": "oversize"}},

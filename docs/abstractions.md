@@ -168,6 +168,9 @@ runs/<case_id>/<variant>/[run-<n>/]trace.jsonl        # optional, raw
 runs/<case_id>/<variant>/[run-<n>/]events.json        # optional, normalized
 runs/<case_id>/<variant>/[run-<n>/]metrics.json       # optional, normalized
 runs/<case_id>/<variant>/[run-<n>/]artifact-commit.json # harness-written commit marker
+runs/<case_id>/<variant>/[run-<n>/]workspace-changes.json # native answer runners: candidate workspace edits
+runs/<case_id>/<variant>/[run-<n>/]candidate.patch        # text edits as a git patch, only when non-empty
+runs/<case_id>/<variant>/[run-<n>/]candidate-files/<sha256> # content copies a patch cannot carry
 ```
 
 `discover_run_bases` and `read_output_base` read this layout. A runner that writes these
@@ -191,6 +194,23 @@ rejects it and is the rule for every artifact the harness authors or validates, 
 rule for bytes an external agent CLI wrote (`codex exec --json` repeats `id`), reporting the
 repeated names so a row can record them under `stream_duplicate_keys`. Both reject non-finite
 numbers. `iter_json_objects` and `parse_trace_jsonl_text` select the rule with `strict`.
+
+Native answer runners also record what the model did to its temporary workspace.
+`workspace_contracts.captured_workspace` owns that directory's lifetime: build, copy a baseline,
+run the provider, diff, delete. The diff is a sorted tuple of `Added | Modified | Deleted`
+changes; each side is a `RegularFile | Symlink | Special` read by `lstat`, so a model-created link
+is recorded by target and never followed. Each change carries one `InPatch | InBlob | InState |
+Omitted` evidence value. Text within the per-file cap goes into `candidate.patch`, which
+`git apply` replays onto the baseline. Binary, non-UTF-8, or unquotable-path content is copied to
+`candidate-files/<sha256>`, and those content-addressed names keep model basenames such as
+`metadata.json` out of the run directory. Content past the 1 MiB per-file or 32 MiB per-run cap is
+`Omitted`. The capture runs for every outcome, including `TimedOut`, and never raises: a failure
+writes a `captured: false` manifest with `capture_error` and the receipt still commits. Readers
+derive `workspace_changes_captured` and `workspace_changes_state`
+(`captured | partial | failed | invalid`) next to `artifact_set_complete`. The claim holds only
+for a complete artifact set whose manifest parses, omits nothing, and references a patch and
+blobs that the commit inventory holds under their own digests. A run without a manifest gets
+neither key. The claim does not feed `execution_valid`.
 
 ## Runner / adapter
 
