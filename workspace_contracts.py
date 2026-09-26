@@ -131,6 +131,7 @@ class CapturedChanges:
     workspace_root_realpath: str
     baseline_file_count: int
     limits: EvidenceLimits
+    patch_sha256: str | None
     changes: tuple[FileChange, ...]
 
     def __post_init__(self) -> None:
@@ -141,14 +142,13 @@ class CapturedChanges:
             raise ValueError("workspace changes must be sorted by unique path")
         for change in self.changes:
             _validate_change(change)
+        in_patch = any(isinstance(change.evidence, InPatch) for change in self.changes)
+        if in_patch != (self.patch_sha256 is not None):
+            raise ValueError("a patch digest is recorded exactly when some change is in the patch")
 
     @property
     def complete(self) -> bool:
         return not any(isinstance(change.evidence, Omitted) for change in self.changes)
-
-    @property
-    def has_patch(self) -> bool:
-        return any(isinstance(change.evidence, InPatch) for change in self.changes)
 
     def blob_digests(self) -> frozenset[str]:
         return frozenset(
@@ -478,7 +478,8 @@ def manifest_json(capture: WorkspaceCapture) -> dict[str, Any]:
         "workspace_root_realpath": capture.workspace_root_realpath,
         "baseline_file_count": capture.baseline_file_count if captured else None,
         "limits": {"file_bytes": capture.limits.file_bytes, "total_bytes": capture.limits.total_bytes},
-        "patch": CANDIDATE_PATCH_NAME if captured and capture.has_patch else None,
+        "patch": ({"path": CANDIDATE_PATCH_NAME, "sha256": capture.patch_sha256}
+                  if captured and capture.patch_sha256 is not None else None),
         "changes": [_change_json(change) for change in capture.changes] if captured else [],
     }
 
@@ -496,9 +497,13 @@ def _stage_changes(baseline: WorkspaceBaseline, ws: Path, changes_dir: Path,
         old, new = baseline.index.get(path), after.get(path)
         if old != new:
             changes.append(_change(path, old, new, stager.evidence(path, old, new)))
+    patch_sha256 = None
     if stager.patch:
-        (changes_dir / CANDIDATE_PATCH_NAME).write_text("".join(stager.patch), encoding="utf-8")
-    return CapturedChanges(str(ws), os.path.realpath(ws), len(baseline.index), limits, tuple(changes))
+        patch = "".join(stager.patch).encode("utf-8")
+        (changes_dir / CANDIDATE_PATCH_NAME).write_bytes(patch)
+        patch_sha256 = hashlib.sha256(patch).hexdigest()
+    return CapturedChanges(str(ws), os.path.realpath(ws), len(baseline.index), limits,
+                           patch_sha256, tuple(changes))
 
 
 def capture_workspace_changes(baseline: Baseline, ws: Path, changes_dir: Path, *,
@@ -633,9 +638,12 @@ def parse_workspace_changes(raw: Any) -> WorkspaceCapture:
         changes = _field(obj, "changes")
         if not isinstance(changes, list):
             raise ValueError("changes must be a JSON array")
+        patch = _field(obj, "patch")
+        patch_sha256 = (None if patch is None
+                        else _typed(_field(_object(patch, "patch"), "sha256"), str, "patch sha256"))
         capture = CapturedChanges(
             root, realpath, _typed(_field(obj, "baseline_file_count"), int, "baseline_file_count"),
-            limits, tuple(_parse_change(item) for item in changes))
+            limits, patch_sha256, tuple(_parse_change(item) for item in changes))
     else:
         error_obj = _object(error, "capture_error")
         stage = _field(error_obj, "stage")
@@ -660,8 +668,9 @@ def workspace_changes_state(run_dir: Path,
     """The workspace-evidence claim for one run; None when no manifest exists.
 
     CAPTURED requires a complete artifact set, a canonical manifest with no
-    omitted evidence, and every file it references committed in the inventory
-    under its own digest. Zero changes is captured."""
+    omitted evidence, the patch committed in the inventory under the digest the
+    manifest records, and every blob committed under its own digest. Zero
+    changes is captured."""
     try:
         capture = load_workspace_changes(run_dir)
     except (OSError, ValueError):
@@ -673,7 +682,7 @@ def workspace_changes_state(run_dir: Path,
     if isinstance(capture, CaptureFailed):
         return WorkspaceChangesState.FAILED
     inventory = artifact.inventory_sha256
-    if capture.has_patch and CANDIDATE_PATCH_NAME not in inventory:
+    if capture.patch_sha256 is not None and inventory.get(CANDIDATE_PATCH_NAME) != capture.patch_sha256:
         return WorkspaceChangesState.INVALID
     if any(inventory.get(blob_path(digest)) != digest for digest in capture.blob_digests()):
         return WorkspaceChangesState.INVALID

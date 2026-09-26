@@ -130,7 +130,8 @@ class CaptureTests(unittest.TestCase):
                  "workspace_root": str(ws), "workspace_root_realpath": os.path.realpath(ws),
                  "baseline_file_count": 4,
                  "limits": {"file_bytes": 1048576, "total_bytes": 33554432},
-                 "patch": "candidate.patch"})
+                 "patch": {"path": "candidate.patch",
+                           "sha256": sha((changes / "candidate.patch").read_bytes())}})
             self.assertEqual(names_under(changes), {"workspace-changes.json", "candidate.patch"})
             patch = (changes / "candidate.patch").read_text(encoding="utf-8")
             self.assertIn(
@@ -350,6 +351,15 @@ class ClaimTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             changes, root = self.changed_run(Path(td))
             (changes / "candidate.patch").unlink()
+            self.assertEqual(claim(committed_run(root, changes)), "invalid")
+
+    def test_patch_that_disagrees_with_the_manifest_digest_is_invalid(self):
+        with tempfile.TemporaryDirectory() as td:
+            changes, root = self.changed_run(Path(td))
+            self.assertEqual(manifest(changes)["patch"],
+                             {"path": "candidate.patch",
+                              "sha256": sha((changes / "candidate.patch").read_bytes())})
+            (changes / "candidate.patch").write_bytes(b"diff --git a/a.txt b/a.txt\n")
             self.assertEqual(claim(committed_run(root, changes)), "invalid")
 
     def test_blob_named_for_other_content_is_invalid(self):
