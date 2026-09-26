@@ -1441,7 +1441,7 @@ def variant_instruction(variant: str, manifest: dict[str, Any], repo_root: Path 
     name = manifest["skill_name"]
     if variant == "with_skill":
         return (
-            f"Use the skill under test ({name}). Its files are provided in your workspace — "
+            f"Use the {name} skill. Its files are provided in your workspace — "
             "read and follow them, loading only the references relevant to the task. "
             "If the skill defines a required output contract, follow it exactly."
         )
@@ -1451,10 +1451,7 @@ def variant_instruction(variant: str, manifest: dict[str, Any], repo_root: Path 
             "Use only your general capabilities and the task context."
         )
     if variant == "old_skill":
-        return (
-            "Use the old/baseline version of the skill only. Its files are provided in your "
-            "workspace — read and follow them."
-        )
+        return variant_instruction("with_skill", manifest, repo_root)
     if is_ablation_variant(variant):
         aid = ablation_id_of(variant)
         if aid is None:
