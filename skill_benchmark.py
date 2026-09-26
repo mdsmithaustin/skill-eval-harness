@@ -213,6 +213,7 @@ from trigger_contracts import (
     validated_trigger_protocol_limits,
 )
 from trigger_reporting import CompleteTriggerCohort, summarize_trigger_cohort
+from workspace_contracts import captured_workspace
 
 VALID_SPLITS = frozenset(Split.values())
 TRIGGER_HARNESS_IDENTITY_VERSION = 2
@@ -8793,6 +8794,8 @@ def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome,
     (run_dir / "output.md").write_text(body, encoding="utf-8")
     if sidecars is not None and sidecars.is_dir():
         for child in sidecars.iterdir():
+            if child.name in ARTIFACT_REQUIRED_FILES or child.name == ARTIFACT_COMMIT_NAME:
+                raise ValueError(f"sidecar {child.name!r} would overwrite a run contract file")
             destination = run_dir / child.name
             if child.is_dir():
                 shutil.copytree(child, destination)
@@ -10649,30 +10652,31 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                 design, pt, row_model)["instruction_sha256"],
             **({"ablation": pt.ablation.as_dict()} if pt.ablation else {}),
         }
-        with tempfile.TemporaryDirectory(prefix=f"{backend.name}-ws-") as wd:
-            ws = Path(wd)
-            workspace = workspace_builder(pt, ws)
-            skill_rel, input_rel = workspace
-            attestation = workspace.attestation
-            if attestation.mounted_skill_tree_hash is not None:
-                prov_extra["skill_tree_hash"] = attestation.mounted_skill_tree_hash
-            prov_extra["fixture_tree_hash"] = attestation.fixture_tree_hash
-            prompt = build_task_prompt(pt, skill_paths=skill_rel, input_files=input_rel)
-            outcome = backend.invoke_answer(InvocationRequest.parse(
-                prompt=prompt,
-                workspace=ws,
-                model=row_model,
-                timeout_s=timeout,
-            ), **options)
-        context = outcome_context(outcome)
-        env = dict(context.environment or {})
-        env.setdefault("runner", backend.name)
-        env["variant"] = pt.variant_truth
-        outcome = outcome_with_context(
-            outcome,
-            context.enriched(metadata=prov_extra, environment=env),
-        )
-        write_runner_outcome(base, outcome)
+        with tempfile.TemporaryDirectory(prefix=f"{backend.name}-changes-") as cd:
+            changes = Path(cd)
+            with captured_workspace(prefix=f"{backend.name}-ws-", changes_dir=changes,
+                                    build=lambda ws: workspace_builder(pt, ws)) as (ws, workspace):
+                skill_rel, input_rel = workspace
+                attestation = workspace.attestation
+                if attestation.mounted_skill_tree_hash is not None:
+                    prov_extra["skill_tree_hash"] = attestation.mounted_skill_tree_hash
+                prov_extra["fixture_tree_hash"] = attestation.fixture_tree_hash
+                prompt = build_task_prompt(pt, skill_paths=skill_rel, input_files=input_rel)
+                outcome = backend.invoke_answer(InvocationRequest.parse(
+                    prompt=prompt,
+                    workspace=ws,
+                    model=row_model,
+                    timeout_s=timeout,
+                ), **options)
+            context = outcome_context(outcome)
+            env = dict(context.environment or {})
+            env.setdefault("runner", backend.name)
+            env["variant"] = pt.variant_truth
+            outcome = outcome_with_context(
+                outcome,
+                context.enriched(metadata=prov_extra, environment=env),
+            )
+            write_runner_outcome(base, outcome, sidecars=changes)
     return 0
 
 
