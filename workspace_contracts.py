@@ -4,8 +4,7 @@
 provider call, capture, delete. The capture stages `workspace-changes.json`,
 `candidate.patch`, and `candidate-files/<sha256>` in a directory the caller
 hands to the run writer as sidecars. Readers derive `workspace_changes_state`
-from that manifest and the committed artifact inventory; the claim is
-independent of artifact-set completeness.
+from that manifest and the committed artifact inventory.
 """
 from __future__ import annotations
 
@@ -64,12 +63,12 @@ class InPatch:
 
 @dataclass(frozen=True)
 class InBlob:
-    """Content lives at candidate-files/<sha256> of the change's content side."""
+    pass
 
 
 @dataclass(frozen=True)
 class InState:
-    """A symlink or special file on a side; the recorded states are the evidence."""
+    pass
 
 
 OmitReason = Literal["oversize", "total_cap", "unreadable"]
@@ -206,7 +205,6 @@ def _valid_path(path: object) -> bool:
 
 
 def _content_side(change: FileChange) -> FileState:
-    """The side a blob copies: the after-state, or the before-state of a deletion."""
     if isinstance(change, (Added, Modified)):
         return change.after
     if isinstance(change, Deleted):
@@ -259,7 +257,6 @@ def _open_regular(path: Path) -> int:
 
 
 def file_state(path: Path) -> FileState:
-    """Classify one path by lstat; a symlink's target is read, never opened."""
     mode = os.lstat(path).st_mode
     if stat.S_ISLNK(mode):
         return Symlink(os.readlink(path))
@@ -286,7 +283,6 @@ def file_state(path: Path) -> FileState:
 
 
 def index_tree(root: Path) -> dict[str, FileState]:
-    """Every non-directory entry under root, keyed by POSIX relative path. Links are never followed."""
     index: dict[str, FileState] = {}
     pending = [root]
     while pending:
@@ -305,7 +301,6 @@ def _failure_reason(exc: BaseException) -> str:
 
 
 def snapshot_workspace(ws: Path, shadow: Path) -> Baseline:
-    """Copy the freshly built workspace to `shadow` and index it. Never raises for I/O."""
     try:
         shutil.copytree(ws, shadow, symlinks=True)
         return WorkspaceBaseline(shadow, index_tree(shadow))
@@ -314,7 +309,6 @@ def snapshot_workspace(ws: Path, shadow: Path) -> Baseline:
 
 
 def _read_verified(path: Path, expected: RegularFile) -> bytes | None:
-    """The bytes the index hashed, or None if they can no longer be read unchanged."""
     try:
         with os.fdopen(_open_regular(path), "rb") as handle:
             data = handle.read()
@@ -331,7 +325,6 @@ def _patch_lines(data: bytes | None) -> list[str]:
 
 
 def git_patch_entry(path: str, before: bytes | None, after: bytes | None) -> str:
-    """One `diff --git` entry; None marks the absent side of an add or delete."""
     header = [f"diff --git a/{path} b/{path}\n"]
     if before is None:
         header.append("new file mode 100644\n")
@@ -358,7 +351,6 @@ def _change(path: str, before: FileState | None, after: FileState | None,
 
 
 class _EvidenceStager:
-    """Spends one run-wide byte budget across the patch and the blob store."""
 
     def __init__(self, baseline: WorkspaceBaseline, ws: Path, changes_dir: Path,
                  limits: EvidenceLimits) -> None:
@@ -466,7 +458,6 @@ def _change_json(change: FileChange) -> dict[str, Any]:
 
 
 def manifest_json(capture: WorkspaceCapture) -> dict[str, Any]:
-    """The only owner of the workspace-changes.json wire shape."""
     captured = isinstance(capture, CapturedChanges)
     return {
         "schema_version": WORKSPACE_CHANGES_VERSION,
@@ -501,11 +492,7 @@ def _stage_changes(baseline: WorkspaceBaseline, ws: Path, changes_dir: Path,
 
 def capture_workspace_changes(baseline: Baseline, ws: Path, changes_dir: Path, *,
                               limits: EvidenceLimits = DEFAULT_LIMITS) -> WorkspaceCapture:
-    """Diff the live workspace against the baseline and stage evidence in `changes_dir`.
-
-    Never raises for I/O: a failure clears partial outputs and writes a failure
-    manifest, and if even that cannot be written `changes_dir` is left empty.
-    The run receipt must never be lost to evidence capture."""
+    """Never raises for I/O, because a capture failure must not cost the run its receipt."""
     def failed(stage: CaptureStage, reason: str) -> CaptureFailed:
         return CaptureFailed(stage, reason, str(ws), os.path.realpath(ws), limits)
 
@@ -545,8 +532,7 @@ def captured_workspace(*, prefix: str, changes_dir: Path, build: Callable[[Path]
                        limits: EvidenceLimits = DEFAULT_LIMITS) -> Iterator[tuple[Path, B]]:
     """Own the model workspace: create, build, baseline, yield, capture, delete.
 
-    Every outcome that returns normally, including a timeout, is captured. An
-    exception skips capture because no receipt is written on that path."""
+    An exception skips capture."""
     with tempfile.TemporaryDirectory(prefix=prefix) as wd, \
             tempfile.TemporaryDirectory(prefix="workspace-baseline-") as bd:
         ws = Path(wd)
@@ -620,7 +606,6 @@ def _parse_change(raw: Any) -> FileChange:
 
 
 def parse_workspace_changes(raw: Any) -> WorkspaceCapture:
-    """Parse a decoded manifest. Any field the writer derives must match its derivation."""
     obj = _object(raw, "workspace changes manifest")
     if _typed(_field(obj, "schema_version"), int, "schema_version") != WORKSPACE_CHANGES_VERSION:
         raise ValueError("unsupported workspace changes schema version")
@@ -652,7 +637,6 @@ def parse_workspace_changes(raw: Any) -> WorkspaceCapture:
 
 
 def load_workspace_changes(run_dir: Path) -> WorkspaceCapture | None:
-    """None when the run never recorded a capture; raises ValueError or OSError when invalid."""
     path = run_dir / WORKSPACE_CHANGES_NAME
     if not path.exists() and not path.is_symlink():
         return None
