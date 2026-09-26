@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -2623,6 +2624,55 @@ class ConsumersTakeAPreparedTaskTests(unittest.TestCase):
         sim = sb.safe_task_json(self.sim_pt(), self.MANIFEST, task_name="t", upload_files=[])
         self.assertEqual(sim["variant"], "ablation:no-rp")                          # non-blind: true variant shown
         self.assertEqual(sim["ablation"]["removed_component"], "regression-proof")  # directive from the manifest
+
+
+class SubjectVisiblePromptTests(unittest.TestCase):
+    _BANNED_RE = re.compile(
+        r"\b(?:eval\w*|test\w*|judg\w*|experiment\w*|rubric\w*|scor(?:e|ed|es|ing)"
+        r"|compar\w*|benchmark\w*|candidate\w*|arena|harness\w*|ablat\w*|baseline\w*"
+        r"|grad(?:e|ed|er|ers|es|ing)|hidden|answer keys?|under test)\b",
+        re.IGNORECASE)
+
+    def _task(self, prompt: str, variant: str = "with_skill") -> am.PreparedTask:
+        return AblationReviewFixesTests().task({"variant": variant, "prompt": prompt})
+
+    def assert_organic(self, text: str) -> None:
+        hit = self._BANNED_RE.search(text)
+        word = hit.group(0) if hit else None
+        self.assertIsNone(
+            hit, f"subject-visible text contains banned whole word {word!r}")
+
+    def test_build_task_prompt_wrapper_has_no_banned_eval_vocabulary(self):
+        with_skill = sb.build_task_prompt(
+            self._task("Review the change."), ["skills/good-pr/SKILL.md"], [])
+        without_skill = sb.build_task_prompt(
+            self._task("Review the change.", "without_skill"), [], [])
+        self.assert_organic(with_skill)
+        self.assert_organic(without_skill)
+        self.assertIn("Review the change.", with_skill)
+        self.assertIn("Review the change.", without_skill)
+        self.assertIn("Do not use any skill", without_skill)
+
+    def test_build_task_prompt_keeps_case_text_even_when_it_uses_eval_words(self):
+        rendered = sb.build_task_prompt(
+            self._task("This eval uses a rubric."), ["skills/good-pr/SKILL.md"], [])
+        self.assertIn("This eval uses a rubric.", rendered)
+
+    def test_blind_arm_instructions_have_no_banned_eval_vocabulary(self):
+        manifest = {"skill_name": "good-pr"}
+        with_skill = sb.variant_instruction("with_skill", manifest)
+        self.assert_organic(with_skill)
+        self.assert_organic(sb.variant_instruction("without_skill", manifest))
+        self.assertEqual(sb.variant_instruction("old_skill", manifest), with_skill)
+
+    def test_jetty_runbook_has_no_banned_eval_vocabulary(self):
+        runbook = sb.canonical_jetty_runbook("claude-code", "m", "anthropic", "s")
+        _, frontmatter, body = runbook.split("---\n", 2)
+        # Jetty's runbook validator requires an `evaluation` frontmatter field
+        # (jettyio/jettyio-skills skills/create-runbook/SKILL.md), so it stays.
+        self.assertIn("evaluation: programmatic\n", frontmatter)
+        self.assert_organic(frontmatter.replace("evaluation: programmatic\n", ""))
+        self.assert_organic(body)
 
 
 class MaterializeCarriesTypedArmTests(unittest.TestCase):
