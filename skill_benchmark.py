@@ -3479,10 +3479,6 @@ Execute one skill task exactly once. Write the final assistant answer and metada
 6. Write `{{{{results_dir}}}}/output.md`.
 7. Write `{{{{results_dir}}}}/metadata.json`.
 8. Put any additional generated artifacts under `{{{{results_dir}}}}/outputs/`.
-
-## Evaluation
-
-Programmatic evaluation happens after import. Do not include hidden answer keys in the output.
 '''
 
 
@@ -9000,7 +8996,7 @@ def build_task_prompt(pt: PreparedTask, skill_paths: list[str] | None = None, in
         f"{skill_note}\n\n"
         f"Task prompt:\n{pt.prompt}\n\n"
         f"Input files available to inspect:\n{file_note}\n\n"
-        "Return the final answer. Do not include hidden answer keys."
+        "Return the final answer."
     )
 
 

@@ -2635,7 +2635,7 @@ class SubjectVisiblePromptTests(unittest.TestCase):
     _BANNED = (
         "eval", "test", "judge", "experiment", "rubric", "score",
         "compare", "benchmark", "candidate", "arena",
-        "hidden", "answer key", "answer keys", "grading", "graded",
+        "evaluation", "hidden", "answer key", "answer keys", "grading", "graded",
     )
     _BANNED_RE = re.compile(r"\b(?:" + "|".join(_BANNED) + r")\b", re.IGNORECASE)
 
@@ -2665,8 +2665,13 @@ class SubjectVisiblePromptTests(unittest.TestCase):
         self.assertIn("This eval uses a rubric.", rendered)
 
     def test_jetty_runbook_has_no_banned_eval_vocabulary(self):
-        self.assert_organic(
-            sb.canonical_jetty_runbook("claude-code", "m", "anthropic", "s"))
+        runbook = sb.canonical_jetty_runbook("claude-code", "m", "anthropic", "s")
+        _, frontmatter, body = runbook.split("---\n", 2)
+        # `evaluation: programmatic` is a Jetty runbook frontmatter field (see the
+        # captured tests/fixtures/jetty trajectories), not harness prose.
+        self.assertIn("evaluation: programmatic\n", frontmatter)
+        self.assert_organic(frontmatter.replace("evaluation: programmatic\n", ""))
+        self.assert_organic(body)
 
 
 class MaterializeCarriesTypedArmTests(unittest.TestCase):

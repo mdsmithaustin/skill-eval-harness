@@ -436,10 +436,6 @@ Execute one skill task exactly once. Write the final assistant answer and metada
 6. Write `{{results_dir}}/output.md`.
 7. Write `{{results_dir}}/metadata.json`.
 8. Put any additional generated artifacts under `{{results_dir}}/outputs/`.
-
-## Evaluation
-
-Programmatic evaluation happens after import. Do not include hidden answer keys in the output.
 ```
 
 ## Mount policy
