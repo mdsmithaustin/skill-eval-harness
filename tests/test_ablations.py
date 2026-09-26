@@ -2627,12 +2627,11 @@ class ConsumersTakeAPreparedTaskTests(unittest.TestCase):
 
 
 class SubjectVisiblePromptTests(unittest.TestCase):
-    _BANNED = (
-        "eval", "test", "judge", "experiment", "rubric", "score",
-        "compare", "benchmark", "candidate", "arena",
-        "evaluation", "hidden", "answer key", "answer keys", "grading", "graded",
-    )
-    _BANNED_RE = re.compile(r"\b(?:" + "|".join(_BANNED) + r")\b", re.IGNORECASE)
+    _BANNED_RE = re.compile(
+        r"\b(?:eval\w*|test\w*|judg\w*|experiment\w*|rubric\w*|scor(?:e|ed|es|ing)"
+        r"|compar\w*|benchmark\w*|candidate\w*|arena|harness\w*|ablat\w*|baseline\w*"
+        r"|grad(?:e|ed|er|ers|es|ing)|hidden|answer keys?|under test)\b",
+        re.IGNORECASE)
 
     def _task(self, prompt: str, variant: str = "with_skill") -> am.PreparedTask:
         return AblationReviewFixesTests().task({"variant": variant, "prompt": prompt})
@@ -2658,6 +2657,13 @@ class SubjectVisiblePromptTests(unittest.TestCase):
         rendered = sb.build_task_prompt(
             self._task("This eval uses a rubric."), ["skills/good-pr/SKILL.md"], [])
         self.assertIn("This eval uses a rubric.", rendered)
+
+    def test_blind_arm_instructions_have_no_banned_eval_vocabulary(self):
+        manifest = {"skill_name": "good-pr"}
+        with_skill = sb.variant_instruction("with_skill", manifest)
+        self.assert_organic(with_skill)
+        self.assert_organic(sb.variant_instruction("without_skill", manifest))
+        self.assertEqual(sb.variant_instruction("old_skill", manifest), with_skill)
 
     def test_jetty_runbook_has_no_banned_eval_vocabulary(self):
         runbook = sb.canonical_jetty_runbook("claude-code", "m", "anthropic", "s")
