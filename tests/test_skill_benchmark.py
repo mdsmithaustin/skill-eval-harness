@@ -1043,6 +1043,7 @@ class SkillBenchmarkTests(unittest.TestCase):
                 "print(json.dumps({'type': 'item.started', 'item': {'id': 'i1', 'type': 'file_change', 'changes': changes, 'status': 'in_progress'}}))\n"
                 "print(json.dumps({'type': 'item.completed', 'item': {'id': 'i1', 'type': 'file_change', 'changes': changes, 'status': 'completed'}}))\n"
                 "print(json.dumps({'type': 'item.completed', 'item': {'id': 'i2', 'type': 'file_change', 'changes': [{'path': 'gone.md', 'kind': 'delete'}], 'status': 'failed'}}))\n"
+                "print(json.dumps({'type': 'item.completed', 'item': {'id': 'i3', 'type': 'file_change', 'changes': [{'path': 'old.md', 'kind': 'delete'}]}}))\n"
                 "print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output_tokens': 1}}))\n",
                 encoding="utf-8",
             )
@@ -1050,17 +1051,17 @@ class SkillBenchmarkTests(unittest.TestCase):
             sb.run_codex(SimpleNamespace(tasks=str(tasks), runs=str(runs), codex_cmd=f"{sys.executable} {fake}", timeout=5))
             base = runs / "case-1" / "with_skill"
             metrics = json.loads((base / "metrics.json").read_text(encoding="utf-8"))
-            self.assertEqual(metrics["file_writes"], 2)
+            self.assertEqual((metrics["file_writes"], metrics["errors"]), (3, 1))
             events = json.loads((base / "events.json").read_text(encoding="utf-8"))["events"]
-            writes = [(e["status"], e["input_summary"], e["change_kind"])
+            writes = [(e["raw_ref"]["line"], e["status"], e["input_summary"], e["change_kind"])
                       for e in events if e["type"] == "file_write"]
             self.assertEqual(writes, [
-                ("completed", "config.toml", "update"),
-                ("completed", "notes.md", "add"),
-                ("failed", "gone.md", "delete"),
+                (2, "completed", "config.toml", "update"),
+                (2, "completed", "notes.md", "add"),
+                (4, "completed", "old.md", "delete"),
             ])
-            self.assertEqual(
-                [e["raw_ref"]["line"] for e in events if e["type"] == "file_write"], [2, 2, 3])
+            self.assertEqual([(e["raw_ref"]["line"], e["status"]) for e in events if e["type"] == "error"],
+                             [(3, "failed")])
 
     def test_run_codex_malformed_jsonl_still_writes_failure_artifacts(self):
         with tempfile.TemporaryDirectory() as td:

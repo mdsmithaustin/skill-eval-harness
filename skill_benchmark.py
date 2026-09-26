@@ -7752,17 +7752,16 @@ def codex_stream_flat_records(records: list[dict[str, Any]], *,
         changes = item.get("changes") if isinstance(item, dict) else None
         if (record.get("type") == "item.completed" and isinstance(item, dict)
                 and item.get("type") == "file_change" and isinstance(changes, list) and changes
-                and all(isinstance(change, dict) for change in changes)):
-            for change in changes:
-                flat_record = {
-                    "type": "file_write",
-                    "name": "file_change",
-                    "path": stringify_trace_value(change.get("path")),
-                    "change_kind": stringify_trace_value(change.get("kind")),
-                }
-                if "status" in item:
-                    flat_record["status"] = item["status"]
-                flat.append((line, flat_record))
+                and all(isinstance(change, dict) for change in changes)
+                and parse_event_state(item.get("status"), raw_type="item.completed",
+                                      status_present="status" in item).state is EventState.COMPLETED):
+            flat.extend((line, {
+                "type": "file_write",
+                "name": "file_change",
+                "path": stringify_trace_value(change.get("path")),
+                "change_kind": stringify_trace_value(change.get("kind")),
+                "status": "completed",
+            }) for change in changes)
         else:
             flat.append((line, record))
     return flat
