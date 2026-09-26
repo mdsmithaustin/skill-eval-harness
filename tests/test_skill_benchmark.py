@@ -2,6 +2,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -1134,6 +1135,32 @@ class SkillBenchmarkTests(unittest.TestCase):
                 "--- a/skills/skill/SKILL.md\n+++ b/skills/skill/SKILL.md\n"
                 "@@ -2,3 +2,4 @@\n name: demo\n description: Demo skill\n ---\n+partial edit\n",
                 (base / "candidate.patch").read_text(encoding="utf-8"))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads mode-000 files")
+    def test_run_codex_keeps_the_receipt_when_workspace_paths_are_unreadable(self):
+        with tempfile.TemporaryDirectory() as td:
+            runs = self._run_fake_codex(Path(td), (
+                "open('notes.md', 'w').write('candidate notes\\n')\n"
+                "os.mkdir('locked')\n"
+                "open('locked/inner.txt', 'w').write('hidden\\n')\n"
+                "open('secret.txt', 'w').write('secret\\n')\n"
+                "os.chmod('locked', 0)\n"
+                "os.chmod('secret.txt', 0)\n"
+                "open(out, 'w', encoding='utf-8').write('done')\n"
+            ))
+            base = runs / "case-1" / "with_skill"
+            changes = json.loads((base / "workspace-changes.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                [(c["path"], c["change"], c["evidence"]) for c in changes["changes"]],
+                [("locked", "added", {"kind": "omitted", "reason": "unreadable"}),
+                 ("notes.md", "added", {"kind": "patch"}),
+                 ("secret.txt", "added", {"kind": "omitted", "reason": "unreadable"})])
+            self.assertEqual((base / "output.md").read_text(encoding="utf-8"), "done")
+            meta = sb.read_metadata(runs, "case-1", "with_skill")
+            self.assertEqual(
+                (meta["artifact_set_complete"], meta["workspace_changes_captured"],
+                 meta["workspace_changes_state"]),
+                (True, False, "partial"))
 
     def test_providers_cannot_forge_the_workspace_changes_claim(self):
         for key in ("workspace_changes_captured", "workspace_changes_state"):

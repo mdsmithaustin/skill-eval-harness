@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -34,6 +35,7 @@ def blob(data: bytes) -> dict:
 
 PATCH = {"kind": "patch"}
 STATE = {"kind": "state"}
+UNREADABLE = {"kind": "omitted", "reason": "unreadable"}
 
 
 def write_tree(root: Path, files: dict[str, bytes]) -> None:
@@ -290,30 +292,32 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(claim(committed_run(root, changes)), "captured")
 
     @unittest.skipIf(os.geteuid() == 0, "root reads mode-000 files")
-    def test_an_unreadable_file_or_directory_fails_the_capture_without_losing_the_run(self):
-        def lock_file(ws: Path) -> None:
-            (ws / "locked.txt").write_bytes(b"x\n")
-            (ws / "locked.txt").chmod(0)
+    def test_an_unreadable_file_or_directory_costs_one_entry_not_the_capture(self):
+        for dir_mode in (0o000, 0o400):
+            def edit(ws: Path, dir_mode: int = dir_mode) -> None:
+                (ws / "notes.md").write_bytes(b"n\n")
+                (ws / "locked").chmod(dir_mode)
+                (ws / "secret.txt").chmod(0)
 
-        def lock_dir(ws: Path) -> None:
-            (ws / "locked").mkdir()
-            (ws / "locked" / "inner.txt").write_bytes(b"x\n")
-            (ws / "locked").chmod(0)
-
-        for name, edit in (("file", lock_file), ("dir", lock_dir)):
-            with self.subTest(name), tempfile.TemporaryDirectory() as td:
+            with self.subTest(oct(dir_mode)), tempfile.TemporaryDirectory() as td:
                 root = Path(td)
-                changes, ws = capture(root, {"a.txt": b"a\n"}, edit)
+                changes, ws = capture(root, {"secret.txt": b"s\n", "locked/inner.txt": b"i\n"}, edit)
                 data = manifest(changes)
-                self.assertEqual(
-                    (data["captured"], data["capture_error"]["stage"], data["changes"], data["patch"],
-                     data["workspace_root"], data["baseline_file_count"]),
-                    (False, "diff", [], None, str(ws), None))
-                self.assertIn("Permission denied", data["capture_error"]["reason"])
-                self.assertEqual(names_under(changes), {"workspace-changes.json"})
+                self.assertEqual(data["changes"], [
+                    {"path": "locked", "change": "added",
+                     "after": {"kind": "unreadable", "mode": stat.S_IFDIR | dir_mode},
+                     "evidence": UNREADABLE},
+                    {"path": "notes.md", "change": "added", "after": text_file(b"n\n"),
+                     "evidence": PATCH},
+                    {"path": "secret.txt", "change": "modified", "before": text_file(b"s\n"),
+                     "after": {"kind": "unreadable", "mode": stat.S_IFREG}, "evidence": UNREADABLE},
+                ])
+                self.assertEqual((data["captured"], data["capture_error"], data["baseline_file_count"]),
+                                 (False, None, 2))
+                self.assertFalse(ws.exists())
                 run = committed_run(root, changes)
                 self.assertEqual((run / "output.md").read_text(encoding="utf-8"), "done")
-                self.assertEqual(claim(run), "failed")
+                self.assertEqual(claim(run), "partial")
 
     @unittest.skipIf(os.geteuid() == 0, "root reads mode-000 files")
     def test_baseline_that_cannot_be_copied_records_a_baseline_failure(self):

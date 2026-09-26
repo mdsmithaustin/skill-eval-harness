@@ -54,7 +54,12 @@ class Special:
     mode: int
 
 
-FileState: TypeAlias = RegularFile | Symlink | Special
+@dataclass(frozen=True)
+class Unreadable:
+    mode: int
+
+
+FileState: TypeAlias = RegularFile | Symlink | Special | Unreadable
 
 
 @dataclass(frozen=True)
@@ -231,7 +236,9 @@ def _validate_change(change: FileChange) -> None:
     sides = _sides(change)
     evidence = change.evidence
     all_regular = all(isinstance(side, RegularFile) for side in sides)
-    if isinstance(evidence, InPatch):
+    if any(isinstance(side, Unreadable) for side in sides):
+        consistent = evidence == Omitted("unreadable")
+    elif isinstance(evidence, InPatch):
         consistent = all(isinstance(side, RegularFile) and side.text for side in sides)
     elif isinstance(evidence, InBlob):
         consistent = all_regular
@@ -265,16 +272,19 @@ def file_state(path: Path) -> FileState:
         return Special(mode)
     digest, size, text = hashlib.sha256(), 0, True
     decoder = codecs.getincrementaldecoder("utf-8")()
-    with os.fdopen(_open_regular(path), "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-            size += len(chunk)
-            if text:
-                try:
-                    decoder.decode(chunk)
-                    text = b"\0" not in chunk
-                except UnicodeDecodeError:
-                    text = False
+    try:
+        with os.fdopen(_open_regular(path), "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+                size += len(chunk)
+                if text:
+                    try:
+                        decoder.decode(chunk)
+                        text = b"\0" not in chunk
+                    except UnicodeDecodeError:
+                        text = False
+    except OSError:
+        return Unreadable(mode)
     if text:
         try:
             decoder.decode(b"", final=True)
@@ -287,13 +297,24 @@ def index_tree(root: Path) -> dict[str, FileState]:
     index: dict[str, FileState] = {}
     pending = [root]
     while pending:
-        with os.scandir(pending.pop()) as entries:
-            for entry in entries:
-                path = Path(entry.path)
-                if entry.is_dir(follow_symlinks=False):
-                    pending.append(path)
-                else:
-                    index[path.relative_to(root).as_posix()] = file_state(path)
+        directory = pending.pop()
+        listing: dict[str, FileState] = {}
+        subdirs: list[Path] = []
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    path = Path(entry.path)
+                    if entry.is_dir(follow_symlinks=False):
+                        subdirs.append(path)
+                    else:
+                        listing[path.relative_to(root).as_posix()] = file_state(path)
+        except OSError:
+            if directory == root:
+                raise
+            index[directory.relative_to(root).as_posix()] = Unreadable(os.lstat(directory).st_mode)
+            continue
+        index.update(listing)
+        pending.extend(subdirs)
     return index
 
 
@@ -375,6 +396,8 @@ class _EvidenceStager:
 
     def evidence(self, path: str, before: FileState | None, after: FileState | None) -> Evidence:
         sides = [side for side in (before, after) if side is not None]
+        if any(isinstance(side, Unreadable) for side in sides):
+            return Omitted("unreadable")
         regular = [side for side in sides if isinstance(side, RegularFile)]
         if len(regular) != len(sides):
             return InState()
@@ -436,6 +459,8 @@ def _state_json(state: FileState) -> dict[str, Any]:
         return {"kind": "symlink", "target": state.target}
     if isinstance(state, Special):
         return {"kind": "special", "mode": state.mode}
+    if isinstance(state, Unreadable):
+        return {"kind": "unreadable", "mode": state.mode}
     _assert_never(state)
 
 
@@ -492,10 +517,11 @@ def _write_manifest(capture: WorkspaceCapture, changes_dir: Path) -> None:
 def _stage_changes(baseline: WorkspaceBaseline, ws: Path, changes_dir: Path,
                    limits: EvidenceLimits, after: Mapping[str, FileState]) -> CapturedChanges:
     stager = _EvidenceStager(baseline, ws, changes_dir, limits)
+    hidden = tuple(f"{path}/" for path, state in after.items() if isinstance(state, Unreadable))
     changes: list[FileChange] = []
     for path in sorted(baseline.index.keys() | after.keys()):
         old, new = baseline.index.get(path), after.get(path)
-        if old != new:
+        if old != new and not (new is None and path.startswith(hidden)):
             changes.append(_change(path, old, new, stager.evidence(path, old, new)))
     patch_sha256 = None
     if stager.patch:
@@ -588,6 +614,8 @@ def _parse_state(raw: Any) -> FileState:
         return Symlink(_typed(_field(obj, "target"), str, "symlink target"))
     if kind == "special":
         return Special(_typed(_field(obj, "mode"), int, "mode"))
+    if kind == "unreadable":
+        return Unreadable(_typed(_field(obj, "mode"), int, "mode"))
     raise ValueError(f"unknown file state kind {kind!r}")
 
 
