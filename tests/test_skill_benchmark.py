@@ -1026,6 +1026,42 @@ class SkillBenchmarkTests(unittest.TestCase):
             meta = json.loads((base / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["provider"], "codex")
 
+    def test_run_codex_counts_completed_file_change_items_as_writes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = self.make_manifest(root)
+            tasks = root / "tasks.jsonl"
+            rows = sb.prepared_task_rows(manifest, sb.load_json(manifest))
+            tasks.write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")
+            fake = root / "fake_codex.py"
+            fake.write_text(
+                "import json, sys\n"
+                "_prompt = sys.stdin.read()\n"
+                "out = sys.argv[sys.argv.index('--output-last-message') + 1]\n"
+                "open(out, 'w', encoding='utf-8').write('done')\n"
+                "changes = [{'path': 'config.toml', 'kind': 'update'}, {'path': 'notes.md', 'kind': 'add'}]\n"
+                "print(json.dumps({'type': 'item.started', 'item': {'id': 'i1', 'type': 'file_change', 'changes': changes, 'status': 'in_progress'}}))\n"
+                "print(json.dumps({'type': 'item.completed', 'item': {'id': 'i1', 'type': 'file_change', 'changes': changes, 'status': 'completed'}}))\n"
+                "print(json.dumps({'type': 'item.completed', 'item': {'id': 'i2', 'type': 'file_change', 'changes': [{'path': 'gone.md', 'kind': 'delete'}], 'status': 'failed'}}))\n"
+                "print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output_tokens': 1}}))\n",
+                encoding="utf-8",
+            )
+            runs = root / "runs"
+            sb.run_codex(SimpleNamespace(tasks=str(tasks), runs=str(runs), codex_cmd=f"{sys.executable} {fake}", timeout=5))
+            base = runs / "case-1" / "with_skill"
+            metrics = json.loads((base / "metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(metrics["file_writes"], 2)
+            events = json.loads((base / "events.json").read_text(encoding="utf-8"))["events"]
+            writes = [(e["status"], e["input_summary"], e["change_kind"])
+                      for e in events if e["type"] == "file_write"]
+            self.assertEqual(writes, [
+                ("completed", "config.toml", "update"),
+                ("completed", "notes.md", "add"),
+                ("failed", "gone.md", "delete"),
+            ])
+            self.assertEqual(
+                [e["raw_ref"]["line"] for e in events if e["type"] == "file_write"], [2, 2, 3])
+
     def test_run_codex_malformed_jsonl_still_writes_failure_artifacts(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
