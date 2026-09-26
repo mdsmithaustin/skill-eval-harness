@@ -1,6 +1,8 @@
 import contextlib
+import hashlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -15,6 +17,7 @@ from helpers import (
 )
 
 import run_pi_trigger_eval as tr
+import runner_contracts as rc
 
 # Normal imports (not private importlib loads): the whole suite must share ONE
 # skill_benchmark module instance, or registries/monkeypatches/`is`-identity
@@ -1062,6 +1065,107 @@ class SkillBenchmarkTests(unittest.TestCase):
             ])
             self.assertEqual([(e["raw_ref"]["line"], e["status"]) for e in events if e["type"] == "error"],
                              [(3, "failed")])
+
+    def _run_fake_codex(self, root: Path, body: str, *, timeout: int = 5) -> Path:
+        manifest = self.make_manifest(root)
+        tasks = root / "tasks.jsonl"
+        rows = sb.prepared_task_rows(manifest, sb.load_json(manifest))
+        tasks.write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")
+        fake = root / "fake_codex.py"
+        fake.write_text(
+            "import os, sys, time\n"
+            "_prompt = sys.stdin.read()\n"
+            "out = sys.argv[sys.argv.index('--output-last-message') + 1]\n" + body,
+            encoding="utf-8",
+        )
+        runs = root / "runs"
+        sb.run_codex(SimpleNamespace(tasks=str(tasks), runs=str(runs),
+                                     codex_cmd=f"{sys.executable} {fake}", timeout=timeout))
+        return runs
+
+    def test_run_codex_persists_candidate_workspace_changes(self):
+        logo = b"\x00png"
+        with tempfile.TemporaryDirectory() as td:
+            runs = self._run_fake_codex(Path(td), (
+                "os.remove('skills/skill/SKILL.md')\n"
+                "open('notes.md', 'w').write('candidate notes\\n')\n"
+                "open('metadata.json', 'w').write('{}\\n')\n"
+                "os.mkdir('out')\n"
+                "open('out/logo.bin', 'wb').write(b'\\x00png')\n"
+                "open(out, 'w', encoding='utf-8').write('done')\n"
+            ))
+            base = runs / "case-1" / "with_skill"
+            logo_sha = hashlib.sha256(logo).hexdigest()
+            self.assertEqual(sorted(path.relative_to(base).as_posix() for path in base.rglob("*")), [
+                "artifact-commit.json", "candidate-files", f"candidate-files/{logo_sha}",
+                "candidate.patch", "environment.json", "events.json", "metadata.json",
+                "metrics.json", "output.md", "workspace-changes.json",
+            ])
+            self.assertEqual((base / f"candidate-files/{logo_sha}").read_bytes(), logo)
+            changes = json.loads((base / "workspace-changes.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                [(c["path"], c["change"], c["evidence"]["kind"]) for c in changes["changes"]],
+                [("metadata.json", "added", "patch"), ("notes.md", "added", "patch"),
+                 ("out/logo.bin", "added", "blob"), ("skills/skill/SKILL.md", "deleted", "patch")])
+            patch = (base / "candidate.patch").read_text(encoding="utf-8")
+            self.assertIn("+++ b/notes.md\n@@ -0,0 +1 @@\n+candidate notes\n", patch)
+            self.assertIn("--- a/skills/skill/SKILL.md\n+++ /dev/null\n", patch)
+            meta = sb.read_metadata(runs, "case-1", "with_skill")
+            self.assertEqual(
+                (meta["artifact_set_complete"], meta["workspace_changes_captured"],
+                 meta["workspace_changes_state"]),
+                (True, True, "captured"))
+
+            report = Path(td) / "migration.json"
+            sb.migrate_telemetry_command(SimpleNamespace(runs=str(runs), check=True, out=str(report)))
+            self.assertEqual(json.loads(report.read_text(encoding="utf-8"))["run_dirs_seen"], 1)
+
+    def test_run_codex_captures_partial_edits_from_a_timed_out_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            runs = self._run_fake_codex(Path(td), (
+                "open('skills/skill/SKILL.md', 'a').write('partial edit\\n')\n"
+                "time.sleep(30)\n"
+            ), timeout=1)
+            base = runs / "case-1" / "with_skill"
+            meta = sb.read_metadata(runs, "case-1", "with_skill")
+            self.assertEqual(
+                (meta["timed_out"], meta["artifact_set_complete"], meta["workspace_changes_captured"]),
+                (True, True, True))
+            self.assertIn(
+                "--- a/skills/skill/SKILL.md\n+++ b/skills/skill/SKILL.md\n"
+                "@@ -2,3 +2,4 @@\n name: demo\n description: Demo skill\n ---\n+partial edit\n",
+                (base / "candidate.patch").read_text(encoding="utf-8"))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads mode-000 files")
+    def test_run_codex_keeps_the_receipt_when_workspace_paths_are_unreadable(self):
+        with tempfile.TemporaryDirectory() as td:
+            runs = self._run_fake_codex(Path(td), (
+                "open('notes.md', 'w').write('candidate notes\\n')\n"
+                "os.mkdir('locked')\n"
+                "open('locked/inner.txt', 'w').write('hidden\\n')\n"
+                "open('secret.txt', 'w').write('secret\\n')\n"
+                "os.chmod('locked', 0)\n"
+                "os.chmod('secret.txt', 0)\n"
+                "open(out, 'w', encoding='utf-8').write('done')\n"
+            ))
+            base = runs / "case-1" / "with_skill"
+            changes = json.loads((base / "workspace-changes.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                [(c["path"], c["change"], c["evidence"]) for c in changes["changes"]],
+                [("locked", "added", {"kind": "omitted", "reason": "unreadable"}),
+                 ("notes.md", "added", {"kind": "patch"}),
+                 ("secret.txt", "added", {"kind": "omitted", "reason": "unreadable"})])
+            self.assertEqual((base / "output.md").read_text(encoding="utf-8"), "done")
+            meta = sb.read_metadata(runs, "case-1", "with_skill")
+            self.assertEqual(
+                (meta["artifact_set_complete"], meta["workspace_changes_captured"],
+                 meta["workspace_changes_state"]),
+                (True, False, "partial"))
+
+    def test_providers_cannot_forge_the_workspace_changes_claim(self):
+        for key in ("workspace_changes_captured", "workspace_changes_state"):
+            with self.subTest(key), self.assertRaisesRegex(ValueError, "cannot override derived evidence"):
+                rc.OutcomeContext(provider="codex", metadata_extra={key: True})
 
     def test_run_codex_malformed_jsonl_still_writes_failure_artifacts(self):
         with tempfile.TemporaryDirectory() as td:

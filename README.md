@@ -408,8 +408,51 @@ runs/<case_id>/<variant>/run-1/events.json       # normalized events used by pro
 runs/<case_id>/<variant>/run-1/metrics.json      # tokens, commands, tool calls, elapsed time, retries
 runs/<case_id>/<variant>/run-1/environment.json  # runner/model/sandbox details where available
 runs/<case_id>/<variant>/run-1/artifact-commit.json # required-file SHA-256 inventory, written last by current runners
+runs/<case_id>/<variant>/run-1/workspace-changes.json  # what the model added, modified, or deleted in its workspace
+runs/<case_id>/<variant>/run-1/candidate.patch         # text edits as one git patch, only when there are any
+runs/<case_id>/<variant>/run-1/candidate-files/<sha256> # content copies the patch cannot carry
 runs/answer-design.json                          # exact expected answer experiment and eval-contract digest
 ```
+
+Native answer runners (`run-agent`, `run-codex`, `run-claude`) run the model in a temporary
+workspace and delete it afterwards. Before deletion they diff it against a copy taken right after
+the harness built it, for every outcome including a timeout, so partial edits from a killed run
+are kept. `workspace-changes.json` lists each changed path with its before and after state
+(`file` with `sha256`, `size`, `text`, and `executable`; `symlink` with its target, never
+followed; `special`; or `unreadable`, a file the capture could not read or a directory it could
+not list, with its `mode`) and where its content lives:
+
+- `patch`: a hunk in `candidate.patch`, which `git apply` replays onto the baseline, executable
+  bit included. A chmod-only change to a patch-eligible text file is a patch entry with only
+  `old mode`/`new mode` lines; other files follow the `blob` and `omitted` rules below. The manifest records the patch as `{"path": "candidate.patch", "sha256": ...}`.
+- `blob`: `candidate-files/<sha256>`, used for binary or non-UTF-8 content, for paths git would
+  have to quote, and for a modified text file whose before side exceeds 1 MiB (the after bytes
+  are copied). For a deletion the blob holds the bytes before it.
+- `state`: a symlink or special file, fully described by its states.
+- `omitted`: `oversize` past 1 MiB, `total_cap` past 32 MiB per run, or `unreadable`.
+
+An unreadable path costs one entry, not the whole capture: the rest of the workspace is still
+recorded. The capture does not look inside an unreadable directory, so baseline files under it are
+not listed as deleted, and the directory itself appears as an `added` entry because the baseline
+records no directories. Copies are named by digest, so a model file called `metadata.json` never
+appears under that name in the run directory.
+
+An answer cites workspace files by absolute path, for example `/tmp/codex-ws-k3q/x.toml`. To
+find its entry, strip the manifest's `workspace_root` or `workspace_root_realpath` prefix (on
+macOS, `/tmp` and `/var/folders` resolve under `/private`) and look up the rest in
+`changes[].path`. Like git, the capture records files, not directories, so an empty directory
+never appears (an unreadable directory is the one exception). A path absent from `changes` was unchanged, outside the workspace, or an empty
+directory.
+
+Readers report `workspace_changes_captured` and `workspace_changes_state` next to
+`artifact_set_complete`. `captured` means the artifact set is complete, nothing was omitted,
+`candidate.patch` is in the commit inventory under the digest the manifest records, and every blob
+is there under its own digest; zero changes counts. `partial` means some content was omitted,
+`failed` means the capture itself failed (`capture_error` says at which stage), and `invalid` means the manifest or
+its referenced files do not check out. Runs without a manifest (legacy runs, `run-subagent`,
+Jetty) get neither key. The claim does not affect scoring or `execution_valid`. Codex answer runs
+default to `--sandbox read-only`, so they record an empty, captured change set unless
+`--codex-cmd` relaxes the sandbox.
 
 `trace.jsonl` is the agent CLI's own stream, preserved verbatim, and it is read with the
 stream rule: a line that repeats an object key (`codex exec --json` repeats `id` on some

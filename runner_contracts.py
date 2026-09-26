@@ -52,6 +52,7 @@ _RESERVED_EVIDENCE_KEYS = frozenset({
     "observation_complete", "process_observation_complete",
     "provider_response_complete", "trace_observation_complete",
     "operation_observation_complete", "artifact_set_complete",
+    "workspace_changes_captured", "workspace_changes_state",
     "observation_evidence", "telemetry", "telemetry_schema_version",
 })
 

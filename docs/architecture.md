@@ -205,7 +205,7 @@ flowchart TB
     VB -.-> RAW
     JT -.-> RAW
     SUB -.-> RAW
-    NORM --> CONTRACT[(Run-output contract\noutput.md + metadata\n+ events/metrics\n+ artifact-commit.json)]
+    NORM --> CONTRACT[(Run-output contract\noutput.md + metadata\n+ events/metrics\n+ workspace-changes.json\n+ artifact-commit.json)]
 
     CONTRACT --> GR[grade reads from disk]
 ```
@@ -216,7 +216,10 @@ one schema-versioned `events.json` and `metrics.json` so a process assertion lik
 into a closed event state first; only completed operations count as commands, tools, reads, writes,
 or skill invocation. Caller extras cannot overwrite the derived evidence fields. New runner and
 Jetty artifact sets write `artifact-commit.json` last with the required-file inventory and SHA-256
-digests; readers classify a missing or stale marker as an incomplete artifact set. When evidence is
+digests; readers classify a missing or stale marker as an incomplete artifact set. Native answer runners
+also diff the model's temporary workspace against its built baseline before deleting it and commit
+the result as `workspace-changes.json`, `candidate.patch`, and `candidate-files/`; readers derive
+`workspace_changes_captured` from those files separately from `artifact_set_complete`. When evidence is
 missing or unknown, the assertion fails rather than guessing from the answer text.
 
 ## How a judge defers
