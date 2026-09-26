@@ -198,27 +198,33 @@ numbers. `iter_json_objects` and `parse_trace_jsonl_text` select the rule with `
 Native answer runners also record what the model did to its temporary workspace.
 `workspace_contracts.captured_workspace` owns that directory's lifetime: build, copy a baseline,
 run the provider, diff, delete. The diff is a sorted tuple of `Added | Modified | Deleted`
-changes; each side is a `RegularFile | Symlink | Special` read by `lstat`, so a model-created link
-is recorded by target and never followed. Each change carries one `InPatch | InBlob | InState |
-Omitted` evidence value. Text within the per-file cap goes into `candidate.patch`, which
-`git apply` replays onto the baseline. Binary, non-UTF-8, or unquotable-path content is copied to
-`candidate-files/<sha256>`, and those content-addressed names keep model basenames such as
-`metadata.json` out of the run directory. Content past the 1 MiB per-file or 32 MiB per-run cap is
-`Omitted`. The capture runs for every outcome, including `TimedOut`, and never raises: a failure
-writes a `captured: false` manifest with `capture_error` and the receipt still commits. Readers
-derive `workspace_changes_captured` and `workspace_changes_state`
-(`captured | partial | failed | invalid`) next to `artifact_set_complete`. The claim holds only
-for a complete artifact set whose manifest parses, omits nothing, and references a patch and
-blobs that the commit inventory holds under their own digests. A run without a manifest gets
-neither key. The claim does not feed `execution_valid`.
+changes; each side is a `RegularFile | Symlink | Special | Unreadable` read by `lstat`, so a
+model-created link is recorded by target and never followed. `RegularFile` records the executable
+bit, so a chmod-only change is `Modified`. Only files are indexed, as in git, so an empty directory
+is never a change. A file that cannot be read, or a directory that cannot be listed, becomes one
+`Unreadable(mode)` entry with `Omitted("unreadable")` evidence; the capture does not descend into
+that directory and does not report the baseline files under it as deleted. Each change carries
+one `InPatch | InBlob | InState | Omitted` evidence value. Text within the per-file cap goes into
+`candidate.patch`, which `git apply` replays onto the baseline, mode lines included; the manifest
+records the patch's SHA-256. Binary or non-UTF-8 content, paths git would have to quote, and a
+modified text file whose before side exceeds 1 MiB are copied to `candidate-files/<sha256>`, and
+those content-addressed names keep model basenames such as `metadata.json` out of the run
+directory. Content past the 1 MiB per-file or 32 MiB per-run cap is `Omitted`. The capture runs
+for every outcome, including `TimedOut`, and never raises: a failure writes a `captured: false`
+manifest with `capture_error` and the receipt still commits. Readers derive
+`workspace_changes_captured` and `workspace_changes_state` (`captured | partial | failed |
+invalid`) next to `artifact_set_complete`. The claim holds only for a complete artifact set whose
+manifest parses and omits nothing, whose `candidate.patch` inventory digest equals the manifest's
+recorded digest, and whose blobs the commit inventory holds under their own digests. A run without
+a manifest gets neither key. The claim does not feed `execution_valid`.
 
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:10708`), Claude (`run_claude:10894`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:10713`), Claude (`run_claude:10899`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:13496`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4089` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:13501`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:4094` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -315,7 +321,7 @@ those pairs; missing/ineligible arms remain in `pairing` diagnostics and duplica
 `build_slice_summary` breaks results down
 by domain, difficulty, trigger type, and success goal. Case flags mark saturated, no-lift,
 flaky, and with-skill-failed cases. These flags, the leakage lint
-(`prompt_assertion_leakage_findings:833`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:838`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as
