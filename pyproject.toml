@@ -65,6 +65,7 @@ required-version = "==0.16.0"
 "report_contracts.py" = ["PYI034", "TRY004"]
 "runner_contracts.py" = ["TRY004"]
 "telemetry.py" = ["TRY004"]
+"workspace_contracts.py" = ["TRY004"]
 # Runner boundaries must report arbitrary provider/CLI failures as evaluation
 # results, and the matrix's class attributes are immutable fixture shapes.
 "run_pi_trigger_eval.py" = ["F401"]

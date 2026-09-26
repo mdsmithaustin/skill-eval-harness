@@ -119,6 +119,9 @@ class EvidenceLimits:
                 raise ValueError("evidence limits must be positive integers")
 
 
+DEFAULT_LIMITS = EvidenceLimits()
+
+
 CaptureStage = Literal["baseline", "diff", "evidence", "manifest"]
 
 
@@ -497,7 +500,7 @@ def _stage_changes(baseline: WorkspaceBaseline, ws: Path, changes_dir: Path,
 
 
 def capture_workspace_changes(baseline: Baseline, ws: Path, changes_dir: Path, *,
-                              limits: EvidenceLimits = EvidenceLimits()) -> WorkspaceCapture:
+                              limits: EvidenceLimits = DEFAULT_LIMITS) -> WorkspaceCapture:
     """Diff the live workspace against the baseline and stage evidence in `changes_dir`.
 
     Never raises for I/O: a failure clears partial outputs and writes a failure
@@ -539,7 +542,7 @@ B = TypeVar("B")
 
 @contextmanager
 def captured_workspace(*, prefix: str, changes_dir: Path, build: Callable[[Path], B],
-                       limits: EvidenceLimits = EvidenceLimits()) -> Iterator[tuple[Path, B]]:
+                       limits: EvidenceLimits = DEFAULT_LIMITS) -> Iterator[tuple[Path, B]]:
     """Own the model workspace: create, build, baseline, yield, capture, delete.
 
     Every outcome that returns normally, including a timeout, is captured. An

@@ -17,6 +17,7 @@ import collections
 import copy
 import difflib
 import errno
+import functools
 import hashlib
 import html
 import io
@@ -213,7 +214,11 @@ from trigger_contracts import (
     validated_trigger_protocol_limits,
 )
 from trigger_reporting import CompleteTriggerCohort, summarize_trigger_cohort
-from workspace_contracts import WorkspaceChangesState, captured_workspace, workspace_changes_state
+from workspace_contracts import (
+    WorkspaceChangesState,
+    captured_workspace,
+    workspace_changes_state,
+)
 
 VALID_SPLITS = frozenset(Split.values())
 TRIGGER_HARNESS_IDENTITY_VERSION = 2
@@ -10659,7 +10664,7 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
         with tempfile.TemporaryDirectory(prefix=f"{backend.name}-changes-") as cd:
             changes = Path(cd)
             with captured_workspace(prefix=f"{backend.name}-ws-", changes_dir=changes,
-                                    build=lambda ws: workspace_builder(pt, ws)) as (ws, workspace):
+                                    build=functools.partial(workspace_builder, pt)) as (ws, workspace):
                 skill_rel, input_rel = workspace
                 attestation = workspace.attestation
                 if attestation.mounted_skill_tree_hash is not None:
