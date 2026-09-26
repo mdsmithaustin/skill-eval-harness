@@ -2635,8 +2635,9 @@ class SubjectVisiblePromptTests(unittest.TestCase):
     _BANNED = (
         "eval", "test", "judge", "experiment", "rubric", "score",
         "compare", "benchmark", "candidate", "arena",
+        "hidden", "answer key", "answer keys", "grading", "graded",
     )
-    _BANNED_RE = re.compile(r"\b(?:" + "|".join(_BANNED) + r")\b", re.I)
+    _BANNED_RE = re.compile(r"\b(?:" + "|".join(_BANNED) + r")\b", re.IGNORECASE)
 
     def _task(self, prompt: str, variant: str = "with_skill") -> am.PreparedTask:
         return AblationReviewFixesTests().task({"variant": variant, "prompt": prompt})
