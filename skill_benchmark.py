@@ -7512,6 +7512,9 @@ def normalize_trace_record(record: dict[str, Any], *, source: str, index: int, l
         event["role"] = str(role)
     if name:
         event["name"] = name
+    change_kind = record.get("change_kind")
+    if isinstance(change_kind, str) and change_kind:
+        event["change_kind"] = change_kind
     if input_summary:
         event["input_summary"] = input_summary[:1000]
     if output_summary:
@@ -7736,6 +7739,33 @@ def identity_flat_records(records: list[dict[str, Any]], *,
         raise ValueError("record_lines must have one physical line per trace record")
     return [((record_lines[i - 1] if record_lines is not None else i), record)
             for i, record in enumerate(records, 1)]
+
+
+def codex_stream_flat_records(records: list[dict[str, Any]], *,
+                              record_lines: list[int] | None = None) -> list[tuple[int, dict[str, Any]]]:
+    if record_lines is not None and len(record_lines) != len(records):
+        raise ValueError("record_lines must have one physical line per trace record")
+    flat: list[tuple[int, dict[str, Any]]] = []
+    for i, record in enumerate(records, 1):
+        line = record_lines[i - 1] if record_lines is not None else i
+        item = record.get("item")
+        changes = item.get("changes") if isinstance(item, dict) else None
+        if (record.get("type") == "item.completed" and isinstance(item, dict)
+                and item.get("type") == "file_change" and isinstance(changes, list) and changes
+                and all(isinstance(change, dict) for change in changes)):
+            for change in changes:
+                flat_record = {
+                    "type": "file_write",
+                    "name": "file_change",
+                    "path": stringify_trace_value(change.get("path")),
+                    "change_kind": stringify_trace_value(change.get("kind")),
+                }
+                if "status" in item:
+                    flat_record["status"] = item["status"]
+                flat.append((line, flat_record))
+        else:
+            flat.append((line, record))
+    return flat
 
 
 def vibe_stream_flat_records(records: list[dict[str, Any]], *,
@@ -8061,7 +8091,7 @@ class TraceDialect:
 
 
 GENERIC_TRACE_DIALECT = TraceDialect()
-CODEX_TRACE_DIALECT = TraceDialect(protocol_error=_codex_trace_protocol_error)
+CODEX_TRACE_DIALECT = TraceDialect(flatten=codex_stream_flat_records, protocol_error=_codex_trace_protocol_error)
 JETTY_TRACE_DIALECT = TraceDialect(protocol_error=_jetty_trace_protocol_error)
 VIBE_TRACE_DIALECT = TraceDialect(
     flatten=vibe_stream_flat_records,
