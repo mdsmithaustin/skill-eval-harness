@@ -163,6 +163,8 @@ Initial event `type` values:
 | `error` | Runner, model, tool, or adapter error. |
 | `metric` | Token/timing/counter event from runner metadata. |
 
+Codex `file_change` items expand to one `file_write` event per change, each carrying `change_kind` (`add`/`update`/`delete`) from the provider's change entry.
+
 Adapters may preserve additional fields under `raw` or `details`, but assertions should depend on normalized fields.
 
 ## Metrics schema
