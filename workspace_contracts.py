@@ -41,6 +41,7 @@ class RegularFile:
     sha256: str
     size: int
     text: bool
+    executable: bool
 
 
 @dataclass(frozen=True)
@@ -279,7 +280,7 @@ def file_state(path: Path) -> FileState:
             decoder.decode(b"", final=True)
         except UnicodeDecodeError:
             text = False
-    return RegularFile(digest.hexdigest(), size, text)
+    return RegularFile(digest.hexdigest(), size, text, bool(mode & 0o111))
 
 
 def index_tree(root: Path) -> dict[str, FileState]:
@@ -320,18 +321,25 @@ def _read_verified(path: Path, expected: RegularFile) -> bytes | None:
 _GIT_QUOTED_PATH = re.compile(r'[\x00-\x1f\x7f"\\]')
 
 
-def _patch_lines(data: bytes | None) -> list[str]:
+def _patch_lines(data: bytes) -> list[str]:
     return re.findall(r"[^\n]*\n|[^\n]+", data.decode("utf-8")) if data else []
 
 
-def git_patch_entry(path: str, before: bytes | None, after: bytes | None) -> str:
+def _git_mode(state: RegularFile) -> str:
+    return "100755" if state.executable else "100644"
+
+
+def git_patch_entry(path: str, before: RegularFile | None, after: RegularFile | None,
+                    old: bytes, new: bytes) -> str:
     header = [f"diff --git a/{path} b/{path}\n"]
-    if before is None:
-        header.append("new file mode 100644\n")
-    if after is None:
-        header.append("deleted file mode 100644\n")
+    if before is None and after is not None:
+        header.append(f"new file mode {_git_mode(after)}\n")
+    elif after is None and before is not None:
+        header.append(f"deleted file mode {_git_mode(before)}\n")
+    elif before is not None and after is not None and before.executable != after.executable:
+        header += [f"old mode {_git_mode(before)}\n", f"new mode {_git_mode(after)}\n"]
     hunks = difflib.unified_diff(
-        _patch_lines(before), _patch_lines(after),
+        _patch_lines(old), _patch_lines(new),
         "/dev/null" if before is None else f"a/{path}",
         "/dev/null" if after is None else f"b/{path}")
     return "".join(header) + "".join(
@@ -380,11 +388,13 @@ class _EvidenceStager:
         return self._blob(source, content)
 
     def _patch(self, path: str, before: FileState | None, after: FileState | None) -> Evidence:
-        old = _read_verified(self.baseline.shadow / path, before) if isinstance(before, RegularFile) else None
-        new = _read_verified(self.ws / path, after) if isinstance(after, RegularFile) else None
-        if (before is not None and old is None) or (after is not None and new is None):
+        old_file = before if isinstance(before, RegularFile) else None
+        new_file = after if isinstance(after, RegularFile) else None
+        old = b"" if old_file is None else _read_verified(self.baseline.shadow / path, old_file)
+        new = b"" if new_file is None else _read_verified(self.ws / path, new_file)
+        if old is None or new is None:
             return Omitted("unreadable")
-        entry = git_patch_entry(path, old, new)
+        entry = git_patch_entry(path, old_file, new_file, old, new)
         if not self._afford(len(entry.encode("utf-8"))):
             return Omitted("total_cap")
         self.patch.append(entry)
@@ -420,7 +430,8 @@ def _clear_outputs(changes_dir: Path) -> None:
 
 def _state_json(state: FileState) -> dict[str, Any]:
     if isinstance(state, RegularFile):
-        return {"kind": "file", "sha256": state.sha256, "size": state.size, "text": state.text}
+        return {"kind": "file", "sha256": state.sha256, "size": state.size, "text": state.text,
+                "executable": state.executable}
     if isinstance(state, Symlink):
         return {"kind": "symlink", "target": state.target}
     if isinstance(state, Special):
@@ -566,7 +577,8 @@ def _parse_state(raw: Any) -> FileState:
     if kind == "file":
         return RegularFile(_typed(_field(obj, "sha256"), str, "sha256"),
                            _typed(_field(obj, "size"), int, "size"),
-                           _typed(_field(obj, "text"), bool, "text"))
+                           _typed(_field(obj, "text"), bool, "text"),
+                           _typed(_field(obj, "executable"), bool, "executable"))
     if kind == "symlink":
         return Symlink(_typed(_field(obj, "target"), str, "symlink target"))
     if kind == "special":

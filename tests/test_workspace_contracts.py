@@ -18,12 +18,14 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def text_file(data: bytes) -> dict:
-    return {"kind": "file", "sha256": sha(data), "size": len(data), "text": True}
+def text_file(data: bytes, *, executable: bool = False) -> dict:
+    return {"kind": "file", "sha256": sha(data), "size": len(data), "text": True,
+            "executable": executable}
 
 
 def binary_file(data: bytes) -> dict:
-    return {"kind": "file", "sha256": sha(data), "size": len(data), "text": False}
+    return {"kind": "file", "sha256": sha(data), "size": len(data), "text": False,
+            "executable": False}
 
 
 def blob(data: bytes) -> dict:
@@ -41,14 +43,34 @@ def write_tree(root: Path, files: dict[str, bytes]) -> None:
         path.write_bytes(data)
 
 
-def capture(root: Path, baseline: dict[str, bytes], edit: Callable[[Path], None],
-            **options) -> tuple[Path, Path]:
+def capture(root: Path, baseline: dict[str, bytes], edit: Callable[[Path], None], *,
+            executable: frozenset[str] = frozenset(), **options) -> tuple[Path, Path]:
+    def build(ws: Path) -> None:
+        write_tree(ws, baseline)
+        for rel in executable:
+            (ws / rel).chmod(0o755)
+
     changes = root / "changes"
     changes.mkdir(parents=True)
-    with wc.captured_workspace(prefix="test-ws-", changes_dir=changes,
-                               build=lambda ws: write_tree(ws, baseline), **options) as (ws, _):
+    with wc.captured_workspace(prefix="test-ws-", changes_dir=changes, build=build, **options) as (ws, _):
         edit(ws)
     return changes, ws
+
+
+def replay(root: Path, baseline: dict[str, bytes], executable: frozenset[str],
+           patch: Path) -> dict[str, tuple[bytes, bool]]:
+    git = shutil.which("git")
+    if git is None:
+        raise unittest.SkipTest("git is not installed")
+    tree = root / "replay"
+    tree.mkdir()
+    write_tree(tree, baseline)
+    for rel in executable:
+        (tree / rel).chmod(0o755)
+    subprocess.run([git, "apply", "--whitespace=nowarn", str(patch)],
+                   cwd=tree, check=True, capture_output=True)
+    return {path.relative_to(tree).as_posix(): (path.read_bytes(), bool(path.stat().st_mode & 0o111))
+            for path in sorted(tree.rglob("*")) if path.is_file()}
 
 
 def manifest(changes: Path) -> dict:
@@ -118,20 +140,50 @@ class CaptureTests(unittest.TestCase):
                 "diff --git a/nested/deep/old.md b/nested/deep/old.md\n"
                 "--- a/nested/deep/old.md\n+++ b/nested/deep/old.md\n@@ -1 +1 @@\n"
                 "-x\n\\ No newline at end of file\n+y\n", patch)
-
-            git = shutil.which("git")
-            if git is None:
-                self.skipTest("git is not installed")
-            replay = root / "replay"
-            replay.mkdir()
-            write_tree(replay, baseline)
-            subprocess.run([git, "apply", "--whitespace=nowarn", str(changes / "candidate.patch")],
-                           cwd=replay, check=True, capture_output=True)
             self.assertEqual(
-                {rel: (replay / rel).read_bytes() for rel in sorted(names_under(replay))
-                 if (replay / rel).is_file()},
-                {"edit.txt": b"a\nB\nc\nd", "empty.txt": b"", "keep.txt": b"same\n",
-                 "nested/deep/new.md": b"hello\n", "nested/deep/old.md": b"y\n"})
+                replay(root, baseline, frozenset(), changes / "candidate.patch"),
+                {"edit.txt": (b"a\nB\nc\nd", False), "empty.txt": (b"", False),
+                 "keep.txt": (b"same\n", False), "nested/deep/new.md": (b"hello\n", False),
+                 "nested/deep/old.md": (b"y\n", False)})
+
+    def test_executable_bit_is_recorded_and_git_apply_replays_it(self):
+        baseline = {"run.sh": b"echo hi\n", "tool.sh": b"echo t\n", "gone.sh": b"echo g\n"}
+        executable = frozenset({"tool.sh", "gone.sh"})
+
+        def edit(ws: Path) -> None:
+            (ws / "run.sh").chmod(0o755)
+            (ws / "tool.sh").write_bytes(b"echo T\n")
+            (ws / "tool.sh").chmod(0o644)
+            (ws / "gone.sh").unlink()
+            (ws / "new.sh").write_bytes(b"echo new\n")
+            (ws / "new.sh").chmod(0o755)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            changes, _ = capture(root, baseline, edit, executable=executable)
+            self.assertEqual(manifest(changes)["changes"], [
+                {"path": "gone.sh", "change": "deleted",
+                 "before": text_file(b"echo g\n", executable=True), "evidence": PATCH},
+                {"path": "new.sh", "change": "added",
+                 "after": text_file(b"echo new\n", executable=True), "evidence": PATCH},
+                {"path": "run.sh", "change": "modified", "before": text_file(b"echo hi\n"),
+                 "after": text_file(b"echo hi\n", executable=True), "evidence": PATCH},
+                {"path": "tool.sh", "change": "modified",
+                 "before": text_file(b"echo t\n", executable=True),
+                 "after": text_file(b"echo T\n"), "evidence": PATCH},
+            ])
+            self.assertEqual((changes / "candidate.patch").read_text(encoding="utf-8"), (
+                "diff --git a/gone.sh b/gone.sh\ndeleted file mode 100755\n"
+                "--- a/gone.sh\n+++ /dev/null\n@@ -1 +0,0 @@\n-echo g\n"
+                "diff --git a/new.sh b/new.sh\nnew file mode 100755\n"
+                "--- /dev/null\n+++ b/new.sh\n@@ -0,0 +1 @@\n+echo new\n"
+                "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n"
+                "diff --git a/tool.sh b/tool.sh\nold mode 100755\nnew mode 100644\n"
+                "--- a/tool.sh\n+++ b/tool.sh\n@@ -1 +1 @@\n-echo t\n+echo T\n"))
+            self.assertEqual(
+                replay(root, baseline, executable, changes / "candidate.patch"),
+                {"new.sh": (b"echo new\n", True), "run.sh": (b"echo hi\n", True),
+                 "tool.sh": (b"echo T\n", False)})
 
     def test_binary_and_non_utf8_content_is_copied_by_digest_including_deleted_before_bytes(self):
         baseline = {"latin.txt": b"cafe\n", "old.bin": b"\x00zz"}
