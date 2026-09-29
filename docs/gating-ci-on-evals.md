@@ -137,14 +137,21 @@ The recipe for a skill repo's `.github/workflows/`:
 ```yaml
 - name: Grade skill eval
   run: |
+    skill-benchmark judge evals/shared-benchmark.json \
+      --runs eval-runs/latest --variant with_skill --variant without_skill \
+      --judge-cmd "$JUDGE_CMD" --out judge-results.jsonl
     skill-benchmark benchmark evals/shared-benchmark.json \
       --runs eval-runs/latest --variant with_skill --variant without_skill \
-      --out benchmark.json
+      --judge-results judge-results.jsonl --out benchmark.json
     skill-benchmark report --benchmark benchmark.json --format github >> "$GITHUB_STEP_SUMMARY"
 
 - name: Fail if the manifest is too weak to trust
   run: skill-benchmark audit-manifest evals/shared-benchmark.json --fail-on-blockers
 ```
+
+Skip the `judge` step only when no case in the manifest carries a judge assertion; a
+`benchmark` run without `--judge-results` against a manifest that does leaves grading
+`"partial"` for every judged case, exactly like the demo walkthrough above.
 
 For a full-suite gate across many skills, `suite-run` adds a preflight with cost
 ceilings (`--max-estimated-cost-usd`) so a PR job can refuse to start a run that would
