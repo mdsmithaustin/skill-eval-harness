@@ -91,7 +91,9 @@ reason itself is `reports[0].summary.design_coverage_reason` — one of
 `grading_evidence_incomplete`, or `incomplete_answer_pairing`. When more than one of
 those blocked the row (a crashed arm behind an ungraded judge, say),
 `design_coverage_reason` names only the most recent one; the full ordered list is
-`reports[0].summary.incomplete_reasons`.
+`reports[0].summary.incomplete_reasons`. A deferred judge always also counts as incomplete
+grading, so this demo reports `['grading_evidence_incomplete', 'deferred_judge_verdicts']`;
+that pair means the judge step has not run, not that grading is broken.
 
 ```bash
 python3 ../../skill_benchmark.py token-overhead evals/shared-benchmark.json \
@@ -156,7 +158,7 @@ case keeps the top-level row `None` forever, no matter how real the runs get. Fo
 manifest, read `reports[0].summary.observed` (above) instead of the table:
 
 - **High `Lift per 1k total tokens` / `Lift per $`**
-  (`summary.observed.objective_lift_per_1k_total_tokens`) → the footprint is
+  (`summary.observed.objective_lift_per_1k_total_tokens` / `objective_lift_per_dollar`) → the footprint is
   earning its keep. Leave it. This is the case the skill exists for.
 - **Positive footprint, `Mean objective lift` ≈ 0** (`summary.observed.objective_delta`)
   → you are paying tokens for nothing measurable. Either the cases are
