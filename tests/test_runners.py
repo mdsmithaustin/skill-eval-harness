@@ -352,15 +352,9 @@ class SubagentRunnerTests(unittest.TestCase):
             probe = root / "probe.json"
             stub = self._stub_claude_workspace_probe(root / "claude_stub.py", probe)
 
-            # claude_run_metrics()'s "source"/"schema_version" fields fail
-            # validate_subagent_response's numeric-only usage check (a separate,
-            # pre-existing defect: the built-in Claude backend's every turn hits
-            # it, not just this test's). Stub it out so this test isolates the
-            # cwd-threading behavior under test from that unrelated failure.
-            with mock.patch.object(sb, "claude_run_metrics", return_value={"total_tokens": 1}):
-                rc = sb.run_subagent(argparse.Namespace(
-                    tasks=str(tasks_path), runs=str(root / "runs"), model=None,
-                    agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
+            rc = sb.run_subagent(argparse.Namespace(
+                tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
 
             self.assertEqual(rc, 0)
             records = json.loads(probe.read_text(encoding="utf-8"))
@@ -369,6 +363,69 @@ class SubagentRunnerTests(unittest.TestCase):
             self.assertTrue(records[0]["paths"], "turn 1 prompt listed no workspace-relative paths")
             self.assertTrue(all(records[0]["existing"].values()),
                             f"turn 1 workspace files unreachable: {records[0]}")
+
+    def test_default_claude_backend_single_turn_succeeds(self):
+        """run-subagent's default (built-in Claude CLI) backend must produce a
+        real answer end to end. It previously failed on every run: the response
+        `usage` it built from claude_run_metrics() was metrics.json's own shape
+        (schema_version/source/...), not a numeric usage mapping, so
+        validate_subagent_response always raised and every run's output.md
+        carried the CLAUDE FAILURE marker instead of the stub's answer."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tasks = make_tasks(root)[:1]
+            tasks_path = root / "tasks.jsonl"
+            tasks_path.write_text(json.dumps(tasks[0]) + "\n", encoding="utf-8")
+            stub = stub_claude(root / "claude_stub.py")
+
+            rc = sb.run_subagent(argparse.Namespace(
+                tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
+
+            self.assertEqual(rc, 0)
+            base = root / "runs" / "case-1" / "with_skill"
+            output = (base / "output.md").read_text(encoding="utf-8")
+            self.assertEqual(output, "STUB ANSWER token-XYZ")
+            self.assertNotIn(str(sb.CLAUDE_FAILURE), output)
+            metrics = json.loads((base / "metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(metrics["input_tokens"], 11)
+            self.assertEqual(metrics["output_tokens"], 22)
+            self.assertEqual(metrics["total_tokens"], 33)
+            metadata = json.loads((base / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["usage_normalized"]["total_tokens"], 33)
+            self.assertEqual(metadata["cost_normalized"]["total_cost"], 0.0123)
+
+    def test_default_claude_backend_multi_turn_succeeds(self):
+        """Same defect as the single-turn case, hit on every turn of a
+        multi-turn subagent run: claude_run_metrics()'s metrics.json-shaped
+        usage fails validate_subagent_response, so turn 1 always errored out
+        before turn 2 ever ran."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tasks = make_tasks(root)[:1]
+            tasks[0]["turns"] = ["first turn", "second turn"]
+            tasks_path = root / "tasks.jsonl"
+            tasks_path.write_text(json.dumps(tasks[0]) + "\n", encoding="utf-8")
+            stub = stub_claude(root / "claude_stub.py", answer="TURN ANSWER token-XYZ")
+
+            rc = sb.run_subagent(argparse.Namespace(
+                tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
+
+            self.assertEqual(rc, 0)
+            base = root / "runs" / "case-1" / "with_skill"
+            output = (base / "output.md").read_text(encoding="utf-8")
+            self.assertEqual(output, "TURN ANSWER token-XYZ")
+            self.assertNotIn(str(sb.CLAUDE_FAILURE), output)
+            for n in (1, 2):
+                turn_metrics = json.loads(
+                    (base / f"turn-{n}" / "metrics.json").read_text(encoding="utf-8"))
+                self.assertEqual(turn_metrics["input_tokens"], 11)
+                self.assertEqual(turn_metrics["output_tokens"], 22)
+                self.assertEqual(turn_metrics["total_tokens"], 33)
+                turn_meta = json.loads(
+                    (base / f"turn-{n}" / "metadata.json").read_text(encoding="utf-8"))
+                self.assertEqual(turn_meta["cost_normalized"]["total_cost"], 0.0123)
 
 
 class ToolReplayTests(unittest.TestCase):
