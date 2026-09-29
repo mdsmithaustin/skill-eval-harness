@@ -44,8 +44,8 @@ python3 $HARNESS run-codex --tasks /tmp/demo-tasks.jsonl --runs /tmp/demo-runs \
   --codex-cmd "python3 $(pwd)/stub_runner.py"
 
 # 4. judge the c-review arms' actionable-review assertion with the deterministic stub judge
-#    (the case also carries an objective assertion, so leaving this out keeps grading
-#    "partial" for every variant and blocks the ablation pairs below)
+#    (that judge assertion is why leaving this step out keeps grading "partial" for
+#    every variant and blocks the ablation pairs below)
 python3 $HARNESS judge evals/shared-benchmark.json --runs /tmp/demo-runs \
   --variant with_skill --variant without_skill \
   --variant ablation:no-severity --variant ablation:no-checklist \
@@ -58,9 +58,13 @@ python3 $HARNESS benchmark evals/shared-benchmark.json --runs /tmp/demo-runs \
   --judge-results /tmp/demo-judge-results.jsonl
 ```
 
-You should see `with_skill` pass both objective assertions, `without_skill` fail both, and
-each ablation arm fail exactly the one assertion whose guidance it removed — each reported
-as an `expected_regression_confirmed` because the ablation is **materialized** (a real
+You should see `with_skill` pass both objective assertions and the judge assertion,
+`without_skill` fail all three, `ablation:no-checklist` fail exactly `cite-checklist` (the
+one objective assertion whose guidance it removed), and `ablation:no-severity` fail both
+`severity-label` and the judge assertion `actionable-review` (removing the severity
+section also removes the reasoned phrasing the judge requires). Each named-assertion drop
+is reported as an `expected_regression_confirmed` because the ablation is **materialized**
+(a real
 edited tree, blind, with verified provenance) and the six repeated runs clear the per-case
 significance gate (a case needs >= 6 matched pairs; the two-sided sign-flip test on 6 pairs
 gives p = 0.03125 < 0.05). With 4 runs per arm the same observed drop is reported as
