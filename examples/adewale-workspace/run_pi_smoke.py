@@ -26,7 +26,7 @@ from skill_benchmark import (
     _copy_skill_root,
     ablation_variant_population,
     canonical_skill_tree_hash,
-    detect_trigger,
+    detect_trigger_detection,
     materialized_tree_for_variant,
     normalize_cost,
     normalize_usage,
@@ -289,7 +289,13 @@ def run_case(repo: str, manifest: dict[str, Any], case: dict[str, Any], variant:
     if variant == "without_skill":
         runner_skill_invoked, copied_skill_evidence = False, []
     else:
-        runner_skill_invoked, copied_skill_evidence = detect_trigger(stdout, list(locals().get("copied_skill_paths", [])))
+        # source="pi": Pi's documented tool_execution_end carries no args (the
+        # read path lives on the matching tool_execution_start), so detection
+        # must go through the Pi dialect's correlation, the same as
+        # write_trace_artifacts(source="pi") below and the trigger matrix's
+        # own pi agent -- not the generic dialect, which never resolves it.
+        detection = detect_trigger_detection(stdout, list(locals().get("copied_skill_paths", [])), source="pi")
+        runner_skill_invoked, copied_skill_evidence = detection.triggered, detection.legacy_evidence
     meta.update({
         "elapsed_ms": elapsed_ms,
         "returncode": returncode,
