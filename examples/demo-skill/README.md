@@ -59,11 +59,13 @@ python3 $HARNESS benchmark evals/shared-benchmark.json --runs /tmp/demo-runs \
 ```
 
 You should see `with_skill` pass both objective assertions and the judge assertion,
-`without_skill` fail all three, `ablation:no-checklist` fail exactly `cite-checklist` (the
+`without_skill` fail every assertion on each case (all three on `c-review`), `ablation:no-checklist` fail exactly `cite-checklist` (the
 one objective assertion whose guidance it removed), and `ablation:no-severity` fail both
 `severity-label` and the judge assertion `actionable-review` (removing the severity
-section also removes the reasoned phrasing the judge requires). Each named-assertion drop
-is reported as an `expected_regression_confirmed` because the ablation is **materialized**
+section also removes the reasoned phrasing the judge requires). Each ablation's declared
+assertion (`severity-label` for `no-severity`, `cite-checklist` for `no-checklist`) is reported
+as an `expected_regression_confirmed`; the extra `actionable-review` drop is not a declared
+expected regression and is not confirmed. The confirmation holds because the ablation is **materialized**
 (a real
 edited tree, blind, with verified provenance) and the six repeated runs clear the per-case
 significance gate (a case needs >= 6 matched pairs; the two-sided sign-flip test on 6 pairs

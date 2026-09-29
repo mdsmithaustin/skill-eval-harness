@@ -167,8 +167,8 @@ No severity label anywhere — the assertion is right, the text really lacks it.
 `returncode: 0`, `timed_out: false` — the run completed cleanly and produced real text.
 This is a genuine quality miss, not a crash or an empty output. `usage_normalized` reads
 real zeros sourced from the trace (`source: "trace_normalized"`). The deterministic stub
-runner emits a trace with no token counts, and the harness normalizes that into `0`, not
-a missing measurement. `cost_normalized` is the one that is actually absent
+runner reports `"usage": {"input_tokens": 0, "output_tokens": 0}` on `turn.completed`, so
+these zeros are values the stub reported, not a missing measurement. `cost_normalized` is the one that is actually absent
 (`source: "missing"`). The stub never claimed a dollar cost at all, so there is nothing
 to normalize into even a `0`.
 

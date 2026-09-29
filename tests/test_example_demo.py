@@ -163,6 +163,28 @@ class WalkthroughJudgeStepTests(unittest.TestCase):
                 "benchmark command to check"
             )
 
+    def _assert_some_benchmark_is_judged(self, path: Path) -> None:
+        judge_outs: set[str] = set()
+        judged = []
+        for block in self._CODE_BLOCK.findall(path.read_text(encoding="utf-8")):
+            for line in self._flatten(block):
+                if self._JUDGE_CALL.search(line):
+                    out = self._flag_value(line, "--out")
+                    if out:
+                        judge_outs.add(out)
+                if self._BENCHMARK_CALL.search(line):
+                    judge_results = self._flag_value(line, "--judge-results")
+                    if judge_results and judge_results in judge_outs:
+                        judged.append(line)
+        self.assertTrue(
+            judged, f"{path}: no benchmark call is fed by a preceding judge step's --out")
+
+    def test_why_did_this_run_fail_benchmarks_judged_runs(self):
+        self._assert_some_benchmark_is_judged(ROOT / "docs" / "why-did-this-run-fail.md")
+
+    def test_gating_ci_on_evals_benchmarks_judged_runs(self):
+        self._assert_some_benchmark_is_judged(ROOT / "docs" / "gating-ci-on-evals.md")
+
     def test_demo_readme_judges_before_confirming(self):
         self._assert_confirming_ablation_benchmarks_are_judged(DEMO / "README.md")
 
