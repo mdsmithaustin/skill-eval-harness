@@ -13505,7 +13505,11 @@ def run_subagent(args: argparse.Namespace) -> int:
             if history:
                 transcript = "\n\n".join(f"[user]\n{h['prompt']}\n\n[assistant]\n{h['answer']}" for h in history)
                 prompt = f"Conversation so far:\n{transcript}\n\n[user]\n{prompt}"
-            result = claude_cli_invoke(prompt, model=model, claude_bin=claude_bin, timeout=timeout)
+            # The prompt lists skill/input paths relative to `workspace` (build_task_prompt),
+            # so the CLI must run there too — an unset cwd falls back to an empty
+            # claude-invoke-cwd- temp dir where those paths resolve to nothing.
+            result = claude_cli_invoke(prompt, model=model, claude_bin=claude_bin, timeout=timeout,
+                                       cwd=str(workspace))
             return {"answer": result.get("answer"), "returncode": result.get("returncode"),
                     "timed_out": result.get("timed_out", False), "elapsed_ms": result.get("elapsed_ms"),
                     "usage": claude_run_metrics(result)}
