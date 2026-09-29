@@ -45,6 +45,9 @@ canonical tree where that agent discovers skills) and invoke() (run the agent
 headless on the raw query, return its JSON event stream), then add one row to
 agent_capabilities.BACKENDS and its explicit trace-dialect semantics. detect()
 only needs overriding when load evidence is not a file path in the stream.
+An adapter whose detect() matches a mounted skill by name must also set
+skill_name_source, or exposed_skill_names() hands it no names and it can
+never trigger by name.
 
 Every number this emits is a RAW autonomous-trigger measurement (the same
 evidence class as run_pi_trigger_eval.py) — a rate to steer description edits,
@@ -384,6 +387,8 @@ class AgentAdapter:
     detect(stdout, skill_names, copied) -> (triggered, evidence). The default
         is the shared path-evidence detector; override only when load evidence
         is not a file path (e.g. Claude Code's Skill tool carries a name).
+        A detect() override that matches by name must set skill_name_source,
+        or exposed_skill_names() gives it no names and it can never trigger.
     """
 
     name = "base"
