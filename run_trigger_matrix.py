@@ -547,11 +547,15 @@ class CodexAdapter(AgentAdapter):
             argv += ["--model", model]
         argv.append(query)
         env, meta = codex_env_for_home(codex_home)
+        # Codex names host skills in its own errors (a skill that fails to
+        # load, a directory it cannot scan, a rejected skills.config echoed
+        # back), so the subprocess owner strips those paths before it caps.
+        redact_host_paths = codex_host_path_redactor()
         try:
             result = validate_invoke_result(
                 self.name, self._run_argv(ProcessInvocationPlan.from_values(
                     argv, input_text="", cwd=workspace, timeout_s=timeout,
-                    environment=env))
+                    environment=env, redact_output=redact_host_paths))
             )
             rollout = locate_codex_rollout(result.stdout, codex_home)
         finally:
@@ -559,10 +563,7 @@ class CodexAdapter(AgentAdapter):
         if result.observation_complete:
             result = result.with_provider_error(
                 codex_stream_protocol_error(result.stdout))
-        # Codex names host skills in its own errors (a skill that fails to
-        # load, a directory it cannot scan, a rejected skills.config echoed
-        # back), so strip those paths before the row is ever recorded.
-        redact_host_paths = codex_host_path_redactor()
+        # A runner injected through _run_argv may not honor redact_output.
         result = result.with_wire_text(
             stdout=redact_host_paths(result.stdout),
             stderr=redact_host_paths(result.stderr),

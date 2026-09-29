@@ -1,7 +1,7 @@
 """Provider-neutral request, process-plan, and process-result contracts."""
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -156,6 +156,9 @@ class ProcessInvocationPlan:
     cwd: Path
     timeout_s: TimeoutSeconds
     environment: Mapping[str, str] | None = None
+    # Applied to the whole captured stdout and stderr before the owner caps
+    # them, so a redacted span can never be cut in half first.
+    redact_output: Callable[[str], str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.argv, tuple):
@@ -188,6 +191,8 @@ class ProcessInvocationPlan:
                     raise ValueError("process environment contains an invalid key or value")
                 copied[key] = value
             object.__setattr__(self, "environment", MappingProxyType(copied))
+        if self.redact_output is not None and not callable(self.redact_output):
+            raise TypeError("process redact_output must be callable or None")
 
     @classmethod
     def from_values(
@@ -198,6 +203,7 @@ class ProcessInvocationPlan:
         cwd: Path | str,
         timeout_s: int,
         environment: Mapping[str, str] | None = None,
+        redact_output: Callable[[str], str] | None = None,
     ) -> ProcessInvocationPlan:
         if isinstance(argv, (str, bytes)):
             raise TypeError("process argv must be a sequence of argument strings")
@@ -207,6 +213,7 @@ class ProcessInvocationPlan:
             cwd=Path(cwd),
             timeout_s=TimeoutSeconds(timeout_s),
             environment=environment,
+            redact_output=redact_output,
         )
 
 
