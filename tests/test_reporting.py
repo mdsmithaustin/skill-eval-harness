@@ -587,6 +587,55 @@ class G1_TokenOverheadScorableTests(unittest.TestCase):
             self.assertEqual(rep["summary"]["observed"]["paired_runtime_rows"], 0)
             self.assertIsNone(rep["summary"]["observed"]["objective_delta"]["mean"])
 
+    def test_paired_overhead_grades_a_judge_assertion_without_crashing(self):
+        """token-overhead pairs run bases through ExperimentalPairKey (roadmap
+        experimental-pairs), whose run_number is a RunNumber (int subclass), not
+        a plain int. Regression: grading a qualitative assertion threads that
+        RunNumber into judge_task_id, whose `type(run_number) is not int` check
+        rejects any int subclass -- so token-overhead crashed on every manifest
+        with a judge/qualitative assertion, even a single clean run per arm.
+
+        A judge assertion with no --judge-results also leaves the benchmark
+        surface's design gate at "deferred_judge_verdicts"; token-overhead must
+        report that real reason, not a generic "answer_run_coverage_incomplete"
+        that hides why the row is blocked."""
+        judge_case = {"id": "c", "split": "tune", "prompt": "x",
+                      "assertions": [{"name": "quality", "type": "judge", "severity": "gate",
+                                      "rubric": ["Pass only when the answer is correct."]}]}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); rp = root / "repo"; _skill(rp)
+            p = _manifest(rp, [judge_case]); runs = root / "runs"
+            write_run(runs / "c" / "with_skill", "alpha", metadata={"returncode": 0}, metrics={"total_tokens": 100})
+            write_run(runs / "c" / "without_skill", "beta", metadata={"returncode": 0}, metrics={"total_tokens": 90})
+            attest_answer_design(p, runs)
+            rep = sb.paired_token_overhead_report(p, runs=runs)
+            self.assertEqual(rep["summary"]["observed"]["paired_runtime_rows"], 1)
+            self.assertEqual(rep["summary"]["design_coverage_reason"], "deferred_judge_verdicts")
+
+    def test_paired_overhead_reports_the_crash_alongside_the_deferred_judge_verdict(self):
+        """A crashed with_skill arm on a case that also carries a judge assertion
+        used to report only design_coverage_reason: "deferred_judge_verdicts" --
+        the same single-reason label a clean judge case gets. That hides the
+        crash: a reader sees "waiting on a judge" and never learns an arm also
+        failed to execute. The benchmark report's own qualitative_by_visibility
+        block already accumulates both reasons; token-overhead must carry that
+        full list into summary.incomplete_reasons instead of dropping it."""
+        judge_case = {"id": "c", "split": "tune", "prompt": "x", "assertions": [
+            {"name": "has", "type": "contains", "value": "APPROVED"},
+            {"name": "quality", "type": "judge", "severity": "gate",
+             "rubric": ["Pass only when correct."]}]}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); rp = root / "repo"; _skill(rp)
+            p = _manifest(rp, [judge_case]); runs = root / "runs"
+            write_run(runs / "c" / "with_skill", CRASH, metadata={"returncode": 1}, metrics={"total_tokens": 10})
+            write_run(runs / "c" / "without_skill", "APPROVED", metadata={"returncode": 0}, metrics={"total_tokens": 10})
+            attest_answer_design(p, runs)
+            rep = sb.paired_token_overhead_report(p, runs=runs)
+            self.assertEqual(rep["summary"]["design_coverage_reason"], "deferred_judge_verdicts")
+            self.assertEqual(
+                rep["summary"]["incomplete_reasons"],
+                ["unscorable_answer_attempts", "deferred_judge_verdicts"])
+
 
 class G2_BenchmarkMetricsScorableTests(unittest.TestCase):
     """Per-variant timing/token central tendencies exclude infra-failed runs, the

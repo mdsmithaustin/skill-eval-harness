@@ -61,23 +61,64 @@ Now join footprint to lift. `token-overhead` reads the same paired runs the benc
 graded and reports lift-per-token and lift-per-dollar per skill:
 
 ```bash
+python3 ../../skill_benchmark.py prepare evals/shared-benchmark.json --split tune \
+  --runs-per-variant 2 --out /tmp/demo-tasks.jsonl
+python3 ../../skill_benchmark.py run-codex --tasks /tmp/demo-tasks.jsonl \
+  --runs /tmp/demo-runs --codex-cmd "python3 $(pwd)/stub_runner.py"
 python3 ../../skill_benchmark.py token-overhead evals/shared-benchmark.json \
   --runs /tmp/demo-runs --format markdown
 ```
 
-Real output against the offline stub runs (2026-07-05):
+Real output against the offline stub runs (2026-09-29):
 
 ```text
 # Token overhead report
 
 | Skill | Static SKILL tokens | Reference tokens | Runtime pairs | Mean total delta | ... | Mean cost delta USD | Lift per $ | Saturated/no-lift cost USD |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| demo-reviewer | 144 | 51 | 0 | None | ... | None | None | 0 |
+| demo-reviewer | None | None | None | None | ... | None | None | None |
 ```
 
-**Runtime pairs 0, every delta `None`.** That is not a bug — it is the honest shape of
-the offline demo. The deterministic stub stands in for a model, so it writes no token
-or dollar telemetry. `cost-summary` says the same thing out loud:
+**Every column is `None` — but not because the runs are empty.** `c-review` carries one
+`type: "judge"` assertion (`actionable-review`), and `token-overhead` checks design
+completeness through the same gate `benchmark` uses. That gate reports
+`deferred_judge_verdicts` for any manifest with an ungraded qualitative assertion, and
+`token-overhead` has no `--judge-results` flag to clear it — so this top-level row stays
+`None` for a manifest with a judge assertion whether or not you ran `judge` separately,
+and it never fills in from a later run: read `reports[0].summary.observed` instead. The
+reason itself is `reports[0].summary.design_coverage_reason` — one of
+`deferred_judge_verdicts`, `unscorable_answer_attempts`, `answer_design_incomplete`,
+`grading_evidence_incomplete`, or `incomplete_answer_pairing`. When more than one of
+those blocked the row (a crashed arm behind an ungraded judge, say),
+`design_coverage_reason` names only the most recent one; the full ordered list is
+`reports[0].summary.incomplete_reasons`. A deferred judge always also counts as incomplete
+grading, so this demo reports `['grading_evidence_incomplete', 'deferred_judge_verdicts']`;
+that pair means the judge step has not run, not that grading is broken.
+
+```bash
+python3 ../../skill_benchmark.py token-overhead evals/shared-benchmark.json \
+  --runs /tmp/demo-runs \
+  | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["reports"][0]["summary"]["observed"], indent=2))'
+```
+
+Real output, trimmed to the fields that matter here:
+
+```json
+{
+  "paired_runtime_rows": 4,
+  "total_token_delta": {"mean": null, "n": 0},
+  "objective_delta": {"mean": 1.0, "n": 4}
+}
+```
+
+`objective_delta` is real: the skill wins every paired run (`with_skill` passes,
+`without_skill` fails). `total_token_delta` stays `null` for a different reason than
+missing telemetry — the stub *does* report tokens (0, honestly), but a token or cost
+delta also requires both arms to agree on a `model` identity, and the stub never sets
+one. Missing model identity blocks the comparison (`reason: "basis_missing"`) the same
+way missing usage would.
+
+`cost-summary` shows the usage half is actually present:
 
 ```bash
 python3 ../../skill_benchmark.py cost-summary \
@@ -87,36 +128,46 @@ python3 ../../skill_benchmark.py cost-summary \
 ```json
 "coverage": {
   "runs_seen": 8,
-  "runs_with_token_usage": 0,
+  "runs_with_token_usage": 8,
   "runs_with_dollar_cost": 0,
-  "runs_missing_usage": 8,
+  "runs_with_non_usd_cost": 0,
+  "runs_missing_usage": 0,
   "runs_missing_cost": 8
 }
 ```
 
-Eight runs on disk, zero carrying usage or cost. The harness records this as `source:
-"missing"` in each run's `metadata.json` rather than silently reporting `0` — a missing
-number and a zero number are different claims, and the ledger keeps them apart.
+Eight runs on disk, all eight carrying token usage — the stub reports an honest zero
+(`source: "trace_normalized"` in each run's `metrics.json`), which the ledger counts as
+*available*, not missing. A missing number and a zero number are different claims, and
+`runs_with_token_usage` only counts the latter as present. Only *cost* is missing here
+(`runs_missing_cost: 8`): the stub never emits a `cost_normalized` block at all, so that
+half is correctly `source: "missing"`.
 
-To get real runtime numbers, run the same cases through a runner that captures
-telemetry. `run-claude` parses the `claude -p` JSON envelope and records
-`usage_normalized` / `cost_normalized`; the Pi smoke runner does the same. Re-run
-`token-overhead` / `cost-summary` against *those* runs and the `None`s become the deltas
-below.
+To get real runtime numbers — including a bound token/cost delta — run the same cases
+through a runner that records a model identity alongside usage. `run-claude` parses the
+`claude -p` JSON envelope and records `usage_normalized` / `cost_normalized` with a
+`model` field; the Pi smoke runner does the same. Re-run `token-overhead` / `cost-summary`
+against *those* runs and the blocked deltas above become real numbers.
 
 ## Reading the numbers, symptom by symptom
 
-Once the runtime pairs are real, read the row for the keep/trim/cut decision:
+Once the runtime pairs are real, read the row for the keep/trim/cut decision. That row
+only ever fills in for a manifest with no unresolved `judge` assertion: `token-overhead`
+has no `--judge-results` flag, so a judge-bearing manifest like this demo's `c-review`
+case keeps the top-level row `None` forever, no matter how real the runs get. For that
+manifest, read `reports[0].summary.observed` (above) instead of the table:
 
-- **High `Lift per 1k total tokens` / `Lift per $`** → the footprint is earning its
-  keep. Leave it. This is the case the skill exists for.
-- **Positive footprint, `Mean objective lift` ≈ 0** → you are paying tokens for nothing
-  measurable. Either the cases are **saturated** (the base model already passes them —
-  the benchmark's `saturated`/`no-lift` case flags catch this) so the eval can't *see*
-  the lift, or the skill genuinely isn't helping. Check the flags before you cut:
-  saturation is an eval problem, no-lift is a skill problem. `Saturated/no-lift cost
-  USD` totals exactly the spend on cases that bought no lift — that column is the
-  trim list.
+- **High `Lift per 1k total tokens` / `Lift per $`**
+  (`summary.observed.objective_lift_per_1k_total_tokens` / `objective_lift_per_dollar`) → the footprint is
+  earning its keep. Leave it. This is the case the skill exists for.
+- **Positive footprint, `Mean objective lift` ≈ 0** (`summary.observed.objective_delta`)
+  → you are paying tokens for nothing measurable. Either the cases are
+  **saturated** (the base model already passes them — the benchmark's
+  `saturated`/`no-lift` case flags catch this) so the eval can't *see* the lift, or
+  the skill genuinely isn't helping. Check the flags before you cut: saturation is
+  an eval problem, no-lift is a skill problem. `Saturated/no-lift cost USD`
+  (`summary.observed.saturated_or_no_lift_cost_usd`) totals exactly the spend on
+  cases that bought no lift — that column is the trim list.
 - **Large `Reference tokens`, small lift** → suspect a reference. `profile-skill`
   tells you which module carries the bytes; drop it from the skill, re-run, and if the
   lift holds, the reference was dead weight. (This is a footprint ablation you can do
