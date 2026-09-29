@@ -2688,6 +2688,41 @@ class SubjectVisiblePromptTests(unittest.TestCase):
         self.assert_organic(frontmatter.replace("evaluation: programmatic\n", ""))
         self.assert_organic(body)
 
+    def test_instruction_simulated_ablation_hides_expected_regression_from_the_model(self):
+        # An instruction-simulated arm mounts the FULL skill and tells the model what
+        # to ignore, so removed_component must survive. But it must not also tell the
+        # model which regression the harness is watching for — that is the grading
+        # hypothesis, and it must stay off every surface the model reads: the
+        # variant_instruction directive, the rendered task prompt, and the uploaded
+        # task JSON (instruction field and ablation block alike).
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = AblationReviewFixesTests().manifest(root, ablations=[{
+                "id": "no-checklist", "removed_component": "the review checklist",
+                "expected_regressions": ["Model stops flagging blocking severity issues."],
+            }])
+            manifest = sb.validate_manifest(path)
+            rows = sb.prepared_task_rows(path, manifest, include_ablations=True)
+            row = next(r for r in rows if r["variant"] == "ablation:no-checklist")
+            pt = am.PreparedTask.from_row(row)
+
+            instr = sb.variant_instruction(row["variant"], manifest)
+            prompt = sb.build_task_prompt(pt, list(pt.skill_paths), [])
+            task_json = sb.safe_task_json(pt, manifest, task_name="t", upload_files=[])
+            # task_json["variant"] and the "ablation" key name legitimately disclose
+            # structure for a non-blind arm (test_safe_task_json_model_visible_variant_
+            # is_owned_by_the_object covers that) — the leak under test is in the
+            # free-text prose: the instruction directive and removed_component value.
+            ablation_block = task_json.get("ablation") or {}
+
+            for rendered in (instr, prompt, task_json["instruction"],
+                             ablation_block.get("removed_component", "")):
+                self.assert_organic(rendered)
+                self.assertNotIn("Model stops flagging blocking severity issues.", rendered)
+            self.assertIn("the review checklist", task_json["instruction"])
+            self.assertEqual(ablation_block.get("removed_component"), "the review checklist")
+            self.assertNotIn("expected_regressions", ablation_block)
+
 
 class JettyModelVisibleTaskTests(unittest.TestCase):
     """The Jetty runbook tells the agent to read the uploaded task JSON, so that
