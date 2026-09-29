@@ -6635,6 +6635,30 @@ def mount_skill_tree(tree_dir: Path, skills_dir: Path) -> list[Path]:
     return copied
 
 
+_STDERR_CAP_TRUNCATION_MARKER = "...[truncated]"
+
+
+def _capped_stderr(text: str, limit: int = 4000) -> str:
+    """Cap `text` at `limit` characters without cutting a line in half.
+
+    A raw `text[:limit]` character cut can stop mid-line, and a mid-line cut
+    can stop mid-path: a caller that redacts host paths out of this stderr
+    (CodexAdapter.invoke) only recognizes a path it can match whole, so a
+    severed one survives as an unredactable fragment. Cutting back to the
+    last complete line means a redactable span is always handed to that
+    caller whole or dropped with the rest of its unfinished line, never half
+    of one. The marker records that a cut happened; a single line already at
+    or beyond the limit still gets a hard cut, since there is no earlier
+    boundary to fall back to."""
+    if len(text) <= limit:
+        return text
+    budget = max(limit - len(_STDERR_CAP_TRUNCATION_MARKER), 0)
+    window = text[:budget]
+    newline = window.rfind("\n")
+    kept = window if newline == -1 else window[:newline]
+    return kept + _STDERR_CAP_TRUNCATION_MARKER
+
+
 def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
     """Typed subprocess owner for every spawned runner/adapter process.
 
@@ -6758,7 +6782,7 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
         else:
             stdout, stdout_utf8_valid = _wire_text(out)
             stderr, stderr_utf8_valid = _wire_text(err)
-            stderr, returncode, _timed_out = stderr[:4000], proc.returncode, False
+            stderr, returncode, _timed_out = _capped_stderr(stderr), proc.returncode, False
             communication_complete = True
             break
     if not communication_complete:
@@ -6801,7 +6825,7 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
         stdout, stdout_utf8_valid = _wire_text(out or exc.stdout)
         stderr, stderr_utf8_valid = _wire_text(
             err or exc.stderr or str(exc))
-        stderr = stderr[:4000]
+        stderr = _capped_stderr(stderr)
         returncode = proc.returncode if leader_exited and proc.returncode is not None else 124
     else:
         try:
