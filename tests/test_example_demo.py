@@ -3,6 +3,7 @@ deterministic stub 'model') -> report, and the two materialized ablations each
 confirm a regression on a distinct assertion. Runs in CI with no model/API."""
 import argparse
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,17 @@ import skill_benchmark as sb
 
 ROOT = Path(__file__).resolve().parents[1]
 DEMO = ROOT / "examples" / "demo-skill"
+
+
+def _min_runs_for_significance() -> int:
+    """The smallest per-case matched-pair count at which a unanimous regression
+    (every paired delta pointing the same way) clears the two-sided sign-flip
+    gate — computed against the real `sign_flip_significance`, not hardcoded,
+    so this tracks the gate if its threshold ever moves."""
+    for n in range(1, 15):
+        if sb.sign_flip_significance([-1.0] * n)["significant_at_0_05"]:
+            return n
+    raise AssertionError("sign_flip_significance never reached significance up to n=14")
 
 
 class DemoExampleTests(unittest.TestCase):
@@ -61,6 +73,25 @@ class DemoExampleTests(unittest.TestCase):
         s = rep["summary"]
         self.assertEqual(s["with_skill"]["objective_pass_rate"]["mean"], 1.0)      # skill present -> both assertions pass
         self.assertEqual(s["without_skill"]["objective_pass_rate"]["mean"], 0.0)   # no skill -> both fail
+
+
+class DemoReadmeTests(unittest.TestCase):
+    """The README's `prepare --runs-per-variant` walkthrough claims each ablation
+    arm reports `expected_regression_confirmed`. That claim is only true if the
+    documented run count actually clears the per-case significance gate."""
+
+    def test_documented_runs_per_variant_clears_significance_gate(self):
+        text = (DEMO / "README.md").read_text(encoding="utf-8")
+        match = re.search(r"--runs-per-variant (\d+)", text)
+        self.assertIsNotNone(match, "README should document a --runs-per-variant value")
+        documented = int(match.group(1))
+        minimum = _min_runs_for_significance()
+        self.assertGreaterEqual(
+            documented, minimum,
+            f"README documents --runs-per-variant {documented}, but a case needs "
+            f">= {minimum} matched pairs to clear the significance gate and report "
+            "expected_regression_confirmed",
+        )
 
 
 class DemoJudgeTests(unittest.TestCase):
