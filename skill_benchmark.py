@@ -19399,12 +19399,17 @@ def paired_run_bases(runs: Path, case_id: str, with_variant: str, without_varian
                 arms.append(pair_domain.ExperimentalArm(
                     key, pair_domain.ExperimentalArmId(arm), base))
         construction = pair_domain.construct_pairs(arms)
+        # ExperimentalPairKey.run_number is a RunNumber (an int subclass used to
+        # validate identity construction); callers downstream — grading, judge
+        # task ids — are typed against plain int, so unwrap it here rather than
+        # leaking the domain type across this function's boundary.
         for pair in construction.pairs:
-            yield model, pair.key.run_number, pair.with_skill.payload, pair.without_skill.payload
+            yield model, int(pair.key.run_number), pair.with_skill.payload, pair.without_skill.payload
         for blocked in construction.blocked:
-            yield (model, blocked.key.run_number,
-                   bases.get((blocked.key.run_number, "with_skill")),
-                   bases.get((blocked.key.run_number, "without_skill")))
+            run_number = int(blocked.key.run_number)
+            yield (model, run_number,
+                   bases.get((run_number, "with_skill")),
+                   bases.get((run_number, "without_skill")))
 
 
 def paired_token_overhead_report(

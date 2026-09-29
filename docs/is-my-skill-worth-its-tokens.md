@@ -61,23 +61,47 @@ Now join footprint to lift. `token-overhead` reads the same paired runs the benc
 graded and reports lift-per-token and lift-per-dollar per skill:
 
 ```bash
+cd examples/demo-skill
+python3 ../../skill_benchmark.py prepare evals/shared-benchmark.json --split tune \
+  --runs-per-variant 2 --out /tmp/demo-tasks.jsonl
+python3 ../../skill_benchmark.py run-codex --tasks /tmp/demo-tasks.jsonl \
+  --runs /tmp/demo-runs --codex-cmd "python3 stub_runner.py"
 python3 ../../skill_benchmark.py token-overhead evals/shared-benchmark.json \
   --runs /tmp/demo-runs --format markdown
 ```
 
-Real output against the offline stub runs (2026-07-05):
+Real output against the offline stub runs (2026-09-29):
 
 ```text
 # Token overhead report
 
 | Skill | Static SKILL tokens | Reference tokens | Runtime pairs | Mean total delta | ... | Mean cost delta USD | Lift per $ | Saturated/no-lift cost USD |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| demo-reviewer | 144 | 51 | 0 | None | ... | None | None | 0 |
+| demo-reviewer | None | None | None | None | ... | None | None | None |
 ```
 
-**Runtime pairs 0, every delta `None`.** That is not a bug — it is the honest shape of
-the offline demo. The deterministic stub stands in for a model, so it writes no token
-or dollar telemetry. `cost-summary` says the same thing out loud:
+**Every column is `None` — but not because the runs are empty.** `c-review` carries one
+`type: "judge"` assertion (`actionable-review`), and `token-overhead` checks design
+completeness through the same gate `benchmark` uses. That gate reports
+`deferred_judge_verdicts` for any manifest with an ungraded qualitative assertion, and
+`token-overhead` has no `--judge-results` flag to clear it — so this top-level row stays
+`None` for a manifest with a judge assertion whether or not you ran `judge` separately.
+The real numbers are one level down, in `reports[0].summary.observed`:
+
+```json
+"paired_runtime_rows": 4,
+"total_token_delta": {"mean": null, "n": 0},
+"objective_delta": {"mean": 1.0, "n": 4}
+```
+
+`objective_delta` is real: the skill wins every paired run (`with_skill` passes,
+`without_skill` fails). `total_token_delta` stays `null` for a different reason than
+missing telemetry — the stub *does* report tokens (0, honestly), but a token or cost
+delta also requires both arms to agree on a `model` identity, and the stub never sets
+one. Missing model identity blocks the comparison (`reason: "basis_missing"`) the same
+way missing usage would.
+
+`cost-summary` shows the usage half is actually present:
 
 ```bash
 python3 ../../skill_benchmark.py cost-summary \
@@ -87,22 +111,26 @@ python3 ../../skill_benchmark.py cost-summary \
 ```json
 "coverage": {
   "runs_seen": 8,
-  "runs_with_token_usage": 0,
+  "runs_with_token_usage": 8,
   "runs_with_dollar_cost": 0,
-  "runs_missing_usage": 8,
+  "runs_with_non_usd_cost": 0,
+  "runs_missing_usage": 0,
   "runs_missing_cost": 8
 }
 ```
 
-Eight runs on disk, zero carrying usage or cost. The harness records this as `source:
-"missing"` in each run's `metadata.json` rather than silently reporting `0` — a missing
-number and a zero number are different claims, and the ledger keeps them apart.
+Eight runs on disk, all eight carrying token usage — the stub reports an honest zero
+(`source: "trace_normalized"` in each run's `metrics.json`), which the ledger counts as
+*available*, not missing. A missing number and a zero number are different claims, and
+`runs_with_token_usage` only counts the latter as present. Only *cost* is missing here
+(`runs_missing_cost: 8`): the stub never emits a `cost_normalized` block at all, so that
+half is correctly `source: "missing"`.
 
-To get real runtime numbers, run the same cases through a runner that captures
-telemetry. `run-claude` parses the `claude -p` JSON envelope and records
-`usage_normalized` / `cost_normalized`; the Pi smoke runner does the same. Re-run
-`token-overhead` / `cost-summary` against *those* runs and the `None`s become the deltas
-below.
+To get real runtime numbers — including a bound token/cost delta — run the same cases
+through a runner that records a model identity alongside usage. `run-claude` parses the
+`claude -p` JSON envelope and records `usage_normalized` / `cost_normalized` with a
+`model` field; the Pi smoke runner does the same. Re-run `token-overhead` / `cost-summary`
+against *those* runs and the blocked deltas above become real numbers.
 
 ## Reading the numbers, symptom by symptom
 
