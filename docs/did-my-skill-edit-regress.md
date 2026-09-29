@@ -96,6 +96,7 @@ Now the loop as you actually run it in a repo: grade what you have, edit, re-gra
 
 ```bash
 WS=/tmp/demo-iter                 # holds iteration-1/, iteration-2/
+mkdir -p $WS/iteration-1 $WS/iteration-2
 # iteration 1 — the skill you have today
 python3 $HARNESS prepare evals/shared-benchmark.json --split tune \
   --runs-per-variant 4 --out $WS/iteration-1/tasks.jsonl
@@ -139,7 +140,8 @@ offline stub; `without_skill` deltas, all 0.0, elided):
   "availability": "complete",
   "variant_deltas": {
     "with_skill": {
-      "mean_objective_pass_rate": {"before": 1.0, "after": 0.25, "delta": -0.75}
+      "mean_objective_pass_rate": {"before": 1.0, "after": 0.25, "delta": -0.75},
+      "mean_combined_pass_rate": {"before": 1.0, "after": 0.1667, "delta": -0.8333}
     }
   },
   "case_deltas": [
