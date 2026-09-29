@@ -1045,6 +1045,64 @@ class TriggerContextIsolationTests(unittest.TestCase):
         self.assertEqual(Path(argv[argv.index("--skill") + 1]).name, "skills")
 
 
+class CodexSkillConfigTomlEncodingTests(unittest.TestCase):
+    """The `-c skills.config=[...]` argv value must be a TOML value Codex can
+    parse. `json.dumps` escapes characters above U+FFFF as UTF-16 surrogate
+    pairs, which is a JSON string, not a TOML one: Codex reads the whole
+    value as an opaque string and dies with `Error loading config.toml:
+    invalid type: string ...`."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.home = Path(td.name)
+        (self.home / ".agents").mkdir()
+
+    def _skill(self, dirname: str, name: str) -> Path:
+        d = self.home / ".agents" / "skills" / dirname
+        d.mkdir(parents=True)
+        skill_md = d / "SKILL.md"
+        skill_md.write_text(skill_markdown(name), encoding="utf-8")
+        return skill_md
+
+    def _parsed_skills_config(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            args, _recorded = sb.codex_trigger_context_isolation_args()
+        cfg = next(a for a in args if a.startswith("skills.config="))
+        import tomllib
+        return cfg, tomllib.loads(cfg + "\n")["skills"]["config"]
+
+    def test_astral_and_bmp_unicode_directory_names_parse_as_toml(self):
+        emoji = self._skill("rocket-\U0001F680", "astral-emoji")
+        accent = self._skill("café", "bmp-accent")
+        cfg, entries = self._parsed_skills_config()
+        self.assertNotIn("\\u", cfg.lower().replace("http", ""))
+        paths = {e["path"] for e in entries}
+        self.assertEqual(paths, {str(emoji), str(accent)})
+        self.assertTrue(all(e["enabled"] is False for e in entries))
+
+    def test_quote_and_backslash_directory_names_parse_as_toml(self):
+        quoted = self._skill('my skill "q"', "quoted-space")
+        backslash = self._skill("back\\slash", "backslash-name")
+        _cfg, entries = self._parsed_skills_config()
+        paths = {e["path"] for e in entries}
+        self.assertEqual(paths, {str(quoted), str(backslash)})
+
+    def test_newline_in_directory_name_parses_as_toml_if_filesystem_allows(self):
+        try:
+            newline = self._skill("line\nbreak", "newline-name")
+        except OSError:
+            self.skipTest("filesystem rejects newline in a directory name")
+        _cfg, entries = self._parsed_skills_config()
+        self.assertEqual({e["path"] for e in entries}, {str(newline)})
+
+    def test_argv_carries_the_exact_paths_for_a_plain_and_a_control_char_free_mix(self):
+        plain = self._skill("host-a", "host-a")
+        cfg, entries = self._parsed_skills_config()
+        self.assertIn(str(plain), cfg)
+        self.assertEqual(len(entries), 1)
+
+
 class CodexAdapterTests(unittest.TestCase):
     """Codex trigger support without a live codex binary."""
 
