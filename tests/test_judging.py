@@ -1348,7 +1348,7 @@ class ToolUsingJudgeTests(unittest.TestCase):
         it directly is flaky by construction. Redirect `tempfile.tempdir` to a
         private root for the duration so only THIS call's directories can land
         there, and the expected listing can be asserted literally."""
-        isolated = tempfile.mkdtemp(prefix="judge-explore-test-root-")
+        isolated = tempfile.mkdtemp(prefix="seh-judge-test-root-")
         return isolated, mock.patch.object(tempfile, "tempdir", isolated)
 
     def test_explore_end_to_end_sanitizes_and_arms_readonly_tools(self):
