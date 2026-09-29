@@ -587,6 +587,25 @@ class G1_TokenOverheadScorableTests(unittest.TestCase):
             self.assertEqual(rep["summary"]["observed"]["paired_runtime_rows"], 0)
             self.assertIsNone(rep["summary"]["observed"]["objective_delta"]["mean"])
 
+    def test_paired_overhead_grades_a_judge_assertion_without_crashing(self):
+        """token-overhead pairs run bases through ExperimentalPairKey (roadmap
+        experimental-pairs), whose run_number is a RunNumber (int subclass), not
+        a plain int. Regression: grading a qualitative assertion threads that
+        RunNumber into judge_task_id, whose `type(run_number) is not int` check
+        rejects any int subclass -- so token-overhead crashed on every manifest
+        with a judge/qualitative assertion, even a single clean run per arm."""
+        judge_case = {"id": "c", "split": "tune", "prompt": "x",
+                      "assertions": [{"name": "quality", "type": "judge", "severity": "gate",
+                                      "rubric": ["Pass only when the answer is correct."]}]}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); rp = root / "repo"; _skill(rp)
+            p = _manifest(rp, [judge_case]); runs = root / "runs"
+            write_run(runs / "c" / "with_skill", "alpha", metadata={"returncode": 0}, metrics={"total_tokens": 100})
+            write_run(runs / "c" / "without_skill", "beta", metadata={"returncode": 0}, metrics={"total_tokens": 90})
+            attest_answer_design(p, runs)
+            rep = sb.paired_token_overhead_report(p, runs=runs)
+            self.assertEqual(rep["summary"]["observed"]["paired_runtime_rows"], 1)
+
 
 class G2_BenchmarkMetricsScorableTests(unittest.TestCase):
     """Per-variant timing/token central tendencies exclude infra-failed runs, the
