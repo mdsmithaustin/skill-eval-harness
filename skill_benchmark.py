@@ -19650,15 +19650,23 @@ def paired_token_overhead_report(
         if benchmark_surface.get("availability") != "complete":
             observed_pairs = pairs
             report_pairs = []
-            # The benchmark surface already names its own blocking reason
+            # The benchmark surface already names its own blocking reason(s)
             # (e.g. "deferred_judge_verdicts", "answer_design_incomplete") on
             # whichever aggregate it invalidated; report that instead of a
             # generic label so a reader can tell a stale judge run apart from
-            # missing answer-run coverage.
-            surface_reason = (benchmark_surface.get("qualitative_by_visibility") or {}).get(
+            # missing answer-run coverage. That aggregate also accumulates
+            # every reason it was invalidated for in order -- a crashed arm
+            # blocked on top of a deferred judge verdict carries both -- so
+            # surface the full list too, not just the last one. A single
+            # invalidation leaves no incomplete_reasons key, so that reason
+            # alone is the fallback list.
+            qualitative_surface = benchmark_surface.get("qualitative_by_visibility") or {}
+            surface_reason = qualitative_surface.get(
                 "design_coverage_reason") or "answer_run_coverage_incomplete"
+            surface_reasons = qualitative_surface.get("incomplete_reasons") or [surface_reason]
             observed_summary = invalidate_design_aggregate(
                 observed_summary, surface_reason)
+            observed_summary["incomplete_reasons"] = surface_reasons
     return {
         "generated_at": int(time.time()),
         "manifest": str(manifest_path),
