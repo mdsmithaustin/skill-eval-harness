@@ -7,6 +7,7 @@ subject; docstrings citing finding/roadmap ids are preserved.
 """
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -1339,17 +1340,28 @@ class ToolUsingJudgeTests(unittest.TestCase):
                 "run_number": 1, "prompt": "p", "run_base": str(run),
                 "output_path": str(run / "output.md"), "assertion": {"type": "judge", "name": "j"}}
 
-    def _tmp_explore_dirs(self):
-        return {n for n in os.listdir(tempfile.gettempdir()) if n.startswith("judge-explore-")}
+    def _isolated_tmproot(self):
+        """`run_one_judge_task` mints its judge-explore-* scratch dir with plain
+        `tempfile.mkdtemp(prefix=...)`, which resolves against `tempfile.gettempdir()`.
+        Other test processes running concurrently mint and remove their OWN
+        judge-explore-* dirs in that same shared system temp dir, so snapshotting
+        it directly is flaky by construction. Redirect `tempfile.tempdir` to a
+        private root for the duration so only THIS call's directories can land
+        there, and the expected listing can be asserted literally."""
+        isolated = tempfile.mkdtemp(prefix="judge-explore-test-root-")
+        return isolated, mock.patch.object(tempfile, "tempdir", isolated)
 
     def test_explore_end_to_end_sanitizes_and_arms_readonly_tools(self):
-        with tempfile.TemporaryDirectory() as td:
-            run = self._run_dir(td)
-            stub = self._stub_claude(td)
-            before = self._tmp_explore_dirs()
-            row = sb.run_one_judge_task(self._task(run), judge_model="m", claude_bin=str(stub), explore=True)
-            probe = json.loads((Path(td) / "probe.json").read_text(encoding="utf-8"))
-            after = self._tmp_explore_dirs()
+        isolated, patch_tmpdir = self._isolated_tmproot()
+        try:
+            with patch_tmpdir, tempfile.TemporaryDirectory() as td:
+                run = self._run_dir(td)
+                stub = self._stub_claude(td)
+                row = sb.run_one_judge_task(self._task(run), judge_model="m", claude_bin=str(stub), explore=True)
+                probe = json.loads((Path(td) / "probe.json").read_text(encoding="utf-8"))
+            after = os.listdir(isolated)
+        finally:
+            shutil.rmtree(isolated, ignore_errors=True)
         self.assertTrue(row["passed"])                                     # verdict flows back unchanged
         self.assertEqual(row["score"], 5)
         self.assertIn("--add-dir", probe["argv"])                          # tools were armed
@@ -1363,38 +1375,39 @@ class ToolUsingJudgeTests(unittest.TestCase):
         # the live oracle. Read/Grep with no path would otherwise range over the repo.
         self.assertIn("judge-explore-", probe["cwd"])
         self.assertNotEqual(probe["cwd"], os.getcwd())
-        self.assertEqual(after, before)                                    # the scratch copy was cleaned up
+        self.assertEqual(after, [])                                        # the scratch copy was cleaned up
 
-    def test_explore_snapshot_is_flaky_under_a_concurrent_sibling(self):
-        # REPRO for the intermittent CI failure: _tmp_explore_dirs() snapshots the
-        # SHARED system temp dir. A sibling test/pytest process minting its own
-        # judge-explore-* scratch dir at the same moment — outside this process's
-        # control — makes `after` differ from `before` even though THIS call's own
-        # scratch dir was cleaned up correctly. Simulate that sibling deterministically
-        # instead of relying on host timing.
-        sibling_dir = None
+    def test_explore_scratch_dir_lands_under_the_isolated_root(self):
+        # Regression for the flake: the old assertion compared listings of the
+        # SHARED system temp dir, so a sibling process minting or removing its own
+        # judge-explore-* dir at the same moment broke the comparison (see the red
+        # commit preceding this fix). run_one_judge_task's scratch dir is created
+        # via plain tempfile.mkdtemp(prefix=...), which resolves against whatever
+        # tempfile.tempdir currently is — so redirecting it (as the real tests
+        # below now do) actually CONTAINS the scratch dir instead of leaking it
+        # into shared state a concurrent sibling could disturb.
+        isolated, patch_tmpdir = self._isolated_tmproot()
+        created = []
         real_mkdtemp = tempfile.mkdtemp
 
-        def mint_sibling_then_real(*args, **kwargs):
-            nonlocal sibling_dir
-            sibling_dir = real_mkdtemp(prefix="judge-explore-")
-            return real_mkdtemp(*args, **kwargs)
+        def record(*args, **kwargs):
+            path = real_mkdtemp(*args, **kwargs)
+            created.append(path)
+            return path
 
         try:
-            with tempfile.TemporaryDirectory() as td:
+            with patch_tmpdir, tempfile.TemporaryDirectory() as td, \
+                    mock.patch.object(tempfile, "mkdtemp", side_effect=record):
                 run = self._run_dir(td)
                 stub = self._stub_claude(td)
-                before = self._tmp_explore_dirs()
-                with mock.patch.object(tempfile, "mkdtemp", side_effect=mint_sibling_then_real):
-                    sb.run_one_judge_task(self._task(run), judge_model="m", claude_bin=str(stub), explore=True)
-                after = self._tmp_explore_dirs()
-            # This is the same comparison test_explore_end_to_end_... makes. It fails
-            # here because the sibling's directory is still present in `after`, even
-            # though this call's own judge-explore-* dir was removed by construction.
-            self.assertEqual(after, before)
+                sb.run_one_judge_task(self._task(run), judge_model="m", claude_bin=str(stub), explore=True)
+            explore_dirs = [p for p in created if os.path.basename(p).startswith("judge-explore-")]
+            self.assertTrue(explore_dirs)                     # the scratch dir really was minted
+            for p in explore_dirs:
+                self.assertTrue(p.startswith(isolated + os.sep))  # ...and stayed inside our isolated root
+            self.assertEqual(os.listdir(isolated), [])         # cleaned up afterward, literal and exact
         finally:
-            if sibling_dir is not None:
-                os.rmdir(sibling_dir)
+            shutil.rmtree(isolated, ignore_errors=True)
 
     def test_explore_off_arms_no_tools_and_no_add_dir(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1456,19 +1469,23 @@ class ToolUsingJudgeTests(unittest.TestCase):
 
     def test_requested_explore_without_run_base_is_incomplete(self):
         # A task with no run_base must NOT resolve to '.' (repo root) and copy it.
-        with tempfile.TemporaryDirectory() as td:
-            stub = self._stub_claude(td)
-            task = {"judge_task_id": "c::with_skill::run-1::j", "case_id": "c", "variant": "with_skill",
-                    "run_number": 1, "prompt": "p", "output_path": str(Path(td) / "missing.md"),
-                    "assertion": {"type": "judge", "name": "j"}}   # NO run_base key
-            before = self._tmp_explore_dirs()
-            row = sb.run_one_judge_task(task, judge_model="m", claude_bin=str(stub), explore=True)
-            after = self._tmp_explore_dirs()
+        isolated, patch_tmpdir = self._isolated_tmproot()
+        try:
+            with patch_tmpdir, tempfile.TemporaryDirectory() as td:
+                stub = self._stub_claude(td)
+                task = {"judge_task_id": "c::with_skill::run-1::j", "case_id": "c", "variant": "with_skill",
+                        "run_number": 1, "prompt": "p", "output_path": str(Path(td) / "missing.md"),
+                        "assertion": {"type": "judge", "name": "j"}}   # NO run_base key
+                row = sb.run_one_judge_task(task, judge_model="m", claude_bin=str(stub), explore=True)
+                probe_exists = (Path(td) / "probe.json").exists()
+            after = os.listdir(isolated)
+        finally:
+            shutil.rmtree(isolated, ignore_errors=True)
         self.assertFalse(row["passed"])
         self.assertFalse(row["judge_observation_complete"])
         self.assertEqual(row["judge_evidence_mode"], "explore")
-        self.assertFalse((Path(td) / "probe.json").exists())  # judge never invoked
-        self.assertEqual(after, before)
+        self.assertFalse(probe_exists)  # judge never invoked
+        self.assertEqual(after, [])
 
     def test_explore_is_inert_on_shell_judge_cmd(self):
         with tempfile.TemporaryDirectory() as td:
