@@ -45,10 +45,17 @@ python3 $H prepare evals/shared-benchmark.json --split tune \
   --out "$S/tasks.jsonl"
 python3 $H run-codex --tasks "$S/tasks.jsonl" --runs "$S/runs" \
   --codex-cmd "python3 $(pwd)/stub_runner.py"
+
+# the c-review case also carries a judge assertion (actionable-review); skipping
+# this step leaves grading "partial" and error-analysis reports nothing to cluster
+python3 $H judge evals/shared-benchmark.json --runs "$S/runs" \
+  --variant with_skill --variant without_skill \
+  --variant ablation:no-severity --variant ablation:no-checklist \
+  --judge-cmd "python3 $(pwd)/stub_judge.py" --out "$S/judge-results.jsonl"
 python3 $H benchmark evals/shared-benchmark.json --runs "$S/runs" \
   --variant with_skill --variant without_skill \
   --variant ablation:no-severity --variant ablation:no-checklist \
-  --out "$S/bench.json"
+  --judge-results "$S/judge-results.jsonl" --out "$S/bench.json"
 
 python3 $H error-analysis --benchmark "$S/bench.json"
 ```
@@ -57,20 +64,20 @@ Representative output (offline stub, six matched runs per arm so materialized ab
 
 ```json
 "summary": {
-  "failing_or_errored_runs": 20,
+  "failing_or_errored_runs": 30,
   "distinct_categories": 2
 },
 "taxonomy": [
   {
     "category": "text:severity-label",
-    "count": 16,
+    "count": 24,
     "example_case": "c-review",
     "example_evidence": "none matched: ['Blocking', 'Minor', 'Clean']",
     "share": 0.8
   },
   {
     "category": "text:cite-checklist",
-    "count": 4,
+    "count": 6,
     "example_case": "c-review",
     "example_evidence": "none matched: ['file and line']",
     "share": 0.2
@@ -108,7 +115,7 @@ Representative output (offline stub, six matched runs per arm so materialized ab
 ]
 ```
 
-Twenty failing runs, two categories, and one category (`text:severity-label`) owns 80% of
+Thirty failing runs, two categories, and one category (`text:severity-label`) owns 80% of
 them. That `share: 0.8` is what the taxonomy is for: the failures cluster into one
 systematic mode instead of scattering. Fix (or explain) that one thing.
 
@@ -128,7 +135,7 @@ seam it broke at, not every failure downstream of it.
 (`run_base` in the full JSON). The output:
 
 ```
-$ cat "$S/runs/c-review/without_skill/output.md"
+$ cat "$S/runs/c-review/without_skill/run-1/output.md"
 Review of the change:
 Looks fine to me; no concerns.
 ```
@@ -141,7 +148,7 @@ No severity label anywhere — the assertion is right, the text really lacks it.
   "provider": "codex",
   "returncode": 0,
   "timed_out": false,
-  "elapsed_ms": 19,
+  "elapsed_ms": 18,
   "usage_normalized": { "source": "missing" },
   "cost_normalized": { "source": "missing" },
   "skill_invoked": false,
@@ -163,7 +170,7 @@ failure, or overconfidence bug — it is **the baseline working as designed**. T
 same case writes:
 
 ```
-$ cat "$S/runs/c-review/with_skill/output.md"
+$ cat "$S/runs/c-review/with_skill/run-1/output.md"
 Review of the change:
 Severity: Blocking — the change ships without a test.
 Per the review checklist, cite the file and line for each finding.
@@ -182,7 +189,7 @@ walked row with two others.
 `c-review / ablation:no-checklist` row fails `cite-checklist`:
 
 ```
-$ cat "$S/runs/c-review/ablation:no-checklist/output.md"
+$ cat "$S/runs/c-review/ablation:no-checklist/run-1/output.md"
 Review of the change:
 Severity: Blocking — the change ships without a test.
 ```
