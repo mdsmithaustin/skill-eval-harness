@@ -1347,6 +1347,69 @@ class CodexStderrCapCannotSplitAHostPathTests(unittest.TestCase):
         self.assertNotIn(str(skill_dir), result.stderr)
 
 
+class CodexConfigEchoLongerThanTheCapTests(unittest.TestCase):
+    """A rejected skills.config echoes every host path on one stderr line, so
+    with enough host skills that single line runs past the stderr cap. No cut
+    of that line may leave a host path fragment in the saved row.
+
+    tests/fixtures/codex/forcefail-bulk-stderr.json is real codex-cli 0.156.1
+    stderr for 60 host skills plus one astral-named one under the pre-TOML
+    encoder. The fake HOME's name is padded so the cap lands inside it."""
+
+    FIXTURE = CODEX_FIXTURES / "forcefail-bulk-stderr.json"
+    CAP = 4000
+
+    def _home_cut_by_the_cap(self, root: Path, template: str) -> tuple[Path, str]:
+        for pad in range(400):
+            home = root / ("operator-" + "x" * pad)
+            text = template.replace("@HOME@", str(home))
+            for start in (i for i in range(len(text)) if text.startswith(str(home), i)):
+                marker_end = start + len(str(root)) + len("/operator")
+                if marker_end < self.CAP - 20 and self.CAP < start + len(str(home)):
+                    return home, text
+        raise AssertionError("no padding puts the cap inside the home path")
+
+    def test_no_host_path_fragment_survives_a_single_line_config_echo_past_the_cap(self):
+        fixture = json.loads(self.FIXTURE.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            home, stderr_text = self._home_cut_by_the_cap(root, fixture["stderr"])
+            self.assertEqual(stderr_text.count("\n"), 3)
+            self.assertGreater(stderr_text.index("\n"), self.CAP)
+            for name in fixture["host_skill_dirs"]:
+                (home / ".agents" / "skills" / name).mkdir(parents=True)
+                (home / ".agents" / "skills" / name / "SKILL.md").write_text(skill_markdown("h"), encoding="utf-8")
+            stderr_file = root / "fake-stderr.txt"
+            stderr_file.write_text(stderr_text, encoding="utf-8")
+            fake_codex = root / "fake_codex.py"
+            fake_codex.write_text(
+                "import os, pathlib, sys\n"
+                "sys.stdin.read()\n"
+                "sys.stderr.write(pathlib.Path(os.environ['FAKE_CODEX_STDERR_FILE']).read_text(encoding='utf-8'))\n"
+                "sys.exit(1)\n",
+                encoding="utf-8")
+            tree = root / "tree"
+            (tree / "demo").mkdir(parents=True)
+            (tree / "demo" / "SKILL.md").write_text(skill_markdown("demo"), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"HOME": str(home), "FAKE_CODEX_STDERR_FILE": str(stderr_file)}):
+                os.environ.pop("CODEX_HOME", None)
+                observation = tm.observe_cell_query(
+                    tm.CodexAdapter(codex_cmd=f"{sys.executable} {fake_codex}"), tree, "q", False, None, 10,
+                    trace_dir=root / "trace", metadata={"skill_tree_hash": sb.skill_tree_hash(tree)})
+            row = observation.as_row()
+            invocation = observation.invocation
+            saved = "\n".join([json.dumps(row, ensure_ascii=False), json.dumps(row)]
+                              + [p.read_text(encoding="utf-8") for p in (root / "trace").rglob("*") if p.is_file()])
+
+        self.assertEqual(invocation.state, InvocationState.PROCESS_FAILED)
+        for label, text in {"stderr": invocation.stderr, "stdout": invocation.stdout,
+                            "provider_error": invocation.provider_error or "", "saved row": saved}.items():
+            with self.subTest(label):
+                self.assertEqual([m for m in ("operator-", "hmk", str(home)) if m in text], [])
+        self.assertTrue(invocation.stderr.startswith('Error loading config.toml: invalid type: string "[{path=\\"[REDACTED]\\",enabled=false},'))
+        self.assertLessEqual(len(invocation.stderr), self.CAP)
+
+
 class CodexAdapterTests(unittest.TestCase):
     """Codex trigger support without a live codex binary."""
 
