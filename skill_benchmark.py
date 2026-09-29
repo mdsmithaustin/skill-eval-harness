@@ -10518,6 +10518,7 @@ class ClaudeBackend(AgentBackend):
             environment={
                 "runner": "claude",
                 "command": result.get("command") or "claude -p",
+                "context_isolation": result.get("context_isolation"),
                 "cwd": "<isolated workspace>",
                 "stdout_utf8_valid": result.get("trace_utf8_valid") is not False,
             })
@@ -10816,6 +10817,13 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     }
 
 
+# Without these, `claude -p` loads the operator's ~/.claude skills, agents,
+# CLAUDE.md, hooks, plugins, and MCP servers into every arm. --safe-mode keeps
+# OAuth working (unlike --bare); --disable-slash-commands also drops the
+# skills Claude Code bundles, so a without_skill arm sees no skill at all.
+CLAUDE_CONTEXT_ISOLATION_ARGS = ("--safe-mode", "--disable-slash-commands")
+
+
 def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str = "claude",
                       timeout: int = DEFAULT_RUNNER_TIMEOUT_S, extra_args: list[str] | None = None, cwd: str | Path | None = None,
                       output_format: str = "json") -> dict[str, Any]:
@@ -10835,6 +10843,7 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
     if output_format == "stream-json":
         argv.append("--verbose")
     argv.append("--no-session-persistence")
+    argv += CLAUDE_CONTEXT_ISOLATION_ARGS
     if model:
         argv += ["--model", model]
     if extra_args:
@@ -10858,6 +10867,7 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
         return {"answer": "", "cost_usd": None, "usage": {}, "parse_error": None,
                 "returncode": 124, "timed_out": True, "elapsed_ms": result.elapsed_ms,
                 "stderr": result.stderr, "raw_response": result.stdout, "command": command,
+                "context_isolation": list(CLAUDE_CONTEXT_ISOLATION_ARGS),
                 "invocation_state": result.invocation_state.value,
                 "trace_utf8_valid": result.stdout_utf8_valid}
     parsed = (
@@ -10884,6 +10894,7 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
         # run's trace; in envelope mode they preserve the failure diagnostics.
         "raw_response": result.stdout,
         "command": command,
+        "context_isolation": list(CLAUDE_CONTEXT_ISOLATION_ARGS),
     })
     return parsed
 
@@ -11107,6 +11118,15 @@ def codex_structured_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return converted
 
 
+# An isolated CODEX_HOME still lets Codex list every skill under the
+# operator's ~/.agents/skills (and its bundled system skills) in the prompt,
+# and still exposes the ChatGPT account's codex_apps connector MCP server.
+# Hiding the skill catalog beats moving HOME, which would also move tool and
+# version-manager lookups. Both options are repeatable, so a user-supplied
+# --codex-cmd that already carries them stays valid.
+CODEX_CONTEXT_ISOLATION_ARGS = ("-c", "skills.include_instructions=false", "--disable", "apps")
+
+
 def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = "codex exec", timeout: int = DEFAULT_RUNNER_TIMEOUT_S,
                       output_schema: dict[str, Any] | None = None, cwd: str | Path | None = None,
                       sandbox: str = "read-only", json_events: bool = True) -> dict[str, Any]:
@@ -11139,6 +11159,7 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
         argv.append("--ignore-rules")
     if sandbox and "--sandbox" not in argv:
         argv += ["--sandbox", sandbox]
+    argv += CODEX_CONTEXT_ISOLATION_ARGS
     tmp = Path(tempfile.mkdtemp(prefix="codex-invoke-"))
     cleanup_meta: dict[str, Any]
     try:
@@ -11231,6 +11252,7 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
             "last_message_utf8_valid": last_message_utf8_valid,
             "temporary_home_cleanup": cleanup_meta,
             "command": command,
+            "context_isolation": list(CODEX_CONTEXT_ISOLATION_ARGS),
             "cwd": "<isolated workspace>",
         },
     }
