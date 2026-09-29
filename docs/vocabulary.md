@@ -112,7 +112,7 @@ Trigger polarity is the load-time analogue, defined under **Trigger / no-trigger
 - `metrics.json` — tokens, command counts, tool calls, elapsed time, retries.
 - `environment.json` — runner, model, and sandbox details where available.
 
-**Workspace changes** — what a native answer run's model added, modified, or deleted in its temporary workspace: `workspace-changes.json` (the manifest), `candidate.patch` (text edits), and `candidate-files/<sha256>` (content a patch cannot carry). `workspace_changes_captured` is true only when that evidence is complete and committed; it is reported separately from `artifact_set_complete`.
+**Workspace changes** — what an answer run's or `run-subagent` run's model added, modified, or deleted in its temporary workspace: `workspace-changes.json` (the manifest), `candidate.patch` (text edits), and `candidate-files/<sha256>` (content a patch cannot carry). `workspace_changes_captured` is true only when that evidence is complete and committed; it is reported separately from `artifact_set_complete`.
 
 The normalized shapes are an adapter boundary: Pi, Codex, Gemini, and Jetty emit different raw events, so each shape gets fixture tests rather than an assumed common schema.
 

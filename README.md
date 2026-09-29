@@ -414,7 +414,7 @@ runs/<case_id>/<variant>/run-1/candidate-files/<sha256> # content copies the pat
 runs/answer-design.json                          # exact expected answer experiment and eval-contract digest
 ```
 
-Native answer runners (`run-agent`, `run-codex`, `run-claude`, `run-subagent`) run the model in a
+Answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
 temporary workspace and delete it afterwards. Before deletion they diff it against a copy taken
 right after the harness built it, for every outcome including a timeout, so partial edits from a
 killed run are kept. `workspace-changes.json` lists each changed path with its before and after state
