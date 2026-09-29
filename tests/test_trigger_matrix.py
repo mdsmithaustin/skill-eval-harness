@@ -1103,6 +1103,50 @@ class CodexSkillConfigTomlEncodingTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
 
 
+class CodexConfigFailureStderrRedactionTests(unittest.TestCase):
+    """A Codex config-load failure must not let the operator's host skill
+    paths reach a saved row through stderr recorded verbatim."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.home = Path(td.name) / "home"
+        self.host_skill = self.home / ".agents" / "skills" / "very-secret-project-name" / "SKILL.md"
+        self.host_skill.parent.mkdir(parents=True)
+        self.host_skill.write_text(skill_markdown("very-secret-project-name"), encoding="utf-8")
+        self.workspace_root = Path(td.name) / "ws"
+        self.workspace_root.mkdir()
+
+    def _invoke_with_fake_config_error(self):
+        # Shaped like the real codex error: `serde`'s message quotes the
+        # whole offending argv value, which itself embeds every host path.
+        argv_value = f'[{{path="{self.host_skill}",enabled=false}}]'
+        fake_stderr = (
+            f'Error: invalid type: string "{argv_value}", expected a sequence\n'
+            f'in `skills.config`\n'
+        )
+
+        def fake_run(plan):
+            return {"stdout": "", "stderr": fake_stderr, "returncode": 1, "timed_out": False,
+                    "elapsed_ms": 5, "observation_complete": False}
+
+        with mock.patch.object(tm.CodexAdapter, "_run_argv", staticmethod(fake_run)), \
+             mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            workspace = self.workspace_root / "workspace"
+            workspace.mkdir()
+            return tm.CodexAdapter(codex_cmd="codex exec --json").invoke("q", None, workspace, 5)
+
+    def test_config_load_failure_stderr_does_not_carry_the_host_path(self):
+        result = self._invoke_with_fake_config_error()
+        self.assertNotIn(str(self.host_skill), result.stderr)
+        self.assertNotIn("very-secret-project-name", result.stderr)
+
+    def test_config_load_failure_stderr_keeps_the_error_shape(self):
+        result = self._invoke_with_fake_config_error()
+        self.assertIn("invalid type: string", result.stderr)
+        self.assertIn("skills.config", result.stderr)
+
+
 class CodexAdapterTests(unittest.TestCase):
     """Codex trigger support without a live codex binary."""
 
