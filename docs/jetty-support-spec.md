@@ -455,7 +455,7 @@ Execute one skill task exactly once. Write the final assistant answer and metada
 | `old_skill` | include old only | include | executor-only | requires `old_skill_paths` |
 | `ablation:<id>` | include materialized ablated skill or explicit approximation | include | executor-only | approximation must be labeled |
 
-`task.json` is model-visible and carries only what the runbook reads:
+`task.json` is model-visible and carries only the task text and file lists:
 
 ```json
 {

@@ -3607,7 +3607,7 @@ def jetty_sandbox_path(remote_path_hint: str) -> str:
 
 
 def safe_task_json(pt: PreparedTask, manifest: dict[str, Any], *, upload_files: list[dict[str, Any]]) -> dict[str, Any]:
-    """The model-visible task file: only what canonical_jetty_runbook reads.
+    """The model-visible task file: carries only the task text and file lists.
     Case, split, arm, and run identity live in the payload's harness block."""
     variant = pt.variant_truth
     safe: dict[str, Any] = {
@@ -3663,7 +3663,7 @@ def build_jetty_payload(
     # come from it — not from a raw row re-indexed key by key.
     variant = pt.variant_truth
     task_name = jetty_task_name(pt, task_prefix)
-    upload_name = pt.upload_token()
+    upload_name = pt.upload_token(task_prefix)
     files: list[dict[str, Any]] = []
     fixture_destinations: set[str] = set()
     for i, local in enumerate(pt.input_files, 1):
@@ -3913,8 +3913,24 @@ def export_jetty(args: argparse.Namespace) -> int:
     if any(row.get("turns") for row in rows):
         raise AssertionError("Jetty multi-turn case passed the pre-export gate")
     answer_design = answer_design_from_tasks(rows, default_model=model)
+    prepared = [PreparedTask.from_row(row) for row in rows]
+    # Two payloads sharing an upload token would share the same task file,
+    # bundle archive, and sandbox paths inside Jetty's storage, so the second
+    # upload silently clobbers the first instead of running its own task.
+    seen_by_token: dict[str, PreparedTask] = {}
+    for pt in prepared:
+        token = pt.upload_token(task_prefix)
+        prior = seen_by_token.get(token)
+        if prior is not None:
+            die(
+                f"Jetty export: upload token {token!r} collides for "
+                f"{prior.case_id!r}/{prior.variant_truth} run {prior.run_number} and "
+                f"{pt.case_id!r}/{pt.variant_truth} run {pt.run_number} — "
+                "their task file, bundle archive, and sandbox paths would overwrite each other"
+            )
+        seen_by_token[token] = pt
     payloads = [build_jetty_payload(
-        PreparedTask.from_row(row),
+        pt,
         manifest,
         collection=collection,
         task_prefix=task_prefix,
@@ -3926,7 +3942,7 @@ def export_jetty(args: argparse.Namespace) -> int:
         ablation_trees=ablation_trees,
         with_skill_tree_dir=with_skill_tree_dir,
         answer_design=answer_design,
-    ) for row in rows]
+    ) for pt in prepared]
     out = Path(args.out) if getattr(args, "out", None) else None
     fh = out.open("w", encoding="utf-8") if out else sys.stdout
     try:

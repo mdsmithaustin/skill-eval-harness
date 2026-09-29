@@ -772,12 +772,19 @@ class PreparedTask:
         return self._experiment_arm().blind
 
     # --- model-facing surface (blinded) ---
-    def upload_token(self) -> str:
+    def upload_token(self, task_prefix: str | None = None) -> str:
         """Opaque, deterministic, per-task name for model-visible upload paths.
         Every arm gets the same rule, so a path never reveals the skill, case,
-        arm, or run, and no arm is special-cased."""
-        return opaque_token("\0".join(
-            (self.skill_name, self.case_id, self.variant_truth, str(self.run_number))))
+        arm, or run, and no arm is special-cased. `task_prefix` (Jetty's
+        `--jetty-task-prefix`) is folded into the hash only when given, so two
+        exports of the same (skill, case, variant, run) that use different
+        prefixes get distinct opaque tokens instead of colliding on the same
+        archive name and sandbox path; omitting it reproduces the token from
+        before this parameter existed."""
+        parts = (self.skill_name, self.case_id, self.variant_truth, str(self.run_number))
+        if task_prefix:
+            parts = (task_prefix,) + parts
+        return opaque_token("\0".join(parts))
 
     # --- harness-only surface (truth) ---
     def harness_record(self) -> dict[str, Any]:
