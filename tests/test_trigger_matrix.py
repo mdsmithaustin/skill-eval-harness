@@ -638,6 +638,28 @@ class ClaudeDetectionTests(unittest.TestCase):
         detection = self._adapter().detect(completed_invocation(stream), ["demo-reviewer"], [mounted])
         self.assertTrue(detection.triggered)
 
+    def test_skill_tool_use_names_the_mount_folder_not_frontmatter_name(self):
+        # Recorded live: claude -p on examples/demo-skill (folder "demo",
+        # frontmatter name "demo-reviewer") called Skill with skill="demo".
+        # mounted_skill_names must expose "demo" so this row triggers.
+        with tempfile.TemporaryDirectory() as td:
+            skill_md = Path(td) / "demo" / "SKILL.md"
+            skill_md.parent.mkdir()
+            skill_md.write_text(
+                "---\nname: demo-reviewer\ndescription: x\n---\nbody\n", encoding="utf-8")
+            names = tm.mounted_skill_names([skill_md])
+        stream = json.dumps({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": "toolu_01Ttn2zkj2An4sgwBUhBdCZ7", "name": "Skill",
+                "input": {"skill": "demo", "args": "Review this proposed code change..."},
+                "caller": {"type": "direct"},
+            }]},
+        })
+        detection = self._adapter().detect(completed_invocation(stream), names, [])
+        self.assertTrue(detection.triggered, f"names={names!r} did not include the mounted folder name")
+        self.assertIn("Skill tool invoked: demo", detection.legacy_evidence)
+
     def test_max_turns_is_a_completed_observation_window(self):
         self.assertEqual(tm.ClaudeAdapter._result_subtype(
             json.dumps({"type": "result", "subtype": "error_max_turns"})), "error_max_turns")
