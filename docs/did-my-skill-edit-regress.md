@@ -37,11 +37,20 @@ python3 $HARNESS prepare evals/shared-benchmark.json --split tune \
   --out /tmp/demo-tasks.jsonl
 python3 $HARNESS run-codex --tasks /tmp/demo-tasks.jsonl --runs /tmp/demo-runs \
   --codex-cmd "python3 $(pwd)/stub_runner.py"
+python3 $HARNESS judge evals/shared-benchmark.json --runs /tmp/demo-runs \
+  --variant with_skill --variant without_skill \
+  --variant ablation:no-severity --variant ablation:no-checklist \
+  --judge-cmd "python3 $(pwd)/stub_judge.py" --out /tmp/demo-judge-results.jsonl
 python3 $HARNESS benchmark evals/shared-benchmark.json --runs /tmp/demo-runs \
   --variant with_skill --variant without_skill \
   --variant ablation:no-severity --variant ablation:no-checklist \
-  --out /tmp/demo-bench.json
+  --judge-results /tmp/demo-judge-results.jsonl --out /tmp/demo-bench.json
 ```
+
+`c-review` also carries a judge assertion (`actionable-review`), so the `judge` step is
+not optional here — skip it and `ablation_regressions` reports `evidence_class:
+"indeterminate"` with the note `"grading evidence is incomplete"` for every arm,
+regardless of run count.
 
 The `no-severity` ablation removes the `## Severity rules` section — the same regression a
 careless edit to `SKILL.md` would cause. Read `ablation_regressions` in the report
@@ -92,22 +101,42 @@ python3 $HARNESS prepare evals/shared-benchmark.json --split tune \
   --runs-per-variant 4 --out $WS/iteration-1/tasks.jsonl
 python3 $HARNESS run-codex --tasks $WS/iteration-1/tasks.jsonl \
   --runs $WS/iteration-1/runs --codex-cmd "python3 $(pwd)/stub_runner.py"
+python3 $HARNESS judge evals/shared-benchmark.json --runs $WS/iteration-1/runs \
+  --variant with_skill --variant without_skill \
+  --judge-cmd "python3 $(pwd)/stub_judge.py" --out $WS/iteration-1/judge-results.jsonl
 python3 $HARNESS benchmark evals/shared-benchmark.json --runs $WS/iteration-1/runs \
-  --variant with_skill --variant without_skill --out $WS/iteration-1/benchmark.json
+  --variant with_skill --variant without_skill \
+  --judge-results $WS/iteration-1/judge-results.jsonl --out $WS/iteration-1/benchmark.json
 
 # THE EDIT: delete the "## Severity rules" section from skills/demo/SKILL.md
 #   (edit in place, then `git checkout` it when you are done to keep the demo pristine)
 
-# iteration 2 — same three commands into $WS/iteration-2, then diff:
+# iteration 2 — the same four commands into $WS/iteration-2, then diff:
+python3 $HARNESS prepare evals/shared-benchmark.json --split tune \
+  --runs-per-variant 4 --out $WS/iteration-2/tasks.jsonl
+python3 $HARNESS run-codex --tasks $WS/iteration-2/tasks.jsonl \
+  --runs $WS/iteration-2/runs --codex-cmd "python3 $(pwd)/stub_runner.py"
+python3 $HARNESS judge evals/shared-benchmark.json --runs $WS/iteration-2/runs \
+  --variant with_skill --variant without_skill \
+  --judge-cmd "python3 $(pwd)/stub_judge.py" --out $WS/iteration-2/judge-results.jsonl
+python3 $HARNESS benchmark evals/shared-benchmark.json --runs $WS/iteration-2/runs \
+  --variant with_skill --variant without_skill \
+  --judge-results $WS/iteration-2/judge-results.jsonl --out $WS/iteration-2/benchmark.json
 python3 $HARNESS render-viewer --benchmark $WS/iteration-2/benchmark.json \
   --previous-workspace $WS/iteration-1 --out $WS/iteration-2/review.html
 ```
 
-The rendered review carries a **Diff vs previous workspace** panel. Its JSON (2026-07-06,
+Skipping the `judge` step on either side leaves that side's report `"availability":
+"partial"`, and the diff falls back to a descriptive `observed` sub-block with the
+top-level `variant_deltas`/`new_flags` reported as `null` — run it both ways yourself
+to see the difference.
+
+The rendered review carries a **Diff vs previous workspace** panel. Its JSON (2026-09-29,
 offline stub; `without_skill` deltas, all 0.0, elided):
 
 ```json
 {
+  "availability": "complete",
   "variant_deltas": {
     "with_skill": {
       "mean_objective_pass_rate": {"before": 1.0, "after": 0.25, "delta": -0.75}
@@ -118,6 +147,7 @@ offline stub; `without_skill` deltas, all 0.0, elided):
     {"case_id": "c-review",      "variant": "with_skill", "before": 1.0, "after": 0.5, "delta": -0.5}
   ],
   "new_flags": [
+    "c-adversarial::no objective lift",
     "c-adversarial::with-skill failure",
     "c-review::with-skill failure"
   ],
