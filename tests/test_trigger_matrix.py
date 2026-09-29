@@ -29,6 +29,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from helpers import skill_markdown, stub_agent_cli
+
 import run_pi_trigger_eval as tr
 import run_trigger_matrix as tm
 import skill_benchmark as sb
@@ -952,6 +954,95 @@ class CodexRolloutDetectionTests(unittest.TestCase):
                 (root / "other").mkdir()
                 with mock.patch.dict(os.environ, {"CODEX_HOME": str(root / "other")}):
                     self.assertEqual(sb.locate_codex_rollout(self._events(), root / "isolated").status, "not_found")
+
+
+class TriggerContextIsolationTests(unittest.TestCase):
+    """A trigger run measures whether the agent loads the mounted skill, so the
+    agent must see that skill and nothing from the operator's host: no host
+    skills, bundled skills, host agents, instruction files, or MCP servers."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.root = Path(td.name)
+        self.tree = self.root / "tree"
+        (self.tree / "demo").mkdir(parents=True)
+        (self.tree / "demo" / "SKILL.md").write_text(skill_markdown(), encoding="utf-8")
+        self.home = self.root / "home"
+        self.host_skill = self.home / ".agents" / "skills" / "host-skill" / "SKILL.md"
+        self.host_skill.parent.mkdir(parents=True)
+        self.host_skill.write_text(skill_markdown("host-skill"), encoding="utf-8")
+        self.probe = self.root / "argv.json"
+        self.bindir = self.root / "bin"
+        self.bindir.mkdir()
+
+    def host_env(self, **extra):
+        return mock.patch.dict(os.environ, {"HOME": str(self.home), **extra})
+
+    def run_row(self, adapter):
+        return tm.run_cell_query(
+            adapter, self.tree, "review this diff", True, None, 30,
+            metadata={"skill_tree_hash": sb.skill_tree_hash(self.tree)})
+
+    def seen_argv(self):
+        return json.loads(self.probe.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def recorded_isolation(row):
+        return json.loads(json.dumps(row)).get("context_isolation")
+
+    def test_claude_trigger_run_keeps_project_skills_and_drops_host_context(self):
+        claude = stub_agent_cli(self.bindir / "claude", probe_path=self.probe,
+                                stdout_records=[{"type": "result", "subtype": "success"}])
+        with self.host_env(CLAUDE_CONFIG_DIR=str(self.root / "user-claude")):
+            row = self.run_row(tm.ClaudeAdapter(claude_bin=str(claude)))
+        expected = ["--setting-sources", "project", "--strict-mcp-config",
+                    "--settings", '{"disableBundledSkills":true}']
+        self.assertEqual(self.recorded_isolation(row), expected)
+        argv = self.seen_argv()
+        start = argv.index("--setting-sources")
+        self.assertEqual(argv[start:start + 5], expected)
+        self.assertNotIn("--safe-mode", argv)
+        self.assertNotIn("--disable-slash-commands", argv)
+
+    def test_codex_trigger_run_disables_host_and_bundled_skills_but_not_the_mount(self):
+        codex = stub_agent_cli(self.bindir / "codex", probe_path=self.probe,
+                               stdout_records=[{"type": "turn.completed"}])
+        with self.host_env(CODEX_HOME=str(self.root / "user-codex")):
+            row = self.run_row(tm.CodexAdapter(codex_cmd=f"{codex} exec --json"))
+        self.assertEqual(self.recorded_isolation(row), [
+            "-c", "skills.bundled.enabled=false",
+            "-c", "skills.config=<1 host skill(s) disabled>",
+            "--disable", "apps"])
+        argv = self.seen_argv()
+        self.assertIn(f'skills.config=[{{path="{self.host_skill}",enabled=false}}]', argv)
+        self.assertIn("skills.bundled.enabled=false", argv)
+        self.assertNotIn("skills.include_instructions=false", argv)
+
+    def test_pi_trigger_run_loads_only_the_mounted_skills_dir(self):
+        stub_agent_cli(self.bindir / "pi", probe_path=self.probe, stdout_records=[
+            {"type": "agent_end", "messages": [{"stopReason": "stop"}]}])
+        path = f"{self.bindir}{os.pathsep}{os.environ['PATH']}"
+        with self.host_env(PATH=path, PI_CODING_AGENT_DIR=str(self.root / "user-pi")):
+            row = self.run_row(tm.PiAdapter())
+        self.assertEqual(self.recorded_isolation(row), [
+            "--no-context-files", "--no-prompt-templates", "--no-extensions",
+            "--no-skills", "--skill", "<mounted skills dir>"])
+        argv = self.seen_argv()
+        self.assertIn("--no-skills", argv)
+        self.assertEqual(Path(argv[argv.index("--skill") + 1]).parts[-2:], (".pi-config", "skills"))
+
+    def test_pi_trigger_eval_row_records_the_same_isolation(self):
+        stub_agent_cli(self.bindir / "pi", probe_path=self.probe, stdout_records=[
+            {"type": "agent_end", "messages": [{"stopReason": "stop"}]}])
+        path = f"{self.bindir}{os.pathsep}{os.environ['PATH']}"
+        with self.host_env(PATH=path, PI_CODING_AGENT_DIR=str(self.root / "user-pi")):
+            row = tr.run_query(DEMO_MANIFEST, "ordinary chat", False, 30, None)
+        self.assertEqual(self.recorded_isolation(row), [
+            "--no-context-files", "--no-prompt-templates", "--no-extensions",
+            "--no-skills", "--skill", "<mounted skills dir>"])
+        argv = self.seen_argv()
+        self.assertEqual(Path(argv[argv.index("--skill") + 1]).name, "skills")
 
 
 class CodexAdapterTests(unittest.TestCase):

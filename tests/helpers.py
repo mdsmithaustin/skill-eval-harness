@@ -520,3 +520,18 @@ sys.exit({returncode})
     path.write_text(body, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return path
+
+
+def stub_agent_cli(path: Path, *, stdout_records: list[dict[str, Any]], probe_path: Path) -> Path:
+    """A fake agent CLI that records the argv it was given in probe_path and
+    emits stdout_records as a JSON event stream, so a test can drive a real
+    adapter's invoke() and check what it asked the agent to load."""
+    stream = "".join(json.dumps(record) + "\n" for record in stdout_records)
+    body = f'''#!{sys.executable}
+import json, sys
+open({json.dumps(str(probe_path))}, "w").write(json.dumps(sys.argv[1:]))
+sys.stdout.write({json.dumps(stream)})
+'''
+    path.write_text(body, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return path
