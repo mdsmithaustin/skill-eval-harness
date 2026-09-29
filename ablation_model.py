@@ -462,7 +462,6 @@ class InstructionSimulated:
     id: str
     population: Population
     removed_component: str | None = None
-    expected_regressions: tuple[str, ...] = ()
 
     MODE = AblationMode.INSTRUCTION_SIMULATED
 
@@ -479,17 +478,11 @@ class InstructionSimulated:
             not isinstance(self.removed_component, str) or not self.removed_component.strip()
         ):
             raise ValueError("InstructionSimulated.removed_component must be a non-empty string or None")
-        if not isinstance(self.expected_regressions, tuple) or not all(
-            isinstance(item, str) and item for item in self.expected_regressions
-        ):
-            raise ValueError("InstructionSimulated.expected_regressions must be a tuple of strings")
 
     def as_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"id": self.id, "mode": self.MODE.value, "population": self.population.value}
         if self.removed_component is not None:
             d["removed_component"] = self.removed_component
-        if self.expected_regressions:
-            d["expected_regressions"] = list(self.expected_regressions)
         return d
 
     @classmethod
@@ -497,13 +490,9 @@ class InstructionSimulated:
         removed = d.get("removed_component") if isinstance(d, dict) else None
         if removed is not None and not isinstance(removed, str):
             raise ValueError("InstructionSimulated: removed_component must be string or null")
-        regressions = d.get("expected_regressions", []) if isinstance(d, dict) else []
-        if not isinstance(regressions, list) or not all(isinstance(item, str) for item in regressions):
-            raise ValueError("InstructionSimulated: expected_regressions must be a list of strings")
         return cls(id=_require(d, "id", str, "InstructionSimulated"),
                    population=_require(d, "population", str, "InstructionSimulated"),
-                   removed_component=removed,
-                   expected_regressions=tuple(regressions))
+                   removed_component=removed)
 
 
 # The CLOSED set of records that can describe an ablation on a prepared row.
@@ -750,6 +739,13 @@ class PreparedTask:
             raise ValueError("skill_tree_hash must be non-empty or None")
         if not isinstance(self.instruction, str) or not isinstance(self.prompt, str):
             raise ValueError("instruction and prompt must be strings")
+        if self.is_ablation and not self.is_blind and not self.instruction.strip():
+            # Instruction-simulated is non-blind BY the directive text: the full
+            # skill is mounted and the only thing that makes the arm differ from
+            # with_skill is what the instruction tells the model to ignore. An
+            # empty instruction would silently mount with_skill under an ablation
+            # label instead of failing loudly at the boundary.
+            raise ValueError("instruction-simulated ablation task requires a non-empty instruction")
         if self.answer_key is not None and not isinstance(self.answer_key, dict):
             raise ValueError("answer_key must be an object or None")
 

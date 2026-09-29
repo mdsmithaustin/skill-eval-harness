@@ -140,9 +140,7 @@ class StrictFromDictTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only valid for the answer"):
             am.InstructionSimulated.from_dict({"id": "a", "population": "trigger"})
 
-    def test_instruction_simulated_rejects_scalar_regressions_and_untyped_removed_component(self):
-        with self.assertRaises(ValueError):
-            am.InstructionSimulated.from_dict({"id": "a", "population": "answer", "expected_regressions": "abc"})
+    def test_instruction_simulated_rejects_untyped_removed_component(self):
         with self.assertRaises(ValueError):
             am.InstructionSimulated.from_dict({"id": "a", "population": "answer", "removed_component": 3})
 

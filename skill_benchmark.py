@@ -1461,10 +1461,15 @@ def variant_instruction(variant: str, manifest: dict[str, Any], repo_root: Path 
         arm = Arm(variant_truth=variant, blind=bool(ablation_components(ab)))
         if arm.blind:
             return variant_instruction(arm.model_visible_variant(), manifest, repo_root)
+        # Model-visible directive: tell it what to ignore, not what regression the
+        # harness expects — that hypothesis lives only in the manifest's
+        # expected_regressions and audit-manifest's findings. It never reaches this
+        # directive, and build_ablation_regression_report does not confirm it for an
+        # instruction-simulated arm (only a materialized arm has the components that
+        # entry requires).
         return (
-            f"Use the {name} skill, but simulate this ablation: remove/ignore "
-            f"{ab['removed_component']}. Expected regression to watch for: "
-            f"{'; '.join(expected_regression_summaries(ab))}."
+            f"Use the {name} skill, but ignore this part of its guidance: "
+            f"{ab['removed_component']}."
         )
     return f"Run variant {variant}."
 
@@ -3624,9 +3629,10 @@ def safe_task_json(pt: PreparedTask, manifest: dict[str, Any], *, upload_files: 
         safe["skill_files"] = [item["sandbox_path"] for item in upload_files if item.get("role") == "skill"]
         if not pt.is_materialized_ablation:
             # Instruction-simulated is non-blind by design: the model is told what to
-            # simulate, via the ONE typed instruction-sim record. removed_component /
-            # expected_regressions come from the manifest (the prepared row carries
-            # only id/mode/population).
+            # ignore, via the ONE typed instruction-sim record. removed_component comes
+            # from the manifest (the prepared row carries only id/mode/population).
+            # expected_regressions is the harness's grading hypothesis, not the
+            # model's — it never enters this model-visible payload.
             aid = ablation_id_of(variant)
             if aid is None or not isinstance(pt.ablation, InstructionSimulated):
                 raise ValueError(
@@ -3636,7 +3642,6 @@ def safe_task_json(pt: PreparedTask, manifest: dict[str, Any], *, upload_files: 
                 id=aid,
                 population=pt.ablation.population,  # from the row, not hardcoded
                 removed_component=ablation.get("removed_component"),
-                expected_regressions=tuple(expected_regression_summaries(ablation)),
             ).as_dict()
     else:
         safe["skill_files"] = []
@@ -8992,9 +8997,10 @@ def build_task_prompt(pt: PreparedTask, skill_paths: list[str] | None = None, in
         # with_skill); an instruction_simulated arm is NOT blind (the full skill is on
         # disk, so the regression occurs only if we explicitly add the directive).
         if pt.is_ablation and not pt.is_blind:
-            rc = pt.ablation.removed_component if isinstance(pt.ablation, InstructionSimulated) and pt.ablation.removed_component else ""
-            directive = pt.instruction or f"Ablation for this run: ignore/remove the component '{rc}' from the skill guidance."
-            skill_note += f"\n\n{directive}"
+            # PreparedTask.__post_init__ rejects a non-blind ablation row with an
+            # empty instruction, so pt.instruction is always the real directive here
+            # — no fallback that could render a blank removed_component.
+            skill_note += f"\n\n{pt.instruction}"
     return (
         (f"{skill_note}\n\n" if skill_note else "")
         + f"Task prompt:\n{pt.prompt}\n\n"

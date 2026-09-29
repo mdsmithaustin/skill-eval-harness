@@ -519,7 +519,7 @@ class AblationRunnerIntegrationTests(unittest.TestCase):
             repo_root = sb.repo_root_for_manifest(p)
             with tempfile.TemporaryDirectory() as wd:
                 instr, skill_args, _, _, _ = smoke.materialize_runtime_workspace(manifest, repo_root, manifest["cases"][0], "ablation:sim", Path(wd))
-                self.assertIn("simulate this ablation", instr)   # the directive from variant_instruction (the owner)
+                self.assertIn("ignore this part of its guidance: something", instr)   # the directive from variant_instruction (the owner)
                 self.assertIn("Regression-proof requirement", Path(skill_args[skill_args.index("--skill") + 1]).read_text(encoding="utf-8"))
 
     def test_pi_smoke_materialized_arm_is_blind_no_path_leak(self):
@@ -1776,10 +1776,10 @@ class AblationReviewFixesTests(unittest.TestCase):
         sim = {
             "variant": "ablation:no-rp", "prompt": "Review.",
             "ablation": {"id": "no-rp", "mode": "instruction_simulated", "population": "answer", "removed_component": "regression-proof"},
-            "instruction": "Use the good-pr skill, but simulate this ablation: remove/ignore regression-proof. Expected regression to watch for: accepts weak tests.",
+            "instruction": "Use the good-pr skill, but ignore this part of its guidance: regression-proof.",
         }
         sim_prompt = sb.build_task_prompt(self.task(sim), skills, [])
-        self.assertIn("simulate this ablation", sim_prompt)
+        self.assertIn("ignore this part of its guidance", sim_prompt)
         self.assertIn("regression-proof", sim_prompt)
         # materialized: the on-disk skill is already altered -> blind, no hypothesis text.
         mat = {
@@ -1792,7 +1792,7 @@ class AblationReviewFixesTests(unittest.TestCase):
         mat_prompt = sb.build_task_prompt(self.task(mat), skills, [])
         with_prompt = sb.build_task_prompt(self.task({"variant": "with_skill", "prompt": "Review.", "instruction": "x"}), skills, [])
         self.assertNotIn("simulate", mat_prompt)
-        self.assertNotIn("ignore/remove", mat_prompt)
+        self.assertNotIn("ignore this part of its guidance", mat_prompt)
         self.assertNotIn("regression-proof", mat_prompt)
         # blinded materialized prompt is identical to the with_skill prompt
         self.assertEqual(mat_prompt, with_prompt)
@@ -2471,8 +2471,7 @@ class AblationRecordTests(unittest.TestCase):
             am.ablation_record_from_dict({"id": "x", "mode": "make-believe"})   # no third inhabitant
 
     def test_instruction_simulated_is_not_a_provenance(self):
-        sim = am.InstructionSimulated(id="x", population="answer", removed_component="rp",
-                                      expected_regressions=("accepts weak tests",))
+        sim = am.InstructionSimulated(id="x", population="answer", removed_component="rp")
         self.assertNotIsInstance(sim, am.Provenance)        # cannot be read as a materialization
         d = sim.as_dict()
         self.assertEqual(d["mode"], "instruction_simulated")
@@ -2553,6 +2552,18 @@ class PreparedTaskTests(unittest.TestCase):
         self.assertFalse(pt.is_materialized_ablation)
         self.assertFalse(pt.is_blind)
 
+    def test_instruction_simulated_arm_requires_non_empty_instruction(self):
+        # A non-blind ablation is transparent BY the directive text; an empty
+        # instruction would mount the full skill with no notice of what to ignore,
+        # silently degrading to with_skill. Reject it at construction instead of
+        # rendering a blank directive downstream.
+        sim = am.InstructionSimulated(id="no-rp", population="answer", removed_component="rp")
+        with self.assertRaisesRegex(ValueError, "instruction-simulated ablation.*non-empty instruction"):
+            am.PreparedTask(case_id="c", split="tune", kind="behavior", variant_truth="ablation:no-rp",
+                            run_number=1, skill_name="good-pr", repo_root="/r", skill_paths=("/m/SKILL.md",),
+                            input_files=(), run_dir="c/ablation:no-rp", instruction="",
+                            prompt="Review.", tags=(), ablation=sim)
+
     def test_upload_token_is_opaque_for_any_ablation(self):
         for pt in (self.mat_row(), self.sim_row()):
             tok = pt.upload_token()
@@ -2607,14 +2618,14 @@ class ConsumersTakeAPreparedTaskTests(unittest.TestCase):
         return am.PreparedTask(case_id="c1", split="tune", kind="behavior", variant_truth="ablation:no-rp",
                                run_number=1, skill_name="good-pr", repo_root="/r", skill_paths=("skills/root-0/SKILL.md",),
                                input_files=(), run_dir="c1/ablation:no-rp",
-                               instruction="Use the good-pr skill, but simulate this ablation: drop rp.",
+                               instruction="Use the good-pr skill, but ignore this part of its guidance: rp.",
                                prompt="Review.", tags=(), ablation=sim)
 
     def test_codex_prompt_consumes_preparedtask_and_blinds_materialized(self):
         mat = sb.build_task_prompt(self.mat_pt(), ["skills/root-0/SKILL.md"], [])
-        self.assertNotIn("simulate", mat)                  # materialized arm is blind: no hypothesis text
+        self.assertNotIn("ignore this part of its guidance", mat)  # materialized arm is blind: no hypothesis text
         sim = sb.build_task_prompt(self.sim_pt(), ["skills/root-0/SKILL.md"], [])
-        self.assertIn("simulate this ablation", sim)       # instruction-simulated is told what to do
+        self.assertIn("ignore this part of its guidance", sim)     # instruction-simulated is told what to do
 
     def test_safe_task_json_hides_the_arm_unless_the_arm_is_told_to_simulate(self):
         mat = sb.safe_task_json(self.mat_pt(), self.MANIFEST, upload_files=[])
@@ -2687,6 +2698,41 @@ class SubjectVisiblePromptTests(unittest.TestCase):
         self.assertIn("evaluation: programmatic\n", frontmatter)
         self.assert_organic(frontmatter.replace("evaluation: programmatic\n", ""))
         self.assert_organic(body)
+
+    def test_instruction_simulated_ablation_hides_expected_regression_from_the_model(self):
+        # An instruction-simulated arm mounts the FULL skill and tells the model what
+        # to ignore, so removed_component must survive. But it must not also tell the
+        # model which regression the harness is watching for — that is the grading
+        # hypothesis, and it must stay off every surface the model reads: the
+        # variant_instruction directive, the rendered task prompt, and the uploaded
+        # task JSON (instruction field and ablation block alike).
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = AblationReviewFixesTests().manifest(root, ablations=[{
+                "id": "no-checklist", "removed_component": "the review checklist",
+                "expected_regressions": ["Model stops flagging blocking severity issues."],
+            }])
+            manifest = sb.validate_manifest(path)
+            rows = sb.prepared_task_rows(path, manifest, include_ablations=True)
+            row = next(r for r in rows if r["variant"] == "ablation:no-checklist")
+            pt = am.PreparedTask.from_row(row)
+
+            instr = sb.variant_instruction(row["variant"], manifest)
+            prompt = sb.build_task_prompt(pt, list(pt.skill_paths), [])
+            task_json = sb.safe_task_json(pt, manifest, upload_files=[])
+            # task_json["variant"] and the "ablation" key name legitimately disclose
+            # structure for a non-blind arm (test_safe_task_json_model_visible_variant_
+            # is_owned_by_the_object covers that) — the leak under test is in the
+            # free-text prose: the instruction directive and removed_component value.
+            ablation_block = task_json.get("ablation") or {}
+
+            for rendered in (instr, prompt, task_json["instruction"],
+                             ablation_block.get("removed_component", "")):
+                self.assert_organic(rendered)
+                self.assertNotIn("Model stops flagging blocking severity issues.", rendered)
+            self.assertIn("the review checklist", task_json["instruction"])
+            self.assertEqual(ablation_block.get("removed_component"), "the review checklist")
+            self.assertNotIn("expected_regressions", ablation_block)
 
 
 class JettyModelVisibleTaskTests(unittest.TestCase):
