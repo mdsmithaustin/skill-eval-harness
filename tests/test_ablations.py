@@ -2553,6 +2553,18 @@ class PreparedTaskTests(unittest.TestCase):
         self.assertFalse(pt.is_materialized_ablation)
         self.assertFalse(pt.is_blind)
 
+    def test_instruction_simulated_arm_requires_non_empty_instruction(self):
+        # A non-blind ablation is transparent BY the directive text; an empty
+        # instruction would mount the full skill with no notice of what to ignore,
+        # silently degrading to with_skill. Reject it at construction instead of
+        # rendering a blank directive downstream.
+        sim = am.InstructionSimulated(id="no-rp", population="answer", removed_component="rp")
+        with self.assertRaisesRegex(ValueError, "instruction-simulated ablation.*non-empty instruction"):
+            am.PreparedTask(case_id="c", split="tune", kind="behavior", variant_truth="ablation:no-rp",
+                            run_number=1, skill_name="good-pr", repo_root="/r", skill_paths=("/m/SKILL.md",),
+                            input_files=(), run_dir="c/ablation:no-rp", instruction="",
+                            prompt="Review.", tags=(), ablation=sim)
+
     def test_upload_token_is_opaque_for_any_ablation(self):
         for pt in (self.mat_row(), self.sim_row()):
             tok = pt.upload_token()
