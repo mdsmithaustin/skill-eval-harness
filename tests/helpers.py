@@ -453,20 +453,24 @@ def stub_claude_stream(
     in_tok: int = 11,
     out_tok: int = 22,
     returncode: int = 0,
+    probe_path: Path | None = None,
 ) -> Path:
     """A fake `claude` executable for the stream-json answer path: it emits the
     canonical claude_stream_records sequence verbatim, and ONLY when
     stream-json was actually requested — so a backend that silently falls back
     to the single-envelope format fails the protocol instead of passing by
-    accident."""
+    accident. With probe_path it also records its argv."""
     stream_text = "\n".join(
         json.dumps(record)
         for record in claude_stream_records(answer=answer, cost=cost, in_tok=in_tok, out_tok=out_tok)
     ) + "\n"
+    probe_snippet = (
+        f"open({json.dumps(str(probe_path))}, 'w').write(json.dumps({{'argv': sys.argv[1:]}}))\n"
+        if probe_path is not None else "")
     body = f'''#!/usr/bin/env python3
-import sys
+import json, sys
 _ = sys.stdin.read()
-if "stream-json" not in sys.argv:
+{probe_snippet}if "stream-json" not in sys.argv:
     sys.stdout.write("stream stub invoked without --output-format stream-json")
     sys.exit(1)
 sys.stdout.write({json.dumps(stream_text)})

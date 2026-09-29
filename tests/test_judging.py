@@ -443,6 +443,36 @@ class VerdictSchemaTests(unittest.TestCase):
                 self.assertIsInstance(invocation, jc.JudgeInvocation)
                 self.assertTrue(invocation.succeeded)
 
+    def test_claude_and_codex_judge_invocations_record_context_isolation(self):
+        assertion_schema = sb.verdict_schema_for(self.PLAIN)
+        base_result = {
+            "answer": '{"passed":true}', "stderr": "", "returncode": 0,
+            "cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 1},
+        }
+        claude_result = {
+            **base_result, "context_isolation": list(sb.CLAUDE_CONTEXT_ISOLATION_ARGS),
+        }
+        with mock.patch.object(sb, "claude_cli_invoke", return_value=claude_result):
+            claude = sb.claude_judge_invoke(
+                "prompt", judge_model="sonnet", claude_bin="claude",
+                assertion_schema=assertion_schema, extra_args=None,
+                explore_hint=None)
+        self.assertEqual(
+            claude.metadata.get("context_isolation"),
+            tuple(sb.CLAUDE_CONTEXT_ISOLATION_ARGS))
+
+        codex_result = {
+            **base_result, "model": "codex/gpt-mini",
+            "environment": {"context_isolation": list(sb.CODEX_CONTEXT_ISOLATION_ARGS)},
+        }
+        with mock.patch.object(sb, "codex_cli_invoke", return_value=codex_result):
+            codex = sb.codex_judge_invoke(
+                "prompt", judge_model="gpt-mini", codex_cmd="codex exec",
+                assertion_schema=assertion_schema, explore_hint=None)
+        self.assertEqual(
+            codex.metadata.get("environment", {}).get("context_isolation"),
+            tuple(sb.CODEX_CONTEXT_ISOLATION_ARGS))
+
     def test_shell_judge_uses_the_same_typed_boundary(self):
         invocation = jc.JudgeInvocation(
             stdout='{"passed":true}', stderr="", returncode=0,

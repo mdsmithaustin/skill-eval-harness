@@ -1446,10 +1446,7 @@ def variant_instruction(variant: str, manifest: dict[str, Any], repo_root: Path 
             "If the skill defines a required output contract, follow it exactly."
         )
     if variant == "without_skill":
-        return (
-            f"Do not read or use the {name} skill or its references. "
-            "Use only your general capabilities and the task context."
-        )
+        return "Complete the task using the provided context."
     if variant == "old_skill":
         return variant_instruction("with_skill", manifest, repo_root)
     if is_ablation_variant(variant):
@@ -8976,9 +8973,10 @@ def build_task_prompt(pt: PreparedTask, skill_paths: list[str] | None = None, in
     if not isinstance(pt, PreparedTask):
         raise TypeError("build_task_prompt requires a validated PreparedTask")
     file_note = "\n".join(f"- {p}" for p in (input_files or [])) if input_files else "- none"
-    if pt.variant_truth == "without_skill":
-        skill_note = "Do not use any skill. No skill files are present in this workspace."
-    else:
+    # The runners already keep host skills out of the workspace and context, so
+    # a without_skill note could only tell the model which arm it is in.
+    skill_note = ""
+    if pt.variant_truth != "without_skill":
         listed = "\n".join(f"- {p}" for p in (skill_paths or [])) if skill_paths else "- none"
         skill_note = f"Read and follow the skill file(s) below (including referenced files when relevant), then do the task:\n{listed}"
         # The PreparedTask owns the blind decision: a materialized arm is blind (the
@@ -8990,8 +8988,8 @@ def build_task_prompt(pt: PreparedTask, skill_paths: list[str] | None = None, in
             directive = pt.instruction or f"Ablation for this run: ignore/remove the component '{rc}' from the skill guidance."
             skill_note += f"\n\n{directive}"
     return (
-        f"{skill_note}\n\n"
-        f"Task prompt:\n{pt.prompt}\n\n"
+        (f"{skill_note}\n\n" if skill_note else "")
+        + f"Task prompt:\n{pt.prompt}\n\n"
         f"Input files available to inspect:\n{file_note}\n\n"
         "Return the final answer."
     )
@@ -10518,6 +10516,7 @@ class ClaudeBackend(AgentBackend):
             environment={
                 "runner": "claude",
                 "command": result.get("command") or "claude -p",
+                "context_isolation": result.get("context_isolation"),
                 "cwd": "<isolated workspace>",
                 "stdout_utf8_valid": result.get("trace_utf8_valid") is not False,
             })
@@ -10816,6 +10815,13 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     }
 
 
+# Without these, `claude -p` loads the operator's ~/.claude skills, agents,
+# CLAUDE.md, hooks, plugins, and MCP servers into every arm. --safe-mode keeps
+# OAuth working (unlike --bare); --disable-slash-commands also drops the
+# skills Claude Code bundles, so a without_skill arm sees no skill at all.
+CLAUDE_CONTEXT_ISOLATION_ARGS = ("--safe-mode", "--disable-slash-commands")
+
+
 def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str = "claude",
                       timeout: int = DEFAULT_RUNNER_TIMEOUT_S, extra_args: list[str] | None = None, cwd: str | Path | None = None,
                       output_format: str = "json") -> dict[str, Any]:
@@ -10835,6 +10841,7 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
     if output_format == "stream-json":
         argv.append("--verbose")
     argv.append("--no-session-persistence")
+    argv += CLAUDE_CONTEXT_ISOLATION_ARGS
     if model:
         argv += ["--model", model]
     if extra_args:
@@ -10858,6 +10865,7 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
         return {"answer": "", "cost_usd": None, "usage": {}, "parse_error": None,
                 "returncode": 124, "timed_out": True, "elapsed_ms": result.elapsed_ms,
                 "stderr": result.stderr, "raw_response": result.stdout, "command": command,
+                "context_isolation": list(CLAUDE_CONTEXT_ISOLATION_ARGS),
                 "invocation_state": result.invocation_state.value,
                 "trace_utf8_valid": result.stdout_utf8_valid}
     parsed = (
@@ -10884,6 +10892,7 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
         # run's trace; in envelope mode they preserve the failure diagnostics.
         "raw_response": result.stdout,
         "command": command,
+        "context_isolation": list(CLAUDE_CONTEXT_ISOLATION_ARGS),
     })
     return parsed
 
@@ -11107,6 +11116,15 @@ def codex_structured_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return converted
 
 
+# An isolated CODEX_HOME still lets Codex list every skill under the
+# operator's ~/.agents/skills (and its bundled system skills) in the prompt,
+# and still exposes the ChatGPT account's codex_apps connector MCP server.
+# Hiding the skill catalog beats moving HOME, which would also move tool and
+# version-manager lookups. Both options are repeatable, so a user-supplied
+# --codex-cmd that already carries them stays valid.
+CODEX_CONTEXT_ISOLATION_ARGS = ("-c", "skills.include_instructions=false", "--disable", "apps")
+
+
 def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = "codex exec", timeout: int = DEFAULT_RUNNER_TIMEOUT_S,
                       output_schema: dict[str, Any] | None = None, cwd: str | Path | None = None,
                       sandbox: str = "read-only", json_events: bool = True) -> dict[str, Any]:
@@ -11139,6 +11157,7 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
         argv.append("--ignore-rules")
     if sandbox and "--sandbox" not in argv:
         argv += ["--sandbox", sandbox]
+    argv += CODEX_CONTEXT_ISOLATION_ARGS
     tmp = Path(tempfile.mkdtemp(prefix="codex-invoke-"))
     cleanup_meta: dict[str, Any]
     try:
@@ -11231,6 +11250,7 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
             "last_message_utf8_valid": last_message_utf8_valid,
             "temporary_home_cleanup": cleanup_meta,
             "command": command,
+            "context_isolation": list(CODEX_CONTEXT_ISOLATION_ARGS),
             "cwd": "<isolated workspace>",
         },
     }
@@ -12208,6 +12228,7 @@ def claude_judge_invoke(prompt: str, *, judge_model: str | None, claude_bin: str
                             extra_args=claude_extra_args, cwd=explore_hint)
     provider_error = res.get("provider_error")
     returncode = cast(int, res.get("returncode"))
+    context_isolation = res.get("context_isolation")
     return JudgeInvocation(
         stdout=res.get("answer", ""),
         stderr=(_stderr_with_warning(res.get("stderr", "") or "", provider_error)
@@ -12222,6 +12243,10 @@ def claude_judge_invoke(prompt: str, *, judge_model: str | None, claude_bin: str
         usage=res.get("usage") if isinstance(res.get("usage"), dict) else None,
         usage_source="provider_reported",
         model_label=judge_model,
+        # Same isolation contract as the answer runner: recorded here, not on the
+        # verdict row, since only --transcripts persists it (provider-metadata.json).
+        metadata=({"context_isolation": list(context_isolation)}
+                  if isinstance(context_isolation, list) else {}),
     )
 
 
@@ -12233,6 +12258,7 @@ def codex_judge_invoke(prompt: str, *, judge_model: str | None, codex_cmd: str,
     usage = res.get("usage") if isinstance(res.get("usage"), dict) else None
     returncode = cast(int, res.get("returncode"))
     provider_error = res.get("provider_error")
+    environment = res.get("environment")
     return JudgeInvocation(
         stdout=res.get("answer") or "",
         stderr=res.get("stderr", "") or "",
@@ -12245,6 +12271,11 @@ def codex_judge_invoke(prompt: str, *, judge_model: str | None, codex_cmd: str,
         usage=usage,
         usage_source="trace_normalized" if usage else "provider_reported",
         model_label=str(res.get("model") or f"codex/{judge_model or 'default'}"),
+        # Same convention gemini_judge_invoke already uses: stash the isolated-home
+        # environment block (context_isolation included) in metadata, since only
+        # --transcripts persists it (provider-metadata.json), never the verdict row.
+        metadata=({"environment": dict(environment)}
+                  if isinstance(environment, Mapping) else {}),
     )
 
 

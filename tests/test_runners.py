@@ -86,7 +86,7 @@ class SubagentRunnerTests(unittest.TestCase):
                 # The subagent now re-serializes its records to trace.jsonl (the
                 # shared writer's raw-trace artifact), like every other runner.
                 self.assertTrue((base / "trace.jsonl").exists())
-        without_prompt = next(p for p in seen_prompts if "Do not use any skill" in p)
+        without_prompt = next(p for p in seen_prompts if not p.startswith("Read and follow"))
         self.assertNotIn("skills/", without_prompt)
 
     def test_subagent_failure_writes_failure_marker(self):
@@ -928,6 +928,32 @@ class RunnerOutcomeContractTests(unittest.TestCase):
             sb.run_agent(argparse.Namespace(agent="claude", tasks=str(tasks), runs=str(claude_runs), model="claude-haiku-4-5-20251001",
                                             codex_cmd="codex exec --json", claude_bin=str(claude_bin), timeout=30))
             self.assertIn("token from claude", (claude_runs / run_dir / "output.md").read_text(encoding="utf-8"))
+
+    def test_codex_answer_run_hides_host_skills_from_the_model(self):
+        # An isolated CODEX_HOME alone still lists every skill under the
+        # operator's ~/.agents/skills and the account's codex_apps MCP server.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tasks, run_dir = self._one_with_skill_task(root)
+            probe = root / "argv.json"
+            fake_codex = root / "fake_codex.py"
+            fake_codex.write_text(
+                "import json, pathlib, sys\n_ = sys.stdin.read()\n"
+                f"pathlib.Path({str(probe)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+                "pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('token')\n"
+                "print(json.dumps({'role': 'assistant', 'content': 'trace'}))\n",
+                encoding="utf-8")
+            runs = root / "agent-codex"
+            sb.run_agent(argparse.Namespace(agent="codex", tasks=str(tasks), runs=str(runs), model="gpt-mini",
+                                            codex_cmd=f"{sys.executable} {fake_codex}", claude_bin="claude", timeout=30))
+            argv = json.loads(probe.read_text(encoding="utf-8"))
+            self.assertEqual(argv[:13], [
+                "--json", "--model", "gpt-mini", "--skip-git-repo-check", "--ephemeral",
+                "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only",
+                "-c", "skills.include_instructions=false", "--disable", "apps"])
+            env = json.loads((runs / run_dir / "environment.json").read_text(encoding="utf-8"))
+            self.assertEqual(env["context_isolation"],
+                             ["-c", "skills.include_instructions=false", "--disable", "apps"])
 
     def test_codex_cleanup_race_preserves_artifacts_and_next_task(self):
         with tempfile.TemporaryDirectory() as td:
