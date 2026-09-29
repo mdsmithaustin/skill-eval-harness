@@ -415,7 +415,51 @@ class RunClaudeAdapterTests(unittest.TestCase):
             self.assertTrue(passed, evidence)
 
 
+    def test_answer_run_launches_claude_without_host_context(self):
+        # Without these flags `claude -p` loads the operator's ~/.claude skills,
+        # agents, CLAUDE.md, hooks, and MCP servers into BOTH arms.
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            case = {"id": "c", "split": "tune", "prompt": "do it",
+                    "assertions": [{"name": "a", "type": "contains", "value": "token-XYZ"}]}
+            p = _manifest(td / "repo", [case])
+            rows = [r for r in sb.prepared_task_rows(p, sb.validate_manifest(p))
+                    if r["variant"] == "without_skill"]
+            tasks = td / "tasks.jsonl"
+            tasks.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            probe = td / "argv.json"
+            stub = _stub_claude_stream(td / "claude_stream_stub.py", probe_path=probe)
+            runs = td / "runs"
+            sb.run_claude(argparse.Namespace(tasks=str(tasks), runs=str(runs),
+                                             model="claude-haiku-4-5-20251001",
+                                             claude_bin=str(stub), timeout=60))
+            self.assertEqual(json.loads(probe.read_text())["argv"], [
+                "-p", "--output-format", "stream-json", "--verbose",
+                "--no-session-persistence", "--safe-mode", "--disable-slash-commands",
+                "--model", "claude-haiku-4-5-20251001"])
+            env = json.loads((runs / rows[0]["run_dir"] / "environment.json").read_text())
+            self.assertEqual(env["context_isolation"], ["--safe-mode", "--disable-slash-commands"])
+
+
 class ClaudeJudgeAndPanelTests(unittest.TestCase):
+    def test_native_claude_judge_runs_without_host_context(self):
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            out = td / "output.md"; out.write_text("candidate answer")
+            probe = td / "argv.json"
+            stub = _stub_claude(td / "judge_stub.py", probe_path=probe,
+                                answer=json.dumps({"passed": True, "score": 1}))
+            task = {"judge_task_id": "c::with_skill::run-1::quality", "case_id": "c",
+                    "variant": "with_skill", "run_number": 1, "output_path": str(out),
+                    "assertion": {"name": "quality", "type": "judge", "threshold": 1},
+                    "prompt": "grade it"}
+            sb.run_one_judge_task(task, None, judge_model="claude-haiku-4-5-20251001",
+                                  claude_bin=str(stub))
+            self.assertEqual(json.loads(probe.read_text())["argv"][:9], [
+                "-p", "--output-format", "json", "--no-session-persistence",
+                "--safe-mode", "--disable-slash-commands",
+                "--model", "claude-haiku-4-5-20251001", "--tools"])
+
     def test_native_claude_judge_stamps_model_and_cost(self):
         with tempfile.TemporaryDirectory() as t:
             td = Path(t)

@@ -2651,7 +2651,17 @@ class SubjectVisiblePromptTests(unittest.TestCase):
         self.assert_organic(without_skill)
         self.assertIn("Review the change.", with_skill)
         self.assertIn("Review the change.", without_skill)
-        self.assertIn("Do not use any skill", without_skill)
+
+    def test_without_skill_wrapper_does_not_announce_the_arm(self):
+        # The runner isolates host context, so a skill negation only tells the
+        # model which arm it is in.
+        without_skill = sb.build_task_prompt(
+            self._task("Review the change.", "without_skill"), [], [])
+        self.assertEqual(without_skill, (
+            "Task prompt:\nReview the change.\n\n"
+            "Input files available to inspect:\n- none\n\n"
+            "Return the final answer."))
+        self.assertNotRegex(without_skill.lower(), r"\bskills?\b")
 
     def test_build_task_prompt_keeps_case_text_even_when_it_uses_eval_words(self):
         rendered = sb.build_task_prompt(
@@ -2664,6 +2674,13 @@ class SubjectVisiblePromptTests(unittest.TestCase):
         self.assert_organic(with_skill)
         self.assert_organic(sb.variant_instruction("without_skill", manifest))
         self.assertEqual(sb.variant_instruction("old_skill", manifest), with_skill)
+
+    def test_without_skill_instruction_names_neither_the_skill_nor_the_arm(self):
+        # Jetty hands this instruction to the agent verbatim.
+        without_skill = sb.variant_instruction("without_skill", {"skill_name": "good-pr"})
+        self.assertEqual(without_skill, "Complete the task using the provided context.")
+        self.assertNotIn("good-pr", without_skill)
+        self.assertNotRegex(without_skill.lower(), r"\bskills?\b")
 
     def test_jetty_runbook_has_no_banned_eval_vocabulary(self):
         runbook = sb.canonical_jetty_runbook("claude-code", "m", "anthropic", "s")
