@@ -3,6 +3,7 @@ deterministic stub 'model') -> report, and the two materialized ablations each
 confirm a regression on a distinct assertion. Runs in CI with no model/API."""
 import argparse
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,17 @@ import skill_benchmark as sb
 
 ROOT = Path(__file__).resolve().parents[1]
 DEMO = ROOT / "examples" / "demo-skill"
+
+
+def _min_runs_for_significance() -> int:
+    """The smallest per-case matched-pair count at which a unanimous regression
+    (every paired delta pointing the same way) clears the two-sided sign-flip
+    gate — computed against the real `sign_flip_significance`, not hardcoded,
+    so this tracks the gate if its threshold ever moves."""
+    for n in range(1, 15):
+        if sb.sign_flip_significance([-1.0] * n)["significant_at_0_05"]:
+            return n
+    raise AssertionError("sign_flip_significance never reached significance up to n=14")
 
 
 class DemoExampleTests(unittest.TestCase):
@@ -61,6 +73,128 @@ class DemoExampleTests(unittest.TestCase):
         s = rep["summary"]
         self.assertEqual(s["with_skill"]["objective_pass_rate"]["mean"], 1.0)      # skill present -> both assertions pass
         self.assertEqual(s["without_skill"]["objective_pass_rate"]["mean"], 0.0)   # no skill -> both fail
+
+
+class DemoReadmeTests(unittest.TestCase):
+    """Any doc whose demo walkthrough claims an ablation confirms a regression at a
+    specific `prepare --runs-per-variant` count is only honest if that count actually
+    clears the per-case significance gate. Each doc here makes exactly that claim for
+    its first --runs-per-variant occurrence, so a drift between the two can't ship
+    silently."""
+
+    def _assert_documented_runs_per_variant_clears_significance_gate(self, path: Path, label: str) -> None:
+        text = path.read_text(encoding="utf-8")
+        match = re.search(r"--runs-per-variant (\d+)", text)
+        self.assertIsNotNone(match, f"{label} should document a --runs-per-variant value")
+        documented = int(match.group(1))
+        minimum = _min_runs_for_significance()
+        self.assertGreaterEqual(
+            documented, minimum,
+            f"{label} documents --runs-per-variant {documented}, but a case needs "
+            f">= {minimum} matched pairs to clear the significance gate and report "
+            "expected_regression_confirmed",
+        )
+
+    def test_documented_runs_per_variant_clears_significance_gate(self):
+        self._assert_documented_runs_per_variant_clears_significance_gate(
+            DEMO / "README.md", "examples/demo-skill/README.md")
+
+    def test_did_my_skill_edit_regress_doc_runs_per_variant_clears_significance_gate(self):
+        self._assert_documented_runs_per_variant_clears_significance_gate(
+            ROOT / "docs" / "did-my-skill-edit-regress.md", "docs/did-my-skill-edit-regress.md")
+
+
+class WalkthroughJudgeStepTests(unittest.TestCase):
+    """Any doc that claims an ablation confirms a regression
+    (`expected_regression_confirmed`, `CONFIRMED_CAUSAL`, "confirms/confirm a
+    regression") is only honest if the ablation `benchmark` call it pastes actually
+    graded the judge assertion behind that confirmation. Otherwise the claimed
+    evidence is a "partial" report artifact, not a real verdict. This is a structural
+    check over fenced code blocks (which commands run in which order), not a
+    full-text snapshot, so prose can be reworded freely without breaking it."""
+
+    CONFIRM_MARKERS = (
+        "expected_regression_confirmed", "CONFIRMED_CAUSAL",
+        "confirms a regression", "confirm a regression",
+    )
+    _CODE_BLOCK = re.compile(r"```(?:bash|sh|yaml)\n(.*?)\n```", re.DOTALL)
+    _JUDGE_CALL = re.compile(r"(?:skill[-_]benchmark(?:\.py)?|\$H(?:ARNESS)?)\s+judge\b(?!-)")
+    _BENCHMARK_CALL = re.compile(r"(?:skill[-_]benchmark(?:\.py)?|\$H(?:ARNESS)?)\s+benchmark\b")
+
+    @classmethod
+    def _flatten(cls, block: str) -> list[str]:
+        joined = re.sub(r"\\\n\s*", " ", block)
+        return [line.strip() for line in joined.split("\n")
+                if line.strip() and not line.strip().startswith("#")]
+
+    @staticmethod
+    def _flag_value(line: str, flag: str) -> str | None:
+        m = re.search(re.escape(flag) + r"[= ]+(\S+)", line)
+        return m.group(1) if m else None
+
+    def _assert_confirming_ablation_benchmarks_are_judged(self, path: Path) -> None:
+        text = path.read_text(encoding="utf-8")
+        if not any(marker in text for marker in self.CONFIRM_MARKERS):
+            return
+        judge_outs: set[str] = set()
+        ablation_benchmark_calls = 0
+        for block in self._CODE_BLOCK.findall(text):
+            for line in self._flatten(block):
+                if self._JUDGE_CALL.search(line):
+                    out = self._flag_value(line, "--out")
+                    if out:
+                        judge_outs.add(out)
+                if self._BENCHMARK_CALL.search(line) and "ablation" in line:
+                    ablation_benchmark_calls += 1
+                    judge_results = self._flag_value(line, "--judge-results")
+                    self.assertIsNotNone(
+                        judge_results,
+                        f"{path}: an ablation benchmark call claims a confirmed "
+                        f"regression but has no --judge-results: {line!r}",
+                    )
+                    self.assertIn(
+                        judge_results, judge_outs,
+                        f"{path}: --judge-results {judge_results!r} is not the --out "
+                        f"of a preceding `judge` step in the same doc: {line!r}",
+                    )
+        if ablation_benchmark_calls == 0:
+            self.fail(
+                f"{path} claims a confirmed regression but pastes no ablation "
+                "benchmark command to check"
+            )
+
+    def _assert_some_benchmark_is_judged(self, path: Path) -> None:
+        judge_outs: set[str] = set()
+        judged = []
+        for block in self._CODE_BLOCK.findall(path.read_text(encoding="utf-8")):
+            for line in self._flatten(block):
+                if self._JUDGE_CALL.search(line):
+                    out = self._flag_value(line, "--out")
+                    if out:
+                        judge_outs.add(out)
+                if self._BENCHMARK_CALL.search(line):
+                    judge_results = self._flag_value(line, "--judge-results")
+                    if judge_results and judge_results in judge_outs:
+                        judged.append(line)
+        self.assertTrue(
+            judged, f"{path}: no benchmark call is fed by a preceding judge step's --out")
+
+    def test_why_did_this_run_fail_benchmarks_judged_runs(self):
+        self._assert_some_benchmark_is_judged(ROOT / "docs" / "why-did-this-run-fail.md")
+
+    def test_gating_ci_on_evals_benchmarks_judged_runs(self):
+        self._assert_some_benchmark_is_judged(ROOT / "docs" / "gating-ci-on-evals.md")
+
+    def test_demo_readme_judges_before_confirming(self):
+        self._assert_confirming_ablation_benchmarks_are_judged(DEMO / "README.md")
+
+    def test_did_my_skill_edit_regress_judges_before_confirming(self):
+        self._assert_confirming_ablation_benchmarks_are_judged(
+            ROOT / "docs" / "did-my-skill-edit-regress.md")
+
+    def test_ablation_study_walkthrough_judges_before_confirming(self):
+        self._assert_confirming_ablation_benchmarks_are_judged(
+            ROOT / "docs" / "ablation-study-walkthrough.md")
 
 
 class DemoJudgeTests(unittest.TestCase):

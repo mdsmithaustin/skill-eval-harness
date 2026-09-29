@@ -119,9 +119,24 @@ import json
 manifest = json.load(open('evals/shared-benchmark.json'))
 print(' '.join(f"--variant ablation:{a['id']}" for a in manifest.get('ablations', [])))
 PY
+
+# cfdoctor + guardrails grade on deterministic safety assertions only, so they need no
+# judge step. The other eight carry a judge case (see "Method" above), and skipping
+# this step leaves their grading "partial". Judge before benchmark, the same order the
+# verified offline walkthroughs use (docs/gating-ci-on-evals.md, docs/can-i-trust-my-judge.md).
+python3 $HARNESS judge evals/shared-benchmark.json --runs /tmp/runs \
+  --variant with_skill --variant without_skill $(cat /tmp/ablation-variants.args) \
+  --judge-cmd "claude -p" --out /tmp/judge-results.jsonl
 python3 $HARNESS benchmark evals/shared-benchmark.json --runs /tmp/runs \
-  --variant with_skill --variant without_skill $(cat /tmp/ablation-variants.args)
+  --variant with_skill --variant without_skill $(cat /tmp/ablation-variants.args) \
+  --judge-results /tmp/judge-results.jsonl
 ```
+
+This walkthrough needs `GITHUB_TOKEN`, network access to fetch each pinned skill, and a
+live `claude -p` to run and judge it, so it was not re-run to produce this fix. The
+`judge`-then-`--judge-results` sequencing above is inferred by analogy with the offline
+demo walkthroughs this PR did verify; nothing in this section is claimed as freshly
+measured.
 
 Note: the skills' *shipped* manifests declare **instruction-simulated** ablations
 (label-only), so `--include-ablations` gives non-blind, raw-measurement arms. To run
