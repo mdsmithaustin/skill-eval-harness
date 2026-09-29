@@ -194,13 +194,17 @@ class MountedSkillName:
 def mounted_skill_names(copied: list[Path]) -> list[MountedSkillName]:
     """Folder and frontmatter name of each mounted skill, parsed with the
     harness's real frontmatter parser rather than a regex that breaks on
-    quoted or folded values."""
+    quoted or folded values. The declared name is stripped: a CLI's own
+    load event carries the trimmed name (Codex strips a padded quoted
+    `name: " demo-reviewer "` before listing or injecting it), so an
+    untrimmed needle here would never match a real invocation."""
     names: list[MountedSkillName] = []
     for p in copied:
         skill_md = p if p.name == "SKILL.md" else p / "SKILL.md"
         folder = skill_md.parent.name
         declared = frontmatter_value(skill_md.read_text(encoding="utf-8"), "name") if skill_md.exists() else None
-        names.append(MountedSkillName(folder=folder, frontmatter=str(declared) if declared else folder))
+        stripped = str(declared).strip() if declared else ""
+        names.append(MountedSkillName(folder=folder, frontmatter=stripped or folder))
     return names
 
 
