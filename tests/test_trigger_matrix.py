@@ -1268,6 +1268,85 @@ class CodexRealHostPathStderrRedactionTests(unittest.TestCase):
                          "failed to scan skill path [REDACTED]: No such file or directory (os error 2)")
 
 
+class CodexStderrCapCannotSplitAHostPathTests(unittest.TestCase):
+    """`invoke_argv_with_timeout` caps captured stderr before `CodexAdapter`
+    ever sees it, so a stderr longer than the cap used to be cut mid-path: the
+    redactor only recognizes a host path whole, so the surviving fragment (the
+    operator's home directory name, part of a project id) reached the saved
+    row unredacted. This reproduces that shape directly against a real
+    subprocess and the real cap, not a mocked stderr already under it."""
+
+    CAP = 4000
+
+    def _fake_codex_script(self, root: Path) -> Path:
+        script = root / "fake_codex.py"
+        script.write_text(
+            "import os, pathlib, sys\n"
+            "sys.stdin.read()\n"
+            "sys.stderr.write(pathlib.Path(os.environ['FAKE_CODEX_STDERR_FILE']).read_text(encoding='utf-8'))\n"
+            "sys.exit(1)\n",
+            encoding="utf-8",
+        )
+        return script
+
+    def _stderr_straddling_the_cap(self, skill_md: Path, home: Path) -> tuple[str, int, int]:
+        """A repeated 'failed to load skill' line, padded so one occurrence's
+        path crosses index `CAP` while the cut still lands inside the `home`
+        segment, before `.agents/skills` even starts. That is what the real
+        Codex repro looked like (the saved row's stderr ended mid-way through
+        the session directory name, short of `.agents/skills`): the
+        redactor's own root fallback needs `home/.agents/skills` present
+        *whole* to catch a span with no trailing delimiter, so a cut that
+        never reaches the root literal defeats it too."""
+        prefix = ("2026-09-29T21:40:49.748679Z ERROR codex_core::session::session: "
+                  "failed to load skill ")
+        suffix = ": missing YAML frontmatter delimited by ---\n"
+        path_text = str(skill_md)
+        home_text = str(home)
+        line = f"{prefix}{path_text}{suffix}"
+        for pad_len in range(len(line)):
+            for k in range(40):
+                path_start = pad_len + len(prefix) + k * len(line)
+                offset = self.CAP - path_start
+                if 20 <= offset < len(home_text):
+                    body = (" " * pad_len) + line * (k + 2)
+                    return body, path_start, offset
+        raise AssertionError("could not align a mid-home cut for this fixture")
+
+    def test_no_host_path_fragment_survives_a_stderr_cap_that_lands_mid_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            home = root / "home"
+            skill_dir = home / ".agents" / "skills" / "very-secret-codename-zulu"
+            skill_dir.mkdir(parents=True)
+            skill_md = skill_dir / "SKILL.md"
+            skill_md.write_text("no frontmatter\n", encoding="utf-8")
+
+            stderr_text, path_start, offset = self._stderr_straddling_the_cap(skill_md, home)
+            self.assertGreater(len(stderr_text), self.CAP)
+            self.assertLess(path_start, self.CAP)
+            # The cut falls inside `home`, short of `.agents/skills`: this is
+            # the exact prefix a hard character cut used to leave behind.
+            leaked_prefix = str(skill_md)[:offset]
+            self.assertNotIn(".agents", leaked_prefix)
+
+            stderr_file = root / "fake-stderr.txt"
+            stderr_file.write_text(stderr_text, encoding="utf-8")
+            fake_codex = self._fake_codex_script(root)
+            workspace = root / "workspace"
+            workspace.mkdir()
+
+            with mock.patch.dict(os.environ, {"HOME": str(home), "FAKE_CODEX_STDERR_FILE": str(stderr_file)}):
+                os.environ.pop("CODEX_HOME", None)
+                result = tm.CodexAdapter(codex_cmd=f"{sys.executable} {fake_codex}").invoke(
+                    "q", None, workspace, 10)
+
+        self.assertNotIn(leaked_prefix, result.stderr)
+        self.assertNotIn(str(home), result.stderr)
+        self.assertNotIn("very-secret-codename-zulu", result.stderr)
+        self.assertNotIn(str(skill_dir), result.stderr)
+
+
 class CodexAdapterTests(unittest.TestCase):
     """Codex trigger support without a live codex binary."""
 
