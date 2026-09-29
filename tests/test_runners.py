@@ -10,6 +10,7 @@ import errno
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -279,6 +280,95 @@ class SubagentRunnerTests(unittest.TestCase):
     def test_agent_backends_are_registered_workspace_builders(self):
         for name in ("subagent", "codex", "claude", "gemini", "vibe"):
             self.assertIn(name, sb.WORKSPACE_BUILDERS)
+
+    def _stub_claude_workspace_probe(self, path: Path, probe_path: Path) -> Path:
+        """A fake `claude`: on every invocation, appends one JSON record to
+        probe_path with os.getcwd() and, for every workspace-relative
+        skills/... or inputs/... path the prompt lists, whether it exists
+        relative to that cwd."""
+        body = (
+            '#!/usr/bin/env python3\n'
+            'import sys, os, re, json\n'
+            'prompt = sys.stdin.read()\n'
+            'paths = re.findall(r"^- (skills/\\S+|inputs/\\S+)$", prompt, re.MULTILINE)\n'
+            'record = {"cwd": os.getcwd(), "paths": paths,\n'
+            '          "existing": {p: os.path.isfile(p) for p in paths}}\n'
+            f'probe = {json.dumps(str(probe_path))}\n'
+            'records = json.loads(open(probe).read()) if os.path.exists(probe) else []\n'
+            'records.append(record)\n'
+            'open(probe, "w").write(json.dumps(records))\n'
+            'env = {"type": "result", "result": "ok", "total_cost_usd": 0.01,\n'
+            '       "usage": {"input_tokens": 1, "output_tokens": 1}}\n'
+            'sys.stdout.write(json.dumps(env))\n'
+        )
+        path.write_text(body, encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        return path
+
+    def test_default_claude_backend_runs_in_the_prepared_workspace(self):
+        """run-subagent's default (Claude CLI) backend must invoke `claude` with
+        cwd set to the prepared workspace: build_task_prompt lists skill and
+        input files as workspace-relative paths (skills/..., inputs/...), so a
+        backend that runs elsewhere leaves those paths pointing at nothing."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            case = {"id": "case-1", "split": "tune", "kind": "behavior",
+                    "prompt": "Do the task.", "files": ["fixtures/input.txt"],
+                    "assertions": [{"name": "has-alpha", "type": "contains", "value": "alpha"}]}
+            manifest_path = make_eval_repo(root, skill_name="demo", cases=[case])
+            fixtures = manifest_path.parent / "fixtures"
+            fixtures.mkdir(parents=True)
+            (fixtures / "input.txt").write_text("fixture body", encoding="utf-8")
+            manifest = sb.validate_manifest(manifest_path)
+            rows = [r for r in sb.prepared_task_rows(manifest_path, manifest, split="tune")
+                    if r["variant"] == "with_skill"]
+            tasks_path = root / "tasks.jsonl"
+            tasks_path.write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")
+            probe = root / "probe.json"
+            stub = self._stub_claude_workspace_probe(root / "claude_stub.py", probe)
+
+            rc = sb.run_subagent(argparse.Namespace(
+                tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
+
+            self.assertEqual(rc, 0)
+            records = json.loads(probe.read_text(encoding="utf-8"))
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertTrue(record["paths"], "prompt listed no workspace-relative paths")
+            self.assertTrue(all(record["existing"].values()),
+                            f"workspace files unreachable from the backend's cwd: {record}")
+
+    def test_multiturn_default_claude_backend_reuses_one_workspace(self):
+        """Every turn of a multi-turn subagent task must see the same cwd, and
+        that cwd must be the same workspace the prompt's relative paths were
+        built against — not a per-turn or per-call throwaway directory."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tasks = make_tasks(root)[:1]
+            tasks[0]["turns"] = ["first turn", "second turn"]
+            tasks_path = root / "tasks.jsonl"
+            tasks_path.write_text(json.dumps(tasks[0]) + "\n", encoding="utf-8")
+            probe = root / "probe.json"
+            stub = self._stub_claude_workspace_probe(root / "claude_stub.py", probe)
+
+            # claude_run_metrics()'s "source"/"schema_version" fields fail
+            # validate_subagent_response's numeric-only usage check (a separate,
+            # pre-existing defect: the built-in Claude backend's every turn hits
+            # it, not just this test's). Stub it out so this test isolates the
+            # cwd-threading behavior under test from that unrelated failure.
+            with mock.patch.object(sb, "claude_run_metrics", return_value={"total_tokens": 1}):
+                rc = sb.run_subagent(argparse.Namespace(
+                    tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                    agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
+
+            self.assertEqual(rc, 0)
+            records = json.loads(probe.read_text(encoding="utf-8"))
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0]["cwd"], records[1]["cwd"])
+            self.assertTrue(records[0]["paths"], "turn 1 prompt listed no workspace-relative paths")
+            self.assertTrue(all(records[0]["existing"].values()),
+                            f"turn 1 workspace files unreachable: {records[0]}")
 
 
 class ToolReplayTests(unittest.TestCase):
