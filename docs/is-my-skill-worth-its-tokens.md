@@ -61,11 +61,10 @@ Now join footprint to lift. `token-overhead` reads the same paired runs the benc
 graded and reports lift-per-token and lift-per-dollar per skill:
 
 ```bash
-cd examples/demo-skill
 python3 ../../skill_benchmark.py prepare evals/shared-benchmark.json --split tune \
   --runs-per-variant 2 --out /tmp/demo-tasks.jsonl
 python3 ../../skill_benchmark.py run-codex --tasks /tmp/demo-tasks.jsonl \
-  --runs /tmp/demo-runs --codex-cmd "python3 stub_runner.py"
+  --runs /tmp/demo-runs --codex-cmd "python3 $(pwd)/stub_runner.py"
 python3 ../../skill_benchmark.py token-overhead evals/shared-benchmark.json \
   --runs /tmp/demo-runs --format markdown
 ```
@@ -85,13 +84,23 @@ Real output against the offline stub runs (2026-09-29):
 completeness through the same gate `benchmark` uses. That gate reports
 `deferred_judge_verdicts` for any manifest with an ungraded qualitative assertion, and
 `token-overhead` has no `--judge-results` flag to clear it — so this top-level row stays
-`None` for a manifest with a judge assertion whether or not you ran `judge` separately.
-The real numbers are one level down, in `reports[0].summary.observed`:
+`None` for a manifest with a judge assertion whether or not you ran `judge` separately,
+and it never fills in from a later run: read `reports[0].summary.observed` instead.
+
+```bash
+python3 ../../skill_benchmark.py token-overhead evals/shared-benchmark.json \
+  --runs /tmp/demo-runs \
+  | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["reports"][0]["summary"]["observed"], indent=2))'
+```
+
+Real output, trimmed to the fields that matter here:
 
 ```json
-"paired_runtime_rows": 4,
-"total_token_delta": {"mean": null, "n": 0},
-"objective_delta": {"mean": 1.0, "n": 4}
+{
+  "paired_runtime_rows": 4,
+  "total_token_delta": {"mean": null, "n": 0},
+  "objective_delta": {"mean": 1.0, "n": 4}
+}
 ```
 
 `objective_delta` is real: the skill wins every paired run (`with_skill` passes,
@@ -134,7 +143,11 @@ against *those* runs and the blocked deltas above become real numbers.
 
 ## Reading the numbers, symptom by symptom
 
-Once the runtime pairs are real, read the row for the keep/trim/cut decision:
+Once the runtime pairs are real, read the row for the keep/trim/cut decision. That row
+only ever fills in for a manifest with no unresolved `judge` assertion: `token-overhead`
+has no `--judge-results` flag, so a judge-bearing manifest like this demo's `c-review`
+case keeps the top-level row `None` forever, no matter how real the runs get. For that
+manifest, read `reports[0].summary.observed` (above) instead of the table:
 
 - **High `Lift per 1k total tokens` / `Lift per $`** → the footprint is earning its
   keep. Leave it. This is the case the skill exists for.

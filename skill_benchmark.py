@@ -11787,7 +11787,7 @@ def judge_task_id(case_id: str, variant: str, run_number: int, assertion: dict[s
         if "::" in segment:
             raise ValueError(
                 f"judge task {segment_name} cannot contain reserved delimiter '::'")
-    if type(run_number) is not int or run_number < 1:
+    if isinstance(run_number, bool) or not isinstance(run_number, int) or run_number < 1:
         raise ValueError("judge task run_number must be a positive integer")
     model_segment = f"{model}::" if model is not None else ""
     return f"{case_id}::{model_segment}{variant}::run-{run_number}::{label}"
@@ -19399,14 +19399,15 @@ def paired_run_bases(runs: Path, case_id: str, with_variant: str, without_varian
                 arms.append(pair_domain.ExperimentalArm(
                     key, pair_domain.ExperimentalArmId(arm), base))
         construction = pair_domain.construct_pairs(arms)
-        # ExperimentalPairKey.run_number is a RunNumber (an int subclass used to
-        # validate identity construction); callers downstream — grading, judge
-        # task ids — are typed against plain int, so unwrap it here rather than
-        # leaking the domain type across this function's boundary.
+        # pair.key.run_number is a RunNumber (an int subclass whose constructor
+        # already rejects bool and non-positive values); every downstream
+        # caller (grading, judge_task_id) accepts int and its subclasses, so
+        # this yields the RunNumber as-is rather than unwrapping it for no
+        # consumer.
         for pair in construction.pairs:
-            yield model, int(pair.key.run_number), pair.with_skill.payload, pair.without_skill.payload
+            yield model, pair.key.run_number, pair.with_skill.payload, pair.without_skill.payload
         for blocked in construction.blocked:
-            run_number = int(blocked.key.run_number)
+            run_number = blocked.key.run_number
             yield (model, run_number,
                    bases.get((run_number, "with_skill")),
                    bases.get((run_number, "without_skill")))
@@ -19649,8 +19650,15 @@ def paired_token_overhead_report(
         if benchmark_surface.get("availability") != "complete":
             observed_pairs = pairs
             report_pairs = []
+            # The benchmark surface already names its own blocking reason
+            # (e.g. "deferred_judge_verdicts", "answer_design_incomplete") on
+            # whichever aggregate it invalidated; report that instead of a
+            # generic label so a reader can tell a stale judge run apart from
+            # missing answer-run coverage.
+            surface_reason = (benchmark_surface.get("qualitative_by_visibility") or {}).get(
+                "design_coverage_reason") or "answer_run_coverage_incomplete"
             observed_summary = invalidate_design_aggregate(
-                observed_summary, "answer_run_coverage_incomplete")
+                observed_summary, surface_reason)
     return {
         "generated_at": int(time.time()),
         "manifest": str(manifest_path),
