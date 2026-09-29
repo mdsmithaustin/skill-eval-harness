@@ -2719,7 +2719,7 @@ class SubjectVisiblePromptTests(unittest.TestCase):
 
             instr = sb.variant_instruction(row["variant"], manifest)
             prompt = sb.build_task_prompt(pt, list(pt.skill_paths), [])
-            task_json = sb.safe_task_json(pt, manifest, task_name="t", upload_files=[])
+            task_json = sb.safe_task_json(pt, manifest, upload_files=[])
             # task_json["variant"] and the "ablation" key name legitimately disclose
             # structure for a non-blind arm (test_safe_task_json_model_visible_variant_
             # is_owned_by_the_object covers that) — the leak under test is in the
