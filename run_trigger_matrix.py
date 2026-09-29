@@ -106,7 +106,7 @@ from skill_benchmark import (
     build_vibe_cli_argv,
     canonical_json_sha256,
     codex_env_for_home,
-    codex_host_skill_paths,
+    codex_host_path_redactor,
     codex_rollout_skill_loads,
     codex_trigger_context_isolation_args,
     detect_trigger_detection,
@@ -559,21 +559,18 @@ class CodexAdapter(AgentAdapter):
         if result.observation_complete:
             result = result.with_provider_error(
                 codex_stream_protocol_error(result.stdout))
-        # A config-load failure (an unrecognized -c key, or the TOML bug this
-        # adapter works around) can put the whole skills.config argv value,
-        # host skill paths included, into stderr verbatim. Redact those paths
-        # before the row is ever recorded, the same way workspace/ambient
-        # secrets are redacted for every other field.
-        host_skill_paths = codex_host_skill_paths()
-        if host_skill_paths:
-            result = result.with_wire_text(
-                stdout=redact_sensitive_text(result.stdout, host_skill_paths),
-                stderr=redact_sensitive_text(result.stderr, host_skill_paths),
-                provider_error=(
-                    redact_sensitive_text(result.provider_error, host_skill_paths)
-                    if result.provider_error is not None else None
-                ),
-            )
+        # Codex names host skills in its own errors (a skill that fails to
+        # load, a directory it cannot scan, a rejected skills.config echoed
+        # back), so strip those paths before the row is ever recorded.
+        redact_host_paths = codex_host_path_redactor()
+        result = result.with_wire_text(
+            stdout=redact_host_paths(result.stdout),
+            stderr=redact_host_paths(result.stderr),
+            provider_error=(
+                redact_host_paths(result.provider_error)
+                if result.provider_error is not None else None
+            ),
+        )
         return result.with_provider_payload(rollout).with_metadata(
             {k: v for k, v in meta.items() if k != "codex_home"},
             codex_home_outside_workdir=True,

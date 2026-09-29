@@ -11190,23 +11190,96 @@ def codex_structured_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
 CODEX_CONTEXT_ISOLATION_ARGS = ("-c", "skills.include_instructions=false", "--disable", "apps")
 
 
-def codex_host_skill_paths() -> list[str]:
-    """Every `SKILL.md` under the operator's `~/.agents/skills`, sorted.
+def _walk_codex_host_skills() -> tuple[Path, list[str], list[str]]:
+    """The host skill root, every `SKILL.md` under it (sorted), and every
+    directory walked.
 
     Codex finds nested and symlinked skills, so follow links, but visit each
     real directory once so a symlink cycle cannot hang the run."""
+    root = Path.home() / ".agents" / "skills"
     host_skills: list[str] = []
+    directories: list[str] = []
     walked: set[str] = set()
-    for directory, subdirs, files in os.walk(Path.home() / ".agents" / "skills", followlinks=True):
+    for directory, subdirs, files in os.walk(root, followlinks=True):
         real = os.path.realpath(directory)
         if real in walked:
             subdirs.clear()
             continue
         walked.add(real)
+        directories.append(directory)
         if "SKILL.md" in files:
             host_skills.append(str(Path(directory) / "SKILL.md"))
     host_skills.sort()
-    return host_skills
+    return root, host_skills, directories
+
+
+def codex_host_skill_paths() -> list[str]:
+    """Every `SKILL.md` under the operator's `~/.agents/skills`, sorted."""
+    return _walk_codex_host_skills()[1]
+
+
+# codex-cli 0.156.1 leaves these unescaped in a `file://` URL and drops tab,
+# newline, and carriage return; everything else outside [A-Za-z0-9_.-] is
+# percent-encoded as UTF-8.
+_CODEX_FILE_URL_SAFE = "/[]^|~';:!$&()*+,=@"
+_CODEX_URL_DROPPED = {ord("\t"): None, ord("\n"): None, ord("\r"): None}
+# A host path ends at the next character Codex puts after one: a quote
+# (optionally backslash-escaped), whitespace, `]`, or `,`. A `:` right before
+# it is Codex's message separator, not the path.
+_CODEX_PATH_TAIL = r'[^\s"\],]*?(?=:?\\*(?:[\s"\],]|$))'
+
+
+def _rust_debug_escape(text: str) -> str:
+    """`text` as Rust's `{:?}` prints it inside a quoted string, which is how a
+    Codex config error echoes a rejected `-c` value."""
+    escapes = {"\\": "\\\\", '"': '\\"', "\t": "\\t", "\n": "\\n", "\r": "\\r", "\0": "\\0"}
+    return "".join(escapes.get(ch) or (ch if ch.isprintable() else f"\\u{{{ord(ch):x}}}") for ch in text)
+
+
+def _codex_path_spellings(path: str) -> set[str]:
+    """Every way Codex has been seen to print `path`: raw, TOML- or
+    JSON-escaped, any of those again through Rust's `{:?}`, and as a
+    `file://` URL."""
+    encoded = {path, toml_basic_string(path)[1:-1], json.dumps(path)[1:-1],
+               json.dumps(path, ensure_ascii=False)[1:-1]}
+    url = "file://" + urllib.parse.quote(path.translate(_CODEX_URL_DROPPED), safe=_CODEX_FILE_URL_SAFE)
+    return encoded | {_rust_debug_escape(text) for text in encoded} | {url}
+
+
+@_dataclass(frozen=True)
+class CodexHostPathRedactor:
+    """Removes host skill paths from Codex output.
+
+    `roots` are the spellings of `~/.agents/skills` and its realpath: any span
+    starting with one is redacted up to the next path delimiter, which covers
+    paths Codex prints in a form nobody derived. `paths` are the spellings of
+    each walked directory, each `SKILL.md`, and their realpaths, which also
+    covers a path with a space or quote in it and a symlink target outside the
+    root. Both are sorted longest first so a whole path wins over its prefix."""
+
+    roots: tuple[str, ...]
+    paths: tuple[str, ...]
+
+    def __call__(self, text: str) -> str:
+        present = [s for s in self.paths if s in text]
+        if not present and not any(s in text for s in self.roots):
+            return text
+        prefixes = sorted([*present, *self.roots], key=len, reverse=True)
+        pattern = "(?:" + "|".join(map(re.escape, prefixes)) + ")" + _CODEX_PATH_TAIL
+        return re.sub(pattern, "[REDACTED]", text)
+
+
+def codex_host_path_redactor() -> CodexHostPathRedactor:
+    root, host_skills, directories = _walk_codex_host_skills()
+    roots = {str(root), os.path.realpath(root)}
+    paths: set[str] = set()
+    for path in {*host_skills, *directories}:
+        for spelled in {path, os.path.realpath(path)} - roots:
+            paths |= _codex_path_spellings(spelled)
+    root_spellings: set[str] = set().union(*(_codex_path_spellings(r) for r in roots))
+    return CodexHostPathRedactor(
+        roots=tuple(sorted(root_spellings, key=len, reverse=True)),
+        paths=tuple(sorted(paths - root_spellings, key=len, reverse=True)))
 
 
 def toml_basic_string(value: str) -> str:
