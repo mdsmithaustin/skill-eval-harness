@@ -2692,6 +2692,77 @@ class SubjectVisiblePromptTests(unittest.TestCase):
         self.assert_organic(body)
 
 
+class JettyModelVisibleTaskTests(unittest.TestCase):
+    """The Jetty runbook tells the agent to read the uploaded task JSON, so that
+    file and its sandbox path are model-visible. They must carry only what the
+    runbook uses and must not name the case, split, run, or experiment arm."""
+
+    ABL = {"id": "no-rp", "removed_component": "regression-proof", "mechanism": "section",
+           "class": "instructions", "target": {"heading": "## Regression-proof requirement"}}
+    CASE_ID = "pos-security-review"
+
+    def export(self, root: Path) -> dict[str, dict]:
+        p = make_eval_repo(
+            root, skill_name="good-pr", skill_text=SKILL_FIXTURE,
+            cases=[{"id": self.CASE_ID, "split": "holdout", "kind": "behavior",
+                    "prompt": "Review the diff.",
+                    "assertions": [{"name": "a", "type": "contains", "value": "x"}]}],
+            ablations=[self.ABL],
+            extra={"old_skill_paths": ["old-skills/good-pr/SKILL.md"]},
+        )
+        old = root / "repo" / "old-skills" / "good-pr" / "SKILL.md"
+        old.parent.mkdir(parents=True)
+        old.write_text(SKILL_FIXTURE, encoding="utf-8")
+        out = root / "jetty.jsonl"
+        rc = sb.export_jetty(SimpleNamespace(
+            manifest=str(p), split=None, runs_per_variant=1,
+            include_old_skill=True, include_ablations=True, allow_missing_prompts=False,
+            jetty_collection="skill-evals", jetty_task_prefix=None,
+            jetty_agent="claude-code", jetty_model="claude-sonnet-4-6",
+            jetty_model_provider="anthropic", jetty_snapshot="python312-uv",
+            use_trial_keys=False, out=str(out), dry_run=False,
+            ablation_dir=str(root / "abl"),
+        ))
+        self.assertEqual(rc, 0)
+        payloads = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+        return {row["harness"]["variant"]: row for row in payloads}
+
+    @staticmethod
+    def task_item(payload: dict) -> dict:
+        return next(f for f in payload["upload_plan"]["files"] if f["role"] == "task")
+
+    def test_task_json_carries_only_runbook_fields_and_hides_the_arm(self):
+        with tempfile.TemporaryDirectory() as td:
+            by_variant = self.export(Path(td))
+        self.assertEqual(
+            sorted(by_variant),
+            ["ablation:no-rp", "old_skill", "with_skill", "without_skill"])
+        self.assertEqual(by_variant["ablation:no-rp"]["harness"]["ablation"]["mode"], "materialized")
+        for variant, payload in by_variant.items():
+            item = self.task_item(payload)
+            task_json = json.loads(item["content"])
+            self.assertEqual(
+                sorted(task_json), ["input_files", "instruction", "prompt", "skill_files"], variant)
+            self.assertRegex(item["remote_path_hint"], r"\Atasks/arm-[0-9a-f]{10}\.json\Z", variant)
+            self.assertEqual(
+                payload["jetty_request"]["jetty"]["template_variables"]["task_json"],
+                "/app/assets/" + item["remote_path_hint"], variant)
+            self.assertRegex(
+                payload["upload_plan"]["bundle"]["archive_name"], r"\Aarm-[0-9a-f]{10}\.zip\Z", variant)
+            model_visible = "\n".join([
+                item["content"],
+                *(f["remote_path_hint"] for f in payload["upload_plan"]["files"]),
+                json.dumps(payload["jetty_request"]["jetty"]["template_variables"]),
+                payload["upload_plan"]["bundle"]["archive_name"],
+            ]).lower()
+            for leak in (self.CASE_ID, "holdout", "with-skill", "without-skill", "old-skill",
+                         "with_skill", "without_skill", "old_skill", "ablation", "no-rp"):
+                self.assertNotIn(leak, model_visible, f"{variant} leaks {leak!r}")
+            SubjectVisiblePromptTests().assert_organic(item["content"])
+        task_paths = {self.task_item(p)["remote_path_hint"] for p in by_variant.values()}
+        self.assertEqual(len(task_paths), 4)
+
+
 class MaterializeCarriesTypedArmTests(unittest.TestCase):
     """Move A: materialize_declared_ablations carries MaterializedArm objects, not
     re-parsed dicts, so prepare reads typed provenance instead of indexing string
