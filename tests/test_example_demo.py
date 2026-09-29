@@ -76,22 +76,32 @@ class DemoExampleTests(unittest.TestCase):
 
 
 class DemoReadmeTests(unittest.TestCase):
-    """The README's `prepare --runs-per-variant` walkthrough claims each ablation
-    arm reports `expected_regression_confirmed`. That claim is only true if the
-    documented run count actually clears the per-case significance gate."""
+    """Any doc whose demo walkthrough claims an ablation confirms a regression at a
+    specific `prepare --runs-per-variant` count is only honest if that count actually
+    clears the per-case significance gate. Each doc here makes exactly that claim for
+    its first --runs-per-variant occurrence, so a drift between the two can't ship
+    silently."""
 
-    def test_documented_runs_per_variant_clears_significance_gate(self):
-        text = (DEMO / "README.md").read_text(encoding="utf-8")
+    def _assert_documented_runs_per_variant_clears_significance_gate(self, path: Path, label: str) -> None:
+        text = path.read_text(encoding="utf-8")
         match = re.search(r"--runs-per-variant (\d+)", text)
-        self.assertIsNotNone(match, "README should document a --runs-per-variant value")
+        self.assertIsNotNone(match, f"{label} should document a --runs-per-variant value")
         documented = int(match.group(1))
         minimum = _min_runs_for_significance()
         self.assertGreaterEqual(
             documented, minimum,
-            f"README documents --runs-per-variant {documented}, but a case needs "
+            f"{label} documents --runs-per-variant {documented}, but a case needs "
             f">= {minimum} matched pairs to clear the significance gate and report "
             "expected_regression_confirmed",
         )
+
+    def test_documented_runs_per_variant_clears_significance_gate(self):
+        self._assert_documented_runs_per_variant_clears_significance_gate(
+            DEMO / "README.md", "examples/demo-skill/README.md")
+
+    def test_did_my_skill_edit_regress_doc_runs_per_variant_clears_significance_gate(self):
+        self._assert_documented_runs_per_variant_clears_significance_gate(
+            ROOT / "docs" / "did-my-skill-edit-regress.md", "docs/did-my-skill-edit-regress.md")
 
 
 class DemoJudgeTests(unittest.TestCase):
