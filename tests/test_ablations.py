@@ -786,8 +786,7 @@ class AblationRunnerIntegrationTests(unittest.TestCase):
             skill_md = next(f for f in skill_files if f["remote_path_hint"].endswith("SKILL.md"))
             self.assertNotIn("Regression-proof requirement", Path(skill_md["local_path"]).read_text(encoding="utf-8"))
             task_json = json.loads(next(f for f in payload["upload_plan"]["files"] if f["role"] == "task")["content"])
-            self.assertEqual(task_json["variant"], "with_skill")              # blinded: model sees with_skill
-            self.assertNotIn("ablation", task_json)                          # no hypothesis leaked to the model
+            self.assertEqual(sorted(task_json), ["input_files", "instruction", "prompt", "skill_files"])
             self.assertEqual(payload["harness"]["variant"], "ablation:no-rp")           # truth in harness-only record
             self.assertEqual(payload["harness"]["ablation"]["mode"], "materialized")
 
@@ -2540,18 +2539,16 @@ class PreparedTaskTests(unittest.TestCase):
                                input_files=(), run_dir="c/ablation:no-rp", instruction="...directive...",
                                prompt="Review.", tags=(), ablation=sim)
 
-    def test_materialized_arm_presents_as_with_skill(self):
+    def test_materialized_arm_is_blind(self):
         pt = self.mat_row()
         self.assertTrue(pt.is_materialized_ablation)
         self.assertTrue(pt.is_blind)
-        self.assertEqual(pt.model_facing_variant(), "with_skill")             # experiment-blind
         self.assertEqual(pt.harness_record()["variant"], "ablation:no-rp")    # truth on the row
 
     def test_instruction_simulated_arm_is_transparent(self):
         pt = self.sim_row()
         self.assertFalse(pt.is_materialized_ablation)
         self.assertFalse(pt.is_blind)
-        self.assertEqual(pt.model_facing_variant(), "ablation:no-rp")         # model is told what to simulate
 
     def test_upload_token_is_opaque_for_any_ablation(self):
         for pt in (self.mat_row(), self.sim_row()):
@@ -2561,8 +2558,7 @@ class PreparedTaskTests(unittest.TestCase):
 
     def test_no_model_facing_method_leaks_truth_for_a_blind_arm(self):
         pt = self.mat_row()
-        for out in (pt.model_facing_variant(), pt.upload_token()):
-            self.assertNotIn("no-rp", out)
+        self.assertNotIn("no-rp", pt.upload_token())
         self.assertIn("no-rp", pt.harness_record()["variant"])               # truth reachable only on the harness side
 
     def test_round_trips_through_the_row(self):
@@ -2617,13 +2613,11 @@ class ConsumersTakeAPreparedTaskTests(unittest.TestCase):
         sim = sb.build_task_prompt(self.sim_pt(), ["skills/root-0/SKILL.md"], [])
         self.assertIn("simulate this ablation", sim)       # instruction-simulated is told what to do
 
-    def test_safe_task_json_model_visible_variant_is_owned_by_the_object(self):
-        mat = sb.safe_task_json(self.mat_pt(), self.MANIFEST, task_name="t", upload_files=[])
-        self.assertEqual(mat["variant"], "with_skill")     # blinded via pt.model_facing_variant()
-        self.assertNotIn("ablation", mat)                  # no hypothesis leaked to the model
-        sim = sb.safe_task_json(self.sim_pt(), self.MANIFEST, task_name="t", upload_files=[])
-        self.assertEqual(sim["variant"], "ablation:no-rp")                          # non-blind: true variant shown
-        self.assertEqual(sim["ablation"]["removed_component"], "regression-proof")  # directive from the manifest
+    def test_safe_task_json_hides_the_arm_unless_the_arm_is_told_to_simulate(self):
+        mat = sb.safe_task_json(self.mat_pt(), self.MANIFEST, upload_files=[])
+        self.assertEqual(sorted(mat), ["input_files", "instruction", "prompt", "skill_files"])
+        sim = sb.safe_task_json(self.sim_pt(), self.MANIFEST, upload_files=[])
+        self.assertEqual(sim["ablation"]["removed_component"], "regression-proof")  # non-blind: directive from the manifest
 
 
 class SubjectVisiblePromptTests(unittest.TestCase):

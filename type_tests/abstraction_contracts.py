@@ -152,7 +152,6 @@ def prepared_task_identity_is_precise(task: PreparedTask) -> None:
     _kind: CaseKind = task.kind
     _variant: ExecutionVariant = task.variant_truth
     _run_number: RunNumber = task.run_number
-    _visible_variant: ExecutionVariant = task.model_facing_variant()
 
 
 def experimental_pair_identity_is_precise(key: ExperimentalPairKey) -> None:

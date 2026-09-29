@@ -241,17 +241,17 @@ Payload shape:
       "timeout_hint": 60,
       "template_variables": {
         "results_dir": "/app/results",
-        "task_json": "/app/assets/tasks/good-pr-pos-security-meaningless-test-with-skill-1.json"
+        "task_json": "/app/assets/tasks/arm-8e16b4f628.json"
       },
       "file_paths": [
-        "upload://good-pr-pos-security-meaningless-test-with-skill-1/bundle/zip"
+        "upload://arm-8e16b4f628/bundle/zip"
       ]
     }
   },
   "upload_plan": {
     "bundle": {
-      "placeholder": "upload://good-pr-pos-security-meaningless-test-with-skill-1/bundle/zip",
-      "archive_name": "good-pr-pos-security-meaningless-test-with-skill-1.zip"
+      "placeholder": "upload://arm-8e16b4f628/bundle/zip",
+      "archive_name": "arm-8e16b4f628.zip"
     },
     "files": [
       {"local_path": "/abs/repo/evals/fixtures/security-pr/diff.patch", "remote_path_hint": "fixtures/diff.patch", "sandbox_path": "/app/assets/fixtures/diff.patch", "role": "fixture", "private": false}
@@ -269,6 +269,14 @@ JSON's `input_files`/`skill_files`) are therefore deterministic
 `/app/assets/...` paths baked at export time; the single `file_paths`
 placeholder is the only run-time substitution, replaced by the zip's storage
 path after upload.
+
+Upload names are opaque. The task file, bundle archive, and upload placeholders
+use `PreparedTask.upload_token()`, a deterministic `arm-<10 hex>` token hashed
+from skill, case, arm, and run, with the same rule for every arm. The agent reads
+the task file by that path, so the path must not name the case, split, or arm.
+`jetty.task` keeps the descriptive `<prefix>-<case>-<arm>-<run>` form because
+Jetty uses it only for trajectory routes and its UI. The runbook and
+`template_variables` never pass it into the sandbox.
 
 Use `stream: false` by default for simplicity. Streaming can be added after non-streaming import is stable.
 
@@ -447,15 +455,22 @@ Execute one skill task exactly once. Write the final assistant answer and metada
 | `old_skill` | include old only | include | executor-only | requires `old_skill_paths` |
 | `ablation:<id>` | include materialized ablated skill or explicit approximation | include | executor-only | approximation must be labeled |
 
-`task.json` should include only generation-safe fields:
+`task.json` is model-visible and carries only what the runbook reads:
 
-- harness identity;
-- prompt/user task;
-- variant;
-- input file paths;
-- allowed skill file paths for mounted-skill variants;
-- no answer key;
-- no judge rubric.
+```json
+{
+  "instruction": "Use the good-pr skill. ...",
+  "prompt": "<user task>",
+  "input_files": ["/app/assets/fixtures/diff.patch"],
+  "skill_files": ["/app/assets/skills/good-pr/good-pr/SKILL.md"]
+}
+```
+
+`skill_files` is empty for `without_skill`. An instruction-simulated ablation
+also carries its `ablation` directive, because that arm is told what to
+simulate. Case, split, kind, arm, run number, and tags stay in the payload's
+`harness` block. `run-jetty` and `import-jetty-results` read identity only from
+there. The task file never carries an answer key or judge rubric.
 
 ## Secrets policy
 

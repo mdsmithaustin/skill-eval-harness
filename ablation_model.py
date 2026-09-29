@@ -531,6 +531,10 @@ def ablation_record_from_dict(d: dict[str, Any]) -> AblationRecord:
 OPAQUE_TOKEN_PREFIX = "arm-"
 
 
+def opaque_token(identity: str) -> str:
+    return OPAQUE_TOKEN_PREFIX + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
+
+
 @dataclass(frozen=True)
 class Arm:
     """One experimental arm. `variant_truth` (e.g. 'ablation:no-rp') is the
@@ -551,7 +555,7 @@ class Arm:
     def upload_token(self) -> str:
         if not self.blind:
             return self.variant_truth
-        return OPAQUE_TOKEN_PREFIX + hashlib.sha256(self.variant_truth.encode("utf-8")).hexdigest()[:10]
+        return opaque_token(self.variant_truth)
 
     # --- harness-only surface (truth) ---
     def harness_record(self) -> dict[str, Any]:
@@ -768,16 +772,12 @@ class PreparedTask:
         return self._experiment_arm().blind
 
     # --- model-facing surface (blinded) ---
-    def model_facing_variant(self) -> ExecutionVariant:
-        """The variant the model may see: with_skill for a blind (materialized) arm,
-        otherwise the true variant (instruction-simulated tells the model what to do)."""
-        return ExecutionVariant.parse(self._experiment_arm().model_visible_variant())
-
     def upload_token(self) -> str:
-        """Opaque, deterministic token for any ablation (path hygiene): a
-        model-visible upload path never embeds 'ablation:<id>', even for an
-        instruction-simulated arm whose CONTENT reveals the hypothesis by design."""
-        return Arm(variant_truth=self.variant_truth, blind=self.is_ablation).upload_token()
+        """Opaque, deterministic, per-task name for model-visible upload paths.
+        Every arm gets the same rule, so a path never reveals the skill, case,
+        arm, or run, and no arm is special-cased."""
+        return opaque_token("\0".join(
+            (self.skill_name, self.case_id, self.variant_truth, str(self.run_number))))
 
     # --- harness-only surface (truth) ---
     def harness_record(self) -> dict[str, Any]:
