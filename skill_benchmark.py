@@ -1446,10 +1446,7 @@ def variant_instruction(variant: str, manifest: dict[str, Any], repo_root: Path 
             "If the skill defines a required output contract, follow it exactly."
         )
     if variant == "without_skill":
-        return (
-            f"Do not read or use the {name} skill or its references. "
-            "Use only your general capabilities and the task context."
-        )
+        return "Complete the task using the provided context."
     if variant == "old_skill":
         return variant_instruction("with_skill", manifest, repo_root)
     if is_ablation_variant(variant):
@@ -8976,9 +8973,10 @@ def build_task_prompt(pt: PreparedTask, skill_paths: list[str] | None = None, in
     if not isinstance(pt, PreparedTask):
         raise TypeError("build_task_prompt requires a validated PreparedTask")
     file_note = "\n".join(f"- {p}" for p in (input_files or [])) if input_files else "- none"
-    if pt.variant_truth == "without_skill":
-        skill_note = "Do not use any skill. No skill files are present in this workspace."
-    else:
+    # The runners already keep host skills out of the workspace and context, so
+    # a without_skill note could only tell the model which arm it is in.
+    skill_note = ""
+    if pt.variant_truth != "without_skill":
         listed = "\n".join(f"- {p}" for p in (skill_paths or [])) if skill_paths else "- none"
         skill_note = f"Read and follow the skill file(s) below (including referenced files when relevant), then do the task:\n{listed}"
         # The PreparedTask owns the blind decision: a materialized arm is blind (the
@@ -8990,8 +8988,8 @@ def build_task_prompt(pt: PreparedTask, skill_paths: list[str] | None = None, in
             directive = pt.instruction or f"Ablation for this run: ignore/remove the component '{rc}' from the skill guidance."
             skill_note += f"\n\n{directive}"
     return (
-        f"{skill_note}\n\n"
-        f"Task prompt:\n{pt.prompt}\n\n"
+        (f"{skill_note}\n\n" if skill_note else "")
+        + f"Task prompt:\n{pt.prompt}\n\n"
         f"Input files available to inspect:\n{file_note}\n\n"
         "Return the final answer."
     )

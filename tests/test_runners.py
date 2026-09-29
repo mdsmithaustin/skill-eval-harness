@@ -86,7 +86,7 @@ class SubagentRunnerTests(unittest.TestCase):
                 # The subagent now re-serializes its records to trace.jsonl (the
                 # shared writer's raw-trace artifact), like every other runner.
                 self.assertTrue((base / "trace.jsonl").exists())
-        without_prompt = next(p for p in seen_prompts if "Do not use any skill" in p)
+        without_prompt = next(p for p in seen_prompts if not p.startswith("Read and follow"))
         self.assertNotIn("skills/", without_prompt)
 
     def test_subagent_failure_writes_failure_marker(self):

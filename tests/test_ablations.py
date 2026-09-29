@@ -1760,7 +1760,7 @@ class AblationReviewFixesTests(unittest.TestCase):
                 sk, _ = sb.build_skill_workspace(self.task({**base, "variant": "without_skill"}), ws)
                 self.assertEqual(sk, [])                       # without_skill mounts no skill
                 self.assertFalse((ws / "skills").exists())
-                self.assertIn("Do not use any skill", sb.build_task_prompt(self.task({"variant": "without_skill", "prompt": "x"}), sk, []))
+                self.assertNotIn("skills/", sb.build_task_prompt(self.task({"variant": "without_skill", "prompt": "x"}), sk, []))
             with tempfile.TemporaryDirectory() as w2:
                 ws = Path(w2)
                 sk, _ = sb.build_skill_workspace(self.task({**base, "variant": "with_skill"}), ws)
