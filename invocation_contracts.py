@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -158,7 +158,7 @@ class ProcessInvocationPlan:
     environment: Mapping[str, str] | None = None
     # Applied to the whole captured stdout and stderr before the owner caps
     # them, so a redacted span can never be cut in half first.
-    redact_output: Callable[[str], str] | None = None
+    redact_output: Callable[[str], str] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.argv, tuple):
