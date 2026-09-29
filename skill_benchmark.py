@@ -1462,8 +1462,11 @@ def variant_instruction(variant: str, manifest: dict[str, Any], repo_root: Path 
         if arm.blind:
             return variant_instruction(arm.model_visible_variant(), manifest, repo_root)
         # Model-visible directive: tell it what to ignore, not what regression the
-        # harness expects — that hypothesis stays on the harness side (manifest,
-        # reports, InstructionSimulated.expected_regressions) so grading stays blind.
+        # harness expects — that hypothesis lives only in the manifest's
+        # expected_regressions and audit-manifest's findings. It never reaches this
+        # directive, and build_ablation_regression_report does not confirm it for an
+        # instruction-simulated arm (only a materialized arm has the components that
+        # entry requires).
         return (
             f"Use the {name} skill, but ignore this part of its guidance: "
             f"{ab['removed_component']}."
@@ -8994,9 +8997,10 @@ def build_task_prompt(pt: PreparedTask, skill_paths: list[str] | None = None, in
         # with_skill); an instruction_simulated arm is NOT blind (the full skill is on
         # disk, so the regression occurs only if we explicitly add the directive).
         if pt.is_ablation and not pt.is_blind:
-            rc = pt.ablation.removed_component if isinstance(pt.ablation, InstructionSimulated) and pt.ablation.removed_component else ""
-            directive = pt.instruction or f"Use the {pt.skill_name} skill, but ignore this part of its guidance: {rc}."
-            skill_note += f"\n\n{directive}"
+            # PreparedTask.__post_init__ rejects a non-blind ablation row with an
+            # empty instruction, so pt.instruction is always the real directive here
+            # — no fallback that could render a blank removed_component.
+            skill_note += f"\n\n{pt.instruction}"
     return (
         (f"{skill_note}\n\n" if skill_note else "")
         + f"Task prompt:\n{pt.prompt}\n\n"

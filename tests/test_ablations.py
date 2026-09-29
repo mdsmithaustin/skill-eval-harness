@@ -1776,10 +1776,10 @@ class AblationReviewFixesTests(unittest.TestCase):
         sim = {
             "variant": "ablation:no-rp", "prompt": "Review.",
             "ablation": {"id": "no-rp", "mode": "instruction_simulated", "population": "answer", "removed_component": "regression-proof"},
-            "instruction": "Use the good-pr skill, but simulate this ablation: remove/ignore regression-proof. Expected regression to watch for: accepts weak tests.",
+            "instruction": "Use the good-pr skill, but ignore this part of its guidance: regression-proof.",
         }
         sim_prompt = sb.build_task_prompt(self.task(sim), skills, [])
-        self.assertIn("simulate this ablation", sim_prompt)
+        self.assertIn("ignore this part of its guidance", sim_prompt)
         self.assertIn("regression-proof", sim_prompt)
         # materialized: the on-disk skill is already altered -> blind, no hypothesis text.
         mat = {
@@ -1792,7 +1792,7 @@ class AblationReviewFixesTests(unittest.TestCase):
         mat_prompt = sb.build_task_prompt(self.task(mat), skills, [])
         with_prompt = sb.build_task_prompt(self.task({"variant": "with_skill", "prompt": "Review.", "instruction": "x"}), skills, [])
         self.assertNotIn("simulate", mat_prompt)
-        self.assertNotIn("ignore/remove", mat_prompt)
+        self.assertNotIn("ignore this part of its guidance", mat_prompt)
         self.assertNotIn("regression-proof", mat_prompt)
         # blinded materialized prompt is identical to the with_skill prompt
         self.assertEqual(mat_prompt, with_prompt)
@@ -2471,8 +2471,7 @@ class AblationRecordTests(unittest.TestCase):
             am.ablation_record_from_dict({"id": "x", "mode": "make-believe"})   # no third inhabitant
 
     def test_instruction_simulated_is_not_a_provenance(self):
-        sim = am.InstructionSimulated(id="x", population="answer", removed_component="rp",
-                                      expected_regressions=("accepts weak tests",))
+        sim = am.InstructionSimulated(id="x", population="answer", removed_component="rp")
         self.assertNotIsInstance(sim, am.Provenance)        # cannot be read as a materialization
         d = sim.as_dict()
         self.assertEqual(d["mode"], "instruction_simulated")
@@ -2619,14 +2618,14 @@ class ConsumersTakeAPreparedTaskTests(unittest.TestCase):
         return am.PreparedTask(case_id="c1", split="tune", kind="behavior", variant_truth="ablation:no-rp",
                                run_number=1, skill_name="good-pr", repo_root="/r", skill_paths=("skills/root-0/SKILL.md",),
                                input_files=(), run_dir="c1/ablation:no-rp",
-                               instruction="Use the good-pr skill, but simulate this ablation: drop rp.",
+                               instruction="Use the good-pr skill, but ignore this part of its guidance: rp.",
                                prompt="Review.", tags=(), ablation=sim)
 
     def test_codex_prompt_consumes_preparedtask_and_blinds_materialized(self):
         mat = sb.build_task_prompt(self.mat_pt(), ["skills/root-0/SKILL.md"], [])
-        self.assertNotIn("simulate", mat)                  # materialized arm is blind: no hypothesis text
+        self.assertNotIn("ignore this part of its guidance", mat)  # materialized arm is blind: no hypothesis text
         sim = sb.build_task_prompt(self.sim_pt(), ["skills/root-0/SKILL.md"], [])
-        self.assertIn("simulate this ablation", sim)       # instruction-simulated is told what to do
+        self.assertIn("ignore this part of its guidance", sim)     # instruction-simulated is told what to do
 
     def test_safe_task_json_hides_the_arm_unless_the_arm_is_told_to_simulate(self):
         mat = sb.safe_task_json(self.mat_pt(), self.MANIFEST, upload_files=[])
