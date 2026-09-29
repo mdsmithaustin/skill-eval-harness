@@ -10,6 +10,7 @@ import errno
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -279,6 +280,152 @@ class SubagentRunnerTests(unittest.TestCase):
     def test_agent_backends_are_registered_workspace_builders(self):
         for name in ("subagent", "codex", "claude", "gemini", "vibe"):
             self.assertIn(name, sb.WORKSPACE_BUILDERS)
+
+    def _stub_claude_workspace_probe(self, path: Path, probe_path: Path) -> Path:
+        """A fake `claude`: on every invocation, appends one JSON record to
+        probe_path with os.getcwd() and, for every workspace-relative
+        skills/... or inputs/... path the prompt lists, whether it exists
+        relative to that cwd."""
+        body = (
+            '#!/usr/bin/env python3\n'
+            'import sys, os, re, json\n'
+            'prompt = sys.stdin.read()\n'
+            'paths = re.findall(r"^- (skills/\\S+|inputs/\\S+)$", prompt, re.MULTILINE)\n'
+            'record = {"cwd": os.getcwd(), "paths": paths,\n'
+            '          "existing": {p: os.path.isfile(p) for p in paths}}\n'
+            f'probe = {json.dumps(str(probe_path))}\n'
+            'records = json.loads(open(probe).read()) if os.path.exists(probe) else []\n'
+            'records.append(record)\n'
+            'open(probe, "w").write(json.dumps(records))\n'
+            'env = {"type": "result", "result": "ok", "total_cost_usd": 0.01,\n'
+            '       "usage": {"input_tokens": 1, "output_tokens": 1}}\n'
+            'sys.stdout.write(json.dumps(env))\n'
+        )
+        path.write_text(body, encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        return path
+
+    def test_default_claude_backend_runs_in_the_prepared_workspace(self):
+        """run-subagent's default (Claude CLI) backend must invoke `claude` with
+        cwd set to the prepared workspace: build_task_prompt lists skill and
+        input files as workspace-relative paths (skills/..., inputs/...), so a
+        backend that runs elsewhere leaves those paths pointing at nothing."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            case = {"id": "case-1", "split": "tune", "kind": "behavior",
+                    "prompt": "Do the task.", "files": ["fixtures/input.txt"],
+                    "assertions": [{"name": "has-alpha", "type": "contains", "value": "alpha"}]}
+            manifest_path = make_eval_repo(root, skill_name="demo", cases=[case])
+            fixtures = manifest_path.parent / "fixtures"
+            fixtures.mkdir(parents=True)
+            (fixtures / "input.txt").write_text("fixture body", encoding="utf-8")
+            manifest = sb.validate_manifest(manifest_path)
+            rows = [r for r in sb.prepared_task_rows(manifest_path, manifest, split="tune")
+                    if r["variant"] == "with_skill"]
+            tasks_path = root / "tasks.jsonl"
+            tasks_path.write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")
+            probe = root / "probe.json"
+            stub = self._stub_claude_workspace_probe(root / "claude_stub.py", probe)
+
+            rc = sb.run_subagent(argparse.Namespace(
+                tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
+
+            self.assertEqual(rc, 0)
+            records = json.loads(probe.read_text(encoding="utf-8"))
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertTrue(record["paths"], "prompt listed no workspace-relative paths")
+            self.assertTrue(all(record["existing"].values()),
+                            f"workspace files unreachable from the backend's cwd: {record}")
+
+    def test_multiturn_default_claude_backend_reuses_one_workspace(self):
+        """Every turn of a multi-turn subagent task must see the same cwd, and
+        that cwd must be the same workspace the prompt's relative paths were
+        built against — not a per-turn or per-call throwaway directory."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tasks = make_tasks(root)[:1]
+            tasks[0]["turns"] = ["first turn", "second turn"]
+            tasks_path = root / "tasks.jsonl"
+            tasks_path.write_text(json.dumps(tasks[0]) + "\n", encoding="utf-8")
+            probe = root / "probe.json"
+            stub = self._stub_claude_workspace_probe(root / "claude_stub.py", probe)
+
+            rc = sb.run_subagent(argparse.Namespace(
+                tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
+
+            self.assertEqual(rc, 0)
+            records = json.loads(probe.read_text(encoding="utf-8"))
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0]["cwd"], records[1]["cwd"])
+            self.assertTrue(records[0]["paths"], "turn 1 prompt listed no workspace-relative paths")
+            self.assertTrue(all(records[0]["existing"].values()),
+                            f"turn 1 workspace files unreachable: {records[0]}")
+
+    def test_default_claude_backend_single_turn_succeeds(self):
+        """run-subagent's default (built-in Claude CLI) backend must produce a
+        real answer end to end. It previously failed on every run: the response
+        `usage` it built from claude_run_metrics() was metrics.json's own shape
+        (schema_version/source/...), not a numeric usage mapping, so
+        validate_subagent_response always raised and every run's output.md
+        carried the CLAUDE FAILURE marker instead of the stub's answer."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tasks = make_tasks(root)[:1]
+            tasks_path = root / "tasks.jsonl"
+            tasks_path.write_text(json.dumps(tasks[0]) + "\n", encoding="utf-8")
+            stub = stub_claude(root / "claude_stub.py")
+
+            rc = sb.run_subagent(argparse.Namespace(
+                tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
+
+            self.assertEqual(rc, 0)
+            base = root / "runs" / "case-1" / "with_skill"
+            output = (base / "output.md").read_text(encoding="utf-8")
+            self.assertEqual(output, "STUB ANSWER token-XYZ")
+            self.assertNotIn(str(sb.CLAUDE_FAILURE), output)
+            metrics = json.loads((base / "metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(metrics["input_tokens"], 11)
+            self.assertEqual(metrics["output_tokens"], 22)
+            self.assertEqual(metrics["total_tokens"], 33)
+            metadata = json.loads((base / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["usage_normalized"]["total_tokens"], 33)
+            self.assertEqual(metadata["cost_normalized"]["total_cost"], 0.0123)
+
+    def test_default_claude_backend_multi_turn_succeeds(self):
+        """Same defect as the single-turn case, hit on every turn of a
+        multi-turn subagent run: claude_run_metrics()'s metrics.json-shaped
+        usage fails validate_subagent_response, so turn 1 always errored out
+        before turn 2 ever ran."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tasks = make_tasks(root)[:1]
+            tasks[0]["turns"] = ["first turn", "second turn"]
+            tasks_path = root / "tasks.jsonl"
+            tasks_path.write_text(json.dumps(tasks[0]) + "\n", encoding="utf-8")
+            stub = stub_claude(root / "claude_stub.py", answer="TURN ANSWER token-XYZ")
+
+            rc = sb.run_subagent(argparse.Namespace(
+                tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
+
+            self.assertEqual(rc, 0)
+            base = root / "runs" / "case-1" / "with_skill"
+            output = (base / "output.md").read_text(encoding="utf-8")
+            self.assertEqual(output, "TURN ANSWER token-XYZ")
+            self.assertNotIn(str(sb.CLAUDE_FAILURE), output)
+            for n in (1, 2):
+                turn_metrics = json.loads(
+                    (base / f"turn-{n}" / "metrics.json").read_text(encoding="utf-8"))
+                self.assertEqual(turn_metrics["input_tokens"], 11)
+                self.assertEqual(turn_metrics["output_tokens"], 22)
+                self.assertEqual(turn_metrics["total_tokens"], 33)
+                turn_meta = json.loads(
+                    (base / f"turn-{n}" / "metadata.json").read_text(encoding="utf-8"))
+                self.assertEqual(turn_meta["cost_normalized"]["total_cost"], 0.0123)
 
 
 class ToolReplayTests(unittest.TestCase):
