@@ -314,8 +314,8 @@ class TriggerRowBoundaryTests(unittest.TestCase):
             assistant = {"role": "assistant", "stopReason": "stop",
                          "usage": {"input": 4, "output": 1, "totalTokens": 5}}
             stdout = "\n".join([
-                json.dumps({"type": "tool_execution_start", "toolName": "read", "args": {"path": str(skill)}}),
-                json.dumps({"type": "tool_execution_end", "toolName": "read", "args": {"path": str(skill)}, "result": "ok"}),
+                json.dumps({"type": "tool_execution_start", "toolCallId": "call_1", "toolName": "read", "args": {"path": str(skill)}}),
+                json.dumps({"type": "tool_execution_end", "toolCallId": "call_1", "toolName": "read", "result": "ok", "isError": False}),
                 json.dumps({"type": "agent_end", "messages": [assistant]}),
             ]) + "\n"
             return InvocationOutcome.from_process(

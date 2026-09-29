@@ -410,6 +410,96 @@ class SkillBenchmarkTests(unittest.TestCase):
         self.assertEqual(metrics["output_tokens"], 9)
         self.assertEqual(metrics["total_tokens"], 109)
 
+    def test_codex_lifecycle_events_do_not_misclassify_as_file_reads(self):
+        # "read" is a substring of "thread"; thread.started must not normalize
+        # as a file_read just because the provider type name contains it.
+        records = [
+            {"type": "thread.started", "thread_id": "thread_1"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"id": "item_0", "type": "command_execution",
+                                                 "command": "echo hi", "aggregated_output": "hi\n",
+                                                 "exit_code": 0, "status": "completed"}},
+            {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message",
+                                                 "text": "codex-trace-ok"}},
+            {"type": "turn.completed", "usage": {"input_tokens": 50, "cached_input_tokens": 5,
+                                                 "output_tokens": 10, "reasoning_output_tokens": 0}},
+        ]
+        events, metrics = sb.normalize_trace_records(records, source="codex")
+        self.assertEqual(
+            [e["type"] for e in events["events"]],
+            ["event", "event", "command", "message", "metric"])
+        self.assertEqual(metrics["commands"], 1)
+        self.assertEqual(metrics["file_reads"], 0)
+        self.assertEqual(metrics["input_tokens"], 50)
+        self.assertEqual(metrics["output_tokens"], 10)
+        self.assertEqual(metrics["total_tokens"], 60)
+
+    def test_raw_type_keywords_match_whole_tokens_by_prefix_not_substring(self):
+        # A word-boundary rule must still split camelCase (readFile, toolCalls)
+        # and match an inflection by prefix (file_edited, errored, metrics),
+        # while never matching a keyword hiding inside an unrelated word
+        # (credit_usage must not read as a write via "edit" in "credit").
+        cases = [
+            ({"type": "thread.started"}, "generic", "event"),
+            ({"type": "thread.started"}, "codex", "event"),
+            ({"type": "tool_execution_end", "toolName": "bash"}, "pi", "command"),
+            ({"type": "readFile", "path": "a.py"}, "generic", "file_read"),
+            ({"type": "toolCalls"}, "generic", "tool_call"),
+            ({"type": "execCommand"}, "generic", "command"),
+            ({"type": "MultiEdit", "path": "a.py"}, "generic", "file_write"),
+            ({"type": "file_edited", "path": "a.py"}, "generic", "file_write"),
+            ({"type": "errored"}, "generic", "error"),
+            ({"type": "metrics"}, "generic", "metric"),
+            ({"type": "skill_loaded", "path": "x/SKILL.md"}, "generic", "skill_load"),
+            ({"type": "credit_usage"}, "generic", "metric"),
+        ]
+        for record, source, expected in cases:
+            with self.subTest(record=record, source=source):
+                event = sb.normalize_trace_record(record, source=source, index=1, line=1)
+                self.assertEqual(event["type"], expected)
+
+    def test_pi_real_shape_tool_stream_without_end_args_matches_base_counts(self):
+        # Pi's tool_execution_end carries only toolCallId, toolName, result, and
+        # isError (no args); a bash/read/grep stream in that real shape must
+        # still count as commands, not silently become file reads.
+        records = [
+            {"type": "agent_start"},
+            {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "read", "args": {"path": "src/a.py"}},
+            {"type": "tool_execution_end", "toolCallId": "c1", "toolName": "read",
+             "result": {"content": [{"type": "text", "text": "x"}]}, "isError": False},
+            {"type": "tool_execution_start", "toolCallId": "c2", "toolName": "bash", "args": {"command": "ls"}},
+            {"type": "tool_execution_end", "toolCallId": "c2", "toolName": "bash",
+             "result": {"content": [{"type": "text", "text": "a"}]}, "isError": False},
+            {"type": "tool_execution_start", "toolCallId": "c3", "toolName": "grep", "args": {"pattern": "foo"}},
+            {"type": "tool_execution_end", "toolCallId": "c3", "toolName": "grep",
+             "result": {"content": []}, "isError": False},
+            {"type": "tool_execution_end", "toolCallId": "c4", "toolName": "read",
+             "result": {"content": []}, "isError": False},
+            {"type": "agent_end", "messages": []},
+        ]
+        events, metrics = sb.normalize_trace_records(records, source="pi")
+        self.assertEqual(
+            [e["type"] for e in events["events"]],
+            ["event", "command", "command", "command", "command", "command", "command", "command", "event"])
+        self.assertEqual(metrics["commands"], 4)
+        self.assertEqual(metrics["file_reads"], 0)
+        self.assertEqual(metrics["file_writes"], 0)
+        self.assertEqual(metrics["tool_calls"], 4)
+
+    def test_pi_flatten_correlates_end_args_from_matching_start_only(self):
+        start = {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "read",
+                 "args": {"path": "skills/demo/SKILL.md"}}
+        end_no_args = {"type": "tool_execution_end", "toolCallId": "c1", "toolName": "read",
+                       "result": {"content": "ok"}, "isError": False}
+        end_own_args = {"type": "tool_execution_end", "toolCallId": "c1", "toolName": "read",
+                        "args": {"path": "already-here.py"}, "result": {"content": "ok"}, "isError": False}
+        orphan_end = {"type": "tool_execution_end", "toolCallId": "c2", "toolName": "read",
+                     "result": {"content": "ok"}, "isError": False}
+        flat = sb.pi_stream_flat_records([start, end_no_args, end_own_args, orphan_end])
+        self.assertEqual(flat[1][1]["args"], {"path": "skills/demo/SKILL.md"})
+        self.assertEqual(flat[2][1]["args"], {"path": "already-here.py"})
+        self.assertNotIn("args", flat[3][1])
+
     def test_import_jetty_results_roundtrip_can_be_benchmarked(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -581,8 +671,10 @@ class SkillBenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td) / "trigger-run"
             stdout = "\n".join([
-                json.dumps({"type": "tool_execution_end", "toolName": "read",
+                json.dumps({"type": "tool_execution_start", "toolCallId": "call_1", "toolName": "read",
                             "args": {"path": "/tmp/pi-trigger/skills/demo/SKILL.md"}}),
+                json.dumps({"type": "tool_execution_end", "toolCallId": "call_1", "toolName": "read",
+                            "result": {"content": "skill instructions"}, "isError": False}),
                 json.dumps({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}], "usage": {"input": 3, "output": 2, "totalTokens": 5}}}),
                 json.dumps({"type": "agent_end", "messages": [{"role": "assistant", "content": [{"type": "text", "text": "done"}], "usage": {"input": 3, "output": 2, "totalTokens": 5}}]}),
             ]) + "\n"
