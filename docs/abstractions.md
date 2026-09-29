@@ -168,7 +168,7 @@ runs/<case_id>/<variant>/[run-<n>/]trace.jsonl        # optional, raw
 runs/<case_id>/<variant>/[run-<n>/]events.json        # optional, normalized
 runs/<case_id>/<variant>/[run-<n>/]metrics.json       # optional, normalized
 runs/<case_id>/<variant>/[run-<n>/]artifact-commit.json # harness-written commit marker
-runs/<case_id>/<variant>/[run-<n>/]workspace-changes.json # native answer runners: candidate workspace edits
+runs/<case_id>/<variant>/[run-<n>/]workspace-changes.json # answer runners and run-subagent: candidate workspace edits
 runs/<case_id>/<variant>/[run-<n>/]candidate.patch        # text edits as a git patch, only when non-empty
 runs/<case_id>/<variant>/[run-<n>/]candidate-files/<sha256> # content copies a patch cannot carry
 ```
@@ -195,7 +195,7 @@ rule for bytes an external agent CLI wrote (`codex exec --json` repeats `id`), r
 repeated names so a row can record them under `stream_duplicate_keys`. Both reject non-finite
 numbers. `iter_json_objects` and `parse_trace_jsonl_text` select the rule with `strict`.
 
-Native answer runners also record what the model did to its temporary workspace.
+Answer runners and `run-subagent` also record what the model did to its temporary workspace.
 `workspace_contracts.captured_workspace` owns that directory's lifetime: build, copy a baseline,
 run the provider, diff, delete. The diff is a sorted tuple of `Added | Modified | Deleted`
 changes; each side is a `RegularFile | Symlink | Special | Unreadable` read by `lstat`, so a
@@ -223,7 +223,7 @@ a manifest gets neither key. The claim does not feed `execution_valid`.
 An **answer runner** consumes prepared task rows and produces the run-output contract. The repo
 ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:10776`), Claude (`run_claude:10955`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:13579`, which hosts record/replay tool I/O via `ToolReplayStore`),
+subagent runner (`run_subagent:13582`, which hosts record/replay tool I/O via `ToolReplayStore`),
 Jetty (`JettyClient:4097` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they

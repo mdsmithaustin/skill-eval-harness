@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -426,6 +427,133 @@ class SubagentRunnerTests(unittest.TestCase):
                 turn_meta = json.loads(
                     (base / f"turn-{n}" / "metadata.json").read_text(encoding="utf-8"))
                 self.assertEqual(turn_meta["cost_normalized"]["total_cost"], 0.0123)
+
+    def _write_claude_stub_editing_workspace(self, path: Path) -> Path:
+        """A fake `claude` that deletes the mounted skill file and adds a new
+        one in its cwd, so the run leaves candidate edits behind."""
+        body = (
+            "#!/usr/bin/env python3\n"
+            "import sys, os, json\n"
+            "_ = sys.stdin.read()\n"
+            "os.remove('skills/skill/SKILL.md')\n"
+            "open('sub-notes.md', 'w').write('candidate notes\\n')\n"
+            "env = {'type': 'result', 'result': 'done', 'total_cost_usd': 0.0,\n"
+            "       'usage': {'input_tokens': 1, 'output_tokens': 1}}\n"
+            "sys.stdout.write(json.dumps(env))\n"
+        )
+        path.write_text(body, encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        return path
+
+    def test_run_subagent_captures_candidate_workspace_changes(self):
+        """run-subagent must capture the model's workspace edits before its
+        temp workspace is deleted, the same as run_agent_tasks: a
+        workspace-changes.json/candidate.patch/candidate-files receipt whose
+        patch applies onto the pre-edit workspace."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tasks = make_tasks(root)[:1]
+            tasks_path = root / "tasks.jsonl"
+            tasks_path.write_text(json.dumps(tasks[0]) + "\n", encoding="utf-8")
+            stub = self._write_claude_stub_editing_workspace(root / "claude_stub.py")
+
+            rc = sb.run_subagent(argparse.Namespace(
+                tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
+            self.assertEqual(rc, 0)
+
+            base = root / "runs" / "case-1" / "with_skill"
+            self.assertTrue((base / "workspace-changes.json").is_file())
+            changes = json.loads((base / "workspace-changes.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                sorted((c["path"], c["change"]) for c in changes["changes"]),
+                [("skills/skill/SKILL.md", "deleted"), ("sub-notes.md", "added")])
+            self.assertTrue((base / "candidate.patch").is_file())
+
+            meta = sb.read_metadata_base(base)
+            self.assertIs(meta["workspace_changes_captured"], True)
+            self.assertEqual(meta["workspace_changes_state"], "captured")
+
+            pt = am.PreparedTask.from_row(tasks[0])
+            with tempfile.TemporaryDirectory() as bd:
+                baseline = Path(bd) / "baseline"
+                sb.registered_workspace_builder("subagent")(pt, baseline)
+                subprocess.run(["git", "init", "-q"], cwd=baseline, check=True)
+                subprocess.run(
+                    ["git", "apply", str((base / "candidate.patch").resolve())],
+                    cwd=baseline, check=True)
+                self.assertFalse((baseline / "skills" / "skill" / "SKILL.md").exists())
+                self.assertEqual(
+                    (baseline / "sub-notes.md").read_text(encoding="utf-8"),
+                    "candidate notes\n")
+
+    def test_multiturn_run_subagent_captures_one_final_workspace(self):
+        """Edits made across two turns of the default Claude backend end up in
+        ONE capture of the final workspace, not a per-turn capture."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tasks = make_tasks(root)[:1]
+            tasks[0]["turns"] = ["first turn", "second turn"]
+            tasks_path = root / "tasks.jsonl"
+            tasks_path.write_text(json.dumps(tasks[0]) + "\n", encoding="utf-8")
+            stub = root / "claude_stub.py"
+            stub.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys, os, json\n"
+                "_ = sys.stdin.read()\n"
+                "state = 'turn.count'\n"
+                "n = int(open(state).read()) + 1 if os.path.exists(state) else 1\n"
+                "open(state, 'w').write(str(n))\n"
+                "open(f'turn-{n}.md', 'w').write(f'turn {n} output\\n')\n"
+                "env = {'type': 'result', 'result': f'answer-{n}', 'total_cost_usd': 0.0,\n"
+                "       'usage': {'input_tokens': 1, 'output_tokens': 1}}\n"
+                "sys.stdout.write(json.dumps(env))\n",
+                encoding="utf-8")
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+            rc = sb.run_subagent(argparse.Namespace(
+                tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                agent_cmd=None, claude_bin=str(stub), timeout=30, tool_replay=None))
+            self.assertEqual(rc, 0)
+
+            base = root / "runs" / "case-1" / "with_skill"
+            changes = json.loads((base / "workspace-changes.json").read_text(encoding="utf-8"))
+            paths = {c["path"] for c in changes["changes"]}
+            self.assertIn("turn-1.md", paths)
+            self.assertIn("turn-2.md", paths)
+            self.assertFalse((base / "turn-1" / "workspace-changes.json").exists())
+            self.assertFalse((base / "turn-2" / "workspace-changes.json").exists())
+            meta = sb.read_metadata_base(base)
+            self.assertIs(meta["workspace_changes_captured"], True)
+
+    def test_shell_agent_cmd_backend_captures_workspace_edits(self):
+        """The `--agent-cmd` shell backend receives the workspace path in its
+        stdin JSON and may edit it; those edits must be captured too."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tasks = make_tasks(root)[:1]
+            tasks_path = root / "tasks.jsonl"
+            tasks_path.write_text(json.dumps(tasks[0]) + "\n", encoding="utf-8")
+            script = root / "agent.py"
+            script.write_text(
+                "import sys, json, os\n"
+                "payload = json.loads(sys.stdin.read())\n"
+                "ws = payload['workspace']\n"
+                "open(os.path.join(ws, 'shell-notes.md'), 'w').write('shell notes\\n')\n"
+                "sys.stdout.write(json.dumps({'answer': 'shell answer'}))\n",
+                encoding="utf-8")
+
+            rc = sb.run_subagent(argparse.Namespace(
+                tasks=str(tasks_path), runs=str(root / "runs"), model=None,
+                agent_cmd=f"{sys.executable} {script}", claude_bin=None,
+                timeout=30, tool_replay=None))
+            self.assertEqual(rc, 0)
+
+            base = root / "runs" / "case-1" / "with_skill"
+            changes = json.loads((base / "workspace-changes.json").read_text(encoding="utf-8"))
+            self.assertEqual([c["path"] for c in changes["changes"]], ["shell-notes.md"])
+            meta = sb.read_metadata_base(base)
+            self.assertIs(meta["workspace_changes_captured"], True)
 
 
 class ToolReplayTests(unittest.TestCase):

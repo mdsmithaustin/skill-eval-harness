@@ -414,10 +414,10 @@ runs/<case_id>/<variant>/run-1/candidate-files/<sha256> # content copies the pat
 runs/answer-design.json                          # exact expected answer experiment and eval-contract digest
 ```
 
-Native answer runners (`run-agent`, `run-codex`, `run-claude`) run the model in a temporary
-workspace and delete it afterwards. Before deletion they diff it against a copy taken right after
-the harness built it, for every outcome including a timeout, so partial edits from a killed run
-are kept. `workspace-changes.json` lists each changed path with its before and after state
+Answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
+temporary workspace and delete it afterwards. Before deletion they diff it against a copy taken
+right after the harness built it, for every outcome including a timeout, so partial edits from a
+killed run are kept. `workspace-changes.json` lists each changed path with its before and after state
 (`file` with `sha256`, `size`, `text`, and `executable`; `symlink` with its target, never
 followed; `special`; or `unreadable`, a file the capture could not read or a directory it could
 not list, with its `mode`) and where its content lives:
@@ -449,10 +449,10 @@ Readers report `workspace_changes_captured` and `workspace_changes_state` next t
 `candidate.patch` is in the commit inventory under the digest the manifest records, and every blob
 is there under its own digest; zero changes counts. `partial` means some content was omitted,
 `failed` means the capture itself failed (`capture_error` says at which stage), and `invalid` means the manifest or
-its referenced files do not check out. Runs without a manifest (legacy runs, `run-subagent`,
-Jetty) get neither key. The claim does not affect scoring or `execution_valid`. Codex answer runs
-default to `--sandbox read-only`, so they record an empty, captured change set unless
-`--codex-cmd` relaxes the sandbox.
+its referenced files do not check out. Runs without a manifest (legacy runs, Jetty) get neither
+key. The claim does not affect scoring or `execution_valid`. Codex answer runs default to
+`--sandbox read-only`, so they record an empty, captured change set unless `--codex-cmd` relaxes
+the sandbox.
 
 `trace.jsonl` is the agent CLI's own stream, preserved verbatim, and it is read with the
 stream rule: a line that repeats an object key (`codex exec --json` repeats `id` on some

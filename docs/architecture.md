@@ -216,7 +216,7 @@ one schema-versioned `events.json` and `metrics.json` so a process assertion lik
 into a closed event state first; only completed operations count as commands, tools, reads, writes,
 or skill invocation. Caller extras cannot overwrite the derived evidence fields. New runner and
 Jetty artifact sets write `artifact-commit.json` last with the required-file inventory and SHA-256
-digests; readers classify a missing or stale marker as an incomplete artifact set. Native answer runners
+digests; readers classify a missing or stale marker as an incomplete artifact set. Answer runners and `run-subagent`
 also diff the model's temporary workspace against its built baseline before deleting it and commit
 the result as `workspace-changes.json`, `candidate.patch`, and `candidate-files/`; readers derive
 `workspace_changes_captured` from those files separately from `artifact_set_complete`. When evidence is

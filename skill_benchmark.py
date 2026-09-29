@@ -13312,7 +13312,11 @@ def run_subagent_tasks(
     events.json, metrics.json), so grading stays file-based and re-runnable.
     Multi-turn telemetry aggregates only when every response declares
     ``telemetry_scope: turn_delta``; every attempted turn is retained under
-    ``turn-N/`` regardless. Tool replay (2.3) wraps the executor per run."""
+    ``turn-N/`` regardless. Tool replay (2.3) wraps the executor per run.
+    `captured_workspace` owns the workspace lifetime (build, baseline, yield,
+    capture, delete), the same as `run_agent_tasks`, so candidate edits land
+    in `workspace-changes.json`/`candidate.patch`/`candidate-files/` beside
+    the other sidecars (`tool-replay.json`, `turn-N/`)."""
     mode = replay_mode or tool_replay_mode()
     workspace_builder = registered_workspace_builder("subagent")
     validated: list[tuple[dict[str, Any], PreparedTask, str | None, Path]] = []
@@ -13371,9 +13375,8 @@ def run_subagent_tasks(
         turns = [str(t) for t in task.get("turns") or [] if str(t)]
         multi_turn_extra: dict[str, Any] = {}
         aggregate_cost_usd: float | None = None
-        with tempfile.TemporaryDirectory(prefix="subagent-ws-") as wd:
-            ws = Path(wd)
-            workspace = workspace_builder(pt, ws)
+        with captured_workspace(prefix="subagent-ws-", changes_dir=sidecars,
+                                build=functools.partial(workspace_builder, pt)) as (ws, workspace):
             skill_rel, input_rel = workspace
             attestation = workspace.attestation
             if attestation.mounted_skill_tree_hash is not None:
