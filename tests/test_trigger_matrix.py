@@ -681,12 +681,12 @@ class ClaudeDetectionTests(unittest.TestCase):
                 result = tm.ClaudeAdapter().invoke("q", "haiku", Path(td), 1)
             self.assertIs(result.state, state)
 
-    def test_mounted_skill_names_read_frontmatter(self):
+    def test_mounted_skill_names_uses_mount_folder_not_frontmatter(self):
         with tempfile.TemporaryDirectory() as td:
             skill_md = Path(td) / "some-dir" / "SKILL.md"
             skill_md.parent.mkdir()
             skill_md.write_text("---\nname: demo-reviewer\ndescription: x\n---\n", encoding="utf-8")
-            self.assertEqual(tm.mounted_skill_names([skill_md]), ["demo-reviewer"])
+            self.assertEqual(tm.mounted_skill_names([skill_md]), ["some-dir"])
 
     def test_claude_invoke_seeds_portable_auth_into_isolated_config(self):
         seen = {}
@@ -934,6 +934,25 @@ class CodexRolloutDetectionTests(unittest.TestCase):
         self.assertEqual(sb.codex_rollout_skill_loads(injected, ["unslop"], [mounted]), [])
         self.assertEqual(sb.codex_rollout_skill_loads(self._rollout(mounted.parents[2]), ["unslop"], [mounted]),
                          [f"rollout skill injection: unslop ({mounted})"])
+
+    def test_rollout_injection_names_the_mount_folder_not_frontmatter(self):
+        # The rollout injects <name>unslop</name>, the mount folder, even when
+        # the mounted SKILL.md declares a different frontmatter name. Names
+        # derived through the real mounted_skill_names entry point (not a
+        # hardcoded list) must still match.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tree = root / "tree" / "unslop"
+            tree.mkdir(parents=True)
+            (tree / "SKILL.md").write_text(
+                "---\nname: unslop-writer\ndescription: Cut AI tells.\n---\n", encoding="utf-8")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            copied = tm.CodexAdapter(codex_cmd="codex exec --json").mount(root / "tree", workspace)
+            names = tm.mounted_skill_names(copied)
+            self.assertEqual(names, ["unslop"])
+            rollout = self._rollout(copied[0].parents[2])
+            self.assertTrue(sb.codex_rollout_skill_loads(rollout, names, copied))
 
     def test_rollout_tool_calls_and_listings_do_not_count_as_loads(self):
         mounted = Path("/tmp/trigger-x-codex-home/skills/unslop/SKILL.md")
@@ -1697,6 +1716,30 @@ class VibeAdapterTests(unittest.TestCase):
         self.assertIn("Vibe skill tool invoked: demo-reviewer", detection.legacy_evidence)
         other = json.dumps({"role": "assistant", "tool_calls": [{"function": {"name": "skill", "arguments": json.dumps({"name": "other"})}}]})
         self.assertFalse(tm.VibeAdapter().detect(completed_invocation(other), ["demo-reviewer"], []).triggered)
+
+    def test_vibe_skill_tool_call_names_the_mount_folder_not_frontmatter(self):
+        # Vibe natively discovers Agent Skills by directory name, so its
+        # `skill` tool call names the mount folder ("demo-root") even when
+        # frontmatter declares a different name ("demo-reviewer"). Names must
+        # come from the real mounted_skill_names entry point, not a hardcoded
+        # list that assumes frontmatter wins.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tree = root / "tree"
+            skill = tree / "demo-root"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("---\nname: demo-reviewer\n---\n", encoding="utf-8")
+            copied = tm.VibeAdapter().mount(tree, root / "workspace")
+            names = tm.mounted_skill_names(copied)
+        self.assertEqual(names, ["demo-root"])
+        stream = "\n".join([
+            json.dumps({"role": "assistant", "tool_calls": [{
+                "id": "call-1", "function": {"name": "skill",
+                "arguments": json.dumps({"name": "demo-root"})}}]}),
+            json.dumps({"role": "tool", "tool_call_id": "call-1", "content": "loaded"}),
+        ])
+        detection = tm.VibeAdapter().detect(completed_invocation(stream), names, [])
+        self.assertTrue(detection.triggered, f"names={names!r} did not include the mounted folder name")
 
     def test_vibe_malformed_stream_is_not_a_valid_negative_observation(self):
         def fake_run(*args, **kwargs):
