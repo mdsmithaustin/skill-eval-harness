@@ -104,6 +104,77 @@ class DemoReadmeTests(unittest.TestCase):
             ROOT / "docs" / "did-my-skill-edit-regress.md", "docs/did-my-skill-edit-regress.md")
 
 
+class WalkthroughJudgeStepTests(unittest.TestCase):
+    """Any doc that claims an ablation confirms a regression
+    (`expected_regression_confirmed`, `CONFIRMED_CAUSAL`, "confirms/confirm a
+    regression") is only honest if the ablation `benchmark` call it pastes actually
+    graded the judge assertion behind that confirmation. Otherwise the claimed
+    evidence is a "partial" report artifact, not a real verdict. This is a structural
+    check over fenced code blocks (which commands run in which order), not a
+    full-text snapshot, so prose can be reworded freely without breaking it."""
+
+    CONFIRM_MARKERS = (
+        "expected_regression_confirmed", "CONFIRMED_CAUSAL",
+        "confirms a regression", "confirm a regression",
+    )
+    _CODE_BLOCK = re.compile(r"```(?:bash|sh|yaml)\n(.*?)\n```", re.DOTALL)
+    _JUDGE_CALL = re.compile(r"(?:skill[-_]benchmark(?:\.py)?|\$H(?:ARNESS)?)\s+judge\b(?!-)")
+    _BENCHMARK_CALL = re.compile(r"(?:skill[-_]benchmark(?:\.py)?|\$H(?:ARNESS)?)\s+benchmark\b")
+
+    @classmethod
+    def _flatten(cls, block: str) -> list[str]:
+        joined = re.sub(r"\\\n\s*", " ", block)
+        return [line.strip() for line in joined.split("\n")
+                if line.strip() and not line.strip().startswith("#")]
+
+    @staticmethod
+    def _flag_value(line: str, flag: str) -> str | None:
+        m = re.search(re.escape(flag) + r"[= ]+(\S+)", line)
+        return m.group(1) if m else None
+
+    def _assert_confirming_ablation_benchmarks_are_judged(self, path: Path) -> None:
+        text = path.read_text(encoding="utf-8")
+        if not any(marker in text for marker in self.CONFIRM_MARKERS):
+            return
+        judge_outs: set[str] = set()
+        ablation_benchmark_calls = 0
+        for block in self._CODE_BLOCK.findall(text):
+            for line in self._flatten(block):
+                if self._JUDGE_CALL.search(line):
+                    out = self._flag_value(line, "--out")
+                    if out:
+                        judge_outs.add(out)
+                if self._BENCHMARK_CALL.search(line) and "ablation" in line:
+                    ablation_benchmark_calls += 1
+                    judge_results = self._flag_value(line, "--judge-results")
+                    self.assertIsNotNone(
+                        judge_results,
+                        f"{path}: an ablation benchmark call claims a confirmed "
+                        f"regression but has no --judge-results: {line!r}",
+                    )
+                    self.assertIn(
+                        judge_results, judge_outs,
+                        f"{path}: --judge-results {judge_results!r} is not the --out "
+                        f"of a preceding `judge` step in the same doc: {line!r}",
+                    )
+        if ablation_benchmark_calls == 0:
+            self.fail(
+                f"{path} claims a confirmed regression but pastes no ablation "
+                "benchmark command to check"
+            )
+
+    def test_demo_readme_judges_before_confirming(self):
+        self._assert_confirming_ablation_benchmarks_are_judged(DEMO / "README.md")
+
+    def test_did_my_skill_edit_regress_judges_before_confirming(self):
+        self._assert_confirming_ablation_benchmarks_are_judged(
+            ROOT / "docs" / "did-my-skill-edit-regress.md")
+
+    def test_ablation_study_walkthrough_judges_before_confirming(self):
+        self._assert_confirming_ablation_benchmarks_are_judged(
+            ROOT / "docs" / "ablation-study-walkthrough.md")
+
+
 class DemoJudgeTests(unittest.TestCase):
     """Pins the stub-judge pair's calibration signature that
     docs/can-i-trust-my-judge.md pastes: the careful judge aligns with the human
