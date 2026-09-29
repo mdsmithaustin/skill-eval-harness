@@ -3914,9 +3914,8 @@ def export_jetty(args: argparse.Namespace) -> int:
         raise AssertionError("Jetty multi-turn case passed the pre-export gate")
     answer_design = answer_design_from_tasks(rows, default_model=model)
     prepared = [PreparedTask.from_row(row) for row in rows]
-    # Two payloads sharing an upload token would share the same task file,
-    # bundle archive, and sandbox paths inside Jetty's storage, so the second
-    # upload silently clobbers the first instead of running its own task.
+    # Two payloads sharing an upload token would share one task file path and
+    # bundle name, so neither run could be attributed from its uploads.
     seen_by_token: dict[str, PreparedTask] = {}
     for pt in prepared:
         token = pt.upload_token(task_prefix)

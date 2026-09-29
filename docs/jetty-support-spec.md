@@ -272,7 +272,9 @@ path after upload.
 
 Upload names are opaque. The task file, bundle archive, and upload placeholders
 use `PreparedTask.upload_token()`, a deterministic `arm-<10 hex>` token hashed
-from skill, case, arm, and run, with the same rule for every arm. The agent reads
+from skill, case, arm, run, and `--jetty-task-prefix` when one is given, with
+the same rule for every arm. `export-jetty` refuses an export in which two
+payloads would share a token. The agent reads
 the task file by that path, so the path must not name the case, split, or arm.
 `jetty.task` keeps the descriptive `<prefix>-<case>-<arm>-<run>` form because
 Jetty uses it only for trajectory routes and its UI. The runbook and
