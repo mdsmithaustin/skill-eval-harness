@@ -7448,6 +7448,18 @@ def nested_item_type(record: dict[str, Any]) -> str:
     return ""
 
 
+_RAW_TYPE_WORD_BOUNDARY = re.compile(r"[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
+
+
+def raw_type_tokens(raw_type: str) -> frozenset[str]:
+    """Whole-word tokens of a provider type name, split on non-alphanumerics
+    and camelCase boundaries. A substring test on the raw string (e.g. "read"
+    in "thread") misfires on any provider whose type name happens to contain
+    one of the classifier's keywords inside a longer word; token membership
+    doesn't."""
+    return frozenset(part.casefold() for part in _RAW_TYPE_WORD_BOUNDARY.split(raw_type) if part)
+
+
 def usage_number(usage: dict[str, Any], *keys: str) -> int | None:
     normalized = normalize_usage(usage, source="trace_normalized")
     for key in keys:
@@ -7461,6 +7473,7 @@ def normalize_trace_record(record: dict[str, Any], *, source: str, index: int, l
     top_type = str(raw_trace_value(record, "type", "event", "name", "kind") or "")
     item_type = nested_item_type(record)
     raw_type = f"{top_type} {item_type}".casefold()
+    raw_type_tok = raw_type_tokens(raw_type)
     path = stringify_trace_value(raw_trace_input_value(record, "path", "file", "file_path"))
     command = stringify_trace_value(raw_trace_input_value(record, "command", "cmd", "args"))
     content = stringify_trace_value(raw_trace_value(record, "content", "text", "message"))
@@ -7476,29 +7489,28 @@ def normalize_trace_record(record: dict[str, Any], *, source: str, index: int, l
     name = stringify_trace_value(raw_trace_value(
         record, "tool", "tool_name", "toolName", "name"))
     tool_name = name.casefold()
-    is_write = ("file_write" in raw_type or "write" in raw_type or "edit" in raw_type
+    is_write = ("write" in raw_type_tok or "edit" in raw_type_tok
                 or tool_name in {"write", "edit", "multiedit", "notebookedit", "write_file"})
-    is_read = ("file_read" in raw_type or "read" in raw_type
-               or tool_name in {"read", "read_file"})
+    is_read = ("read" in raw_type_tok or tool_name in {"read", "read_file"})
     skill_path = path.endswith("SKILL.md") or "/SKILL.md" in path or "\\SKILL.md" in path
-    explicit_skill_load = "skill" in raw_type and ("load" in raw_type or "read" in raw_type)
+    explicit_skill_load = "skill" in raw_type_tok and ("load" in raw_type_tok or "read" in raw_type_tok)
     if is_write:
         event_type = TraceEventKind.FILE_WRITE
     elif explicit_skill_load or (is_read and skill_path):
         event_type = TraceEventKind.SKILL_LOAD
-    elif "command" in raw_type or "exec" in raw_type or command:
+    elif "command" in raw_type_tok or "exec" in raw_type_tok or command:
         event_type = TraceEventKind.COMMAND
         name = name or "bash"
     elif is_read:
         event_type = TraceEventKind.FILE_READ
-    elif "tool" in raw_type or raw_trace_value(
+    elif "tool" in raw_type_tok or raw_trace_value(
             record, "tool", "tool_name", "toolName", "tool_call_id") is not None:
         event_type = TraceEventKind.TOOL_CALL
-    elif "error" in raw_type or str(status).casefold() in {"failed", "error", "errored"}:
+    elif "error" in raw_type_tok or str(status).casefold() in {"failed", "error", "errored"}:
         event_type = TraceEventKind.ERROR
     elif raw_trace_value(record, "role") or content or "agent_message" in raw_type:
         event_type = TraceEventKind.MESSAGE
-    elif "usage" in raw_type or "metric" in raw_type or raw_trace_value(record, "usage", "tokens"):
+    elif "usage" in raw_type_tok or "metric" in raw_type_tok or raw_trace_value(record, "usage", "tokens"):
         event_type = TraceEventKind.METRIC
     input_summary = command or path or content[:500]
     output_summary = stringify_trace_value(raw_trace_value(record, "output", "stdout", "stderr", "result"))[:1000]
