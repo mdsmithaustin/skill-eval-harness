@@ -11190,17 +11190,13 @@ def codex_structured_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
 CODEX_CONTEXT_ISOLATION_ARGS = ("-c", "skills.include_instructions=false", "--disable", "apps")
 
 
-def codex_trigger_context_isolation_args() -> tuple[list[str], list[str]]:
-    """Codex flags for a trigger run, and the form a row records.
+def codex_host_skill_paths() -> list[str]:
+    """Every `SKILL.md` under the operator's `~/.agents/skills`, sorted.
 
-    A trigger run must keep `$CODEX_HOME/skills` listed, so it cannot hide the
-    skill catalog. Codex has no switch for the ~/.agents/skills root alone, so
-    each host skill is disabled by path; the recorded form counts them instead
-    of listing the operator's skill paths."""
+    Codex finds nested and symlinked skills, so follow links, but visit each
+    real directory once so a symlink cycle cannot hang the run."""
     host_skills: list[str] = []
     walked: set[str] = set()
-    # Codex finds nested and symlinked skills, so follow links, but visit each
-    # real directory once so a symlink cycle cannot hang the run.
     for directory, subdirs, files in os.walk(Path.home() / ".agents" / "skills", followlinks=True):
         real = os.path.realpath(directory)
         if real in walked:
@@ -11210,7 +11206,57 @@ def codex_trigger_context_isolation_args() -> tuple[list[str], list[str]]:
         if "SKILL.md" in files:
             host_skills.append(str(Path(directory) / "SKILL.md"))
     host_skills.sort()
-    entries = ",".join(f"{{path={json.dumps(path)},enabled=false}}" for path in host_skills)
+    return host_skills
+
+
+def toml_basic_string(value: str) -> str:
+    """Encode `value` as a quoted TOML basic string.
+
+    `json.dumps` is the wrong encoder here: JSON represents a `str` as
+    UTF-16, so a character above U+FFFF (an emoji, for example) comes out as
+    an escaped surrogate pair (`\\ud83d\\ude80`), which is not a Unicode
+    scalar value and not legal TOML; Codex then reads the whole
+    `skills.config` value as an opaque string and dies with `Error loading
+    config.toml: invalid type: string ...`. TOML also never accepts `\\/`,
+    which JSON allows (though does not by default emit). This encoder escapes
+    only the quote, the backslash, and control characters (TOML requires
+    every control character other than tab escaped, including U+007F, which
+    JSON does not escape), and otherwise copies each character through
+    literally, astral code points included."""
+    out = ['"']
+    for ch in value:
+        code = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == '\\':
+            out.append('\\\\')
+        elif ch == '\b':
+            out.append('\\b')
+        elif ch == '\t':
+            out.append('\\t')
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\f':
+            out.append('\\f')
+        elif ch == '\r':
+            out.append('\\r')
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def codex_trigger_context_isolation_args() -> tuple[list[str], list[str]]:
+    """Codex flags for a trigger run, and the form a row records.
+
+    A trigger run must keep `$CODEX_HOME/skills` listed, so it cannot hide the
+    skill catalog. Codex has no switch for the ~/.agents/skills root alone, so
+    each host skill is disabled by path; the recorded form counts them instead
+    of listing the operator's skill paths."""
+    host_skills = codex_host_skill_paths()
+    entries = ",".join(f"{{path={toml_basic_string(path)},enabled=false}}" for path in host_skills)
 
     def args(skills_config: str) -> list[str]:
         return ["-c", "skills.bundled.enabled=false", "-c", skills_config, "--disable", "apps"]
