@@ -131,7 +131,8 @@ class PiStreamContractTests(unittest.TestCase):
         self.assertIsNone(stream.terminal_error)
         self.assertEqual(stream.usage_normalized["total_tokens"], 15)
         self.assertEqual(stream.cost_normalized["total_cost"], 0.015)
-        detection = sb.detect_trigger_records(stream.records, [Path("/tmp/pi-config/skills/demo/SKILL.md")])
+        detection = sb.detect_trigger_records(
+            stream.records, [Path("/tmp/pi-config/skills/demo/SKILL.md")], source="pi", pi_stream=stream)
         self.assertTrue(detection.triggered)
         _, metrics = sb.normalize_trace_records(list(stream.records), source="pi", pi_stream=stream)
         self.assertEqual(metrics["total_tokens"], 15)

@@ -7453,10 +7453,8 @@ _RAW_TYPE_WORD_BOUNDARY = re.compile(r"[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
 
 def raw_type_tokens(raw_type: str) -> frozenset[str]:
     """Whole-word tokens of a provider type name, split on non-alphanumerics
-    and camelCase boundaries. A substring test on the raw string (e.g. "read"
-    in "thread") misfires on any provider whose type name happens to contain
-    one of the classifier's keywords inside a longer word; token membership
-    doesn't."""
+    and camelCase boundaries, each casefolded. Pass the original-case string;
+    casefolding first collapses the camelCase boundary this exists to find."""
     return frozenset(part.casefold() for part in _RAW_TYPE_WORD_BOUNDARY.split(raw_type) if part)
 
 
@@ -7473,7 +7471,11 @@ def normalize_trace_record(record: dict[str, Any], *, source: str, index: int, l
     top_type = str(raw_trace_value(record, "type", "event", "name", "kind") or "")
     item_type = nested_item_type(record)
     raw_type = f"{top_type} {item_type}".casefold()
-    raw_type_tok = raw_type_tokens(raw_type)
+    raw_type_tok = raw_type_tokens(f"{top_type} {item_type}")
+
+    def has_keyword(keyword: str) -> bool:
+        return any(token.startswith(keyword) for token in raw_type_tok)
+
     path = stringify_trace_value(raw_trace_input_value(record, "path", "file", "file_path"))
     command = stringify_trace_value(raw_trace_input_value(record, "command", "cmd", "args"))
     content = stringify_trace_value(raw_trace_value(record, "content", "text", "message"))
@@ -7489,28 +7491,28 @@ def normalize_trace_record(record: dict[str, Any], *, source: str, index: int, l
     name = stringify_trace_value(raw_trace_value(
         record, "tool", "tool_name", "toolName", "name"))
     tool_name = name.casefold()
-    is_write = ("write" in raw_type_tok or "edit" in raw_type_tok
+    is_write = (has_keyword("write") or has_keyword("edit")
                 or tool_name in {"write", "edit", "multiedit", "notebookedit", "write_file"})
-    is_read = ("read" in raw_type_tok or tool_name in {"read", "read_file"})
+    is_read = (has_keyword("read") or tool_name in {"read", "read_file"})
     skill_path = path.endswith("SKILL.md") or "/SKILL.md" in path or "\\SKILL.md" in path
-    explicit_skill_load = "skill" in raw_type_tok and ("load" in raw_type_tok or "read" in raw_type_tok)
+    explicit_skill_load = has_keyword("skill") and (has_keyword("load") or has_keyword("read"))
     if is_write:
         event_type = TraceEventKind.FILE_WRITE
     elif explicit_skill_load or (is_read and skill_path):
         event_type = TraceEventKind.SKILL_LOAD
-    elif "command" in raw_type_tok or "exec" in raw_type_tok or command:
+    elif has_keyword("command") or has_keyword("exec") or command:
         event_type = TraceEventKind.COMMAND
         name = name or "bash"
     elif is_read:
         event_type = TraceEventKind.FILE_READ
-    elif "tool" in raw_type_tok or raw_trace_value(
+    elif has_keyword("tool") or raw_trace_value(
             record, "tool", "tool_name", "toolName", "tool_call_id") is not None:
         event_type = TraceEventKind.TOOL_CALL
-    elif "error" in raw_type_tok or str(status).casefold() in {"failed", "error", "errored"}:
+    elif has_keyword("error") or str(status).casefold() in {"failed", "error", "errored"}:
         event_type = TraceEventKind.ERROR
     elif raw_trace_value(record, "role") or content or "agent_message" in raw_type:
         event_type = TraceEventKind.MESSAGE
-    elif "usage" in raw_type_tok or "metric" in raw_type_tok or raw_trace_value(record, "usage", "tokens"):
+    elif has_keyword("usage") or has_keyword("metric") or raw_trace_value(record, "usage", "tokens"):
         event_type = TraceEventKind.METRIC
     input_summary = command or path or content[:500]
     output_summary = stringify_trace_value(raw_trace_value(record, "output", "stdout", "stderr", "result"))[:1000]
@@ -7764,6 +7766,32 @@ def identity_flat_records(records: list[dict[str, Any]], *,
         raise ValueError("record_lines must have one physical line per trace record")
     return [((record_lines[i - 1] if record_lines is not None else i), record)
             for i, record in enumerate(records, 1)]
+
+
+def pi_stream_flat_records(records: list[dict[str, Any]], *,
+                           record_lines: list[int] | None = None) -> list[tuple[int, dict[str, Any]]]:
+    """Pi's terminal `tool_execution_end`/`tool_execution_update` carries only
+    toolCallId, toolName, result, and isError — the invocation's path or
+    command lives on the matching `tool_execution_start`. Without correlating
+    the two by toolCallId, a completed read or edit has no path to classify
+    against and can only ever read as a bare command."""
+    if record_lines is not None and len(record_lines) != len(records):
+        raise ValueError("record_lines must have one physical line per trace record")
+    pending_args: dict[str, Any] = {}
+    flat: list[tuple[int, dict[str, Any]]] = []
+    for i, record in enumerate(records, 1):
+        line = record_lines[i - 1] if record_lines is not None else i
+        top_type = str(record.get("type") or "")
+        call_id = record.get("toolCallId")
+        args = record.get("args")
+        if top_type == "tool_execution_start" and isinstance(call_id, str) and isinstance(args, dict):
+            pending_args[call_id] = args
+        elif (top_type in {"tool_execution_end", "tool_execution_update"}
+              and isinstance(call_id, str) and "args" not in record
+              and call_id in pending_args):
+            record = {**record, "args": pending_args[call_id]}
+        flat.append((line, record))
+    return flat
 
 
 def codex_stream_flat_records(records: list[dict[str, Any]], *,
@@ -8126,6 +8154,7 @@ CLAUDE_TRACE_DIALECT = TraceDialect(
     protocol_error=_claude_trace_protocol_error,
 )
 PI_TRACE_DIALECT = TraceDialect(
+    flatten=pi_stream_flat_records,
     stream_semantics=_pi_stream_semantics,
     usage_and_cost=_pi_usage_and_cost_blocks,
     protocol_error=_pi_trace_protocol_error,

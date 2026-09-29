@@ -486,6 +486,20 @@ class SkillBenchmarkTests(unittest.TestCase):
         self.assertEqual(metrics["file_writes"], 0)
         self.assertEqual(metrics["tool_calls"], 4)
 
+    def test_pi_flatten_correlates_end_args_from_matching_start_only(self):
+        start = {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "read",
+                 "args": {"path": "skills/demo/SKILL.md"}}
+        end_no_args = {"type": "tool_execution_end", "toolCallId": "c1", "toolName": "read",
+                       "result": {"content": "ok"}, "isError": False}
+        end_own_args = {"type": "tool_execution_end", "toolCallId": "c1", "toolName": "read",
+                        "args": {"path": "already-here.py"}, "result": {"content": "ok"}, "isError": False}
+        orphan_end = {"type": "tool_execution_end", "toolCallId": "c2", "toolName": "read",
+                     "result": {"content": "ok"}, "isError": False}
+        flat = sb.pi_stream_flat_records([start, end_no_args, end_own_args, orphan_end])
+        self.assertEqual(flat[1][1]["args"], {"path": "skills/demo/SKILL.md"})
+        self.assertEqual(flat[2][1]["args"], {"path": "already-here.py"})
+        self.assertNotIn("args", flat[3][1])
+
     def test_import_jetty_results_roundtrip_can_be_benchmarked(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
