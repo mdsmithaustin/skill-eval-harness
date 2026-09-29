@@ -1796,6 +1796,113 @@ class VibeAdapterTests(unittest.TestCase):
         self.assertTrue(result.metadata["vibe_home_outside_workdir"])
 
 
+DEMO_SKILLS = ROOT / "examples" / "demo-skill" / "skills"
+
+
+class MountedSkillNameTests(unittest.TestCase):
+    """Each CLI names a mounted skill its own way, and detection must accept
+    exactly that name. The demo tree mounts under folder `demo` with frontmatter
+    `name: demo-reviewer`, so the two names diverge.
+
+    Recorded evidence per CLI:
+    - Claude Code 2.1.284 (live haiku run): the init event listed
+      `"skills": ["demo", ...]` and the model called `Skill {"skill": "demo"}`.
+    - Codex 0.156.1 (requests captured by a local sink, no model call): the
+      skills listing read `demo-reviewer: ... (file: .../skills/demo/SKILL.md)`,
+      `$demo-reviewer` produced the user-role injection
+      `<skill>\\n<name>demo-reviewer</name>\\n<path>.../skills/demo/SKILL.md</path>`,
+      and `$demo` produced no injection at all.
+    - Mistral Vibe 2.25.8 source: `SkillManager` keys skills by frontmatter
+      `name` (a folder mismatch only logs a warning), and the `skill` tool
+      looks its `name` argument up in that map."""
+
+    def _row(self, adapter, fake_run):
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(type(adapter), "_run_argv", staticmethod(fake_run)), \
+             mock.patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "ambient-codex")}):
+            return tm.run_cell_query(
+                adapter, DEMO_SKILLS, "Review this proposed change", True, None, 12,
+                metadata={"skill_tree_hash": sb.skill_tree_hash(DEMO_SKILLS)},
+            )
+
+    def _claude_row(self, invoked: str):
+        stream = "\n".join(json.dumps(record) for record in [
+            {"type": "system", "subtype": "init", "session_id": "s", "skills": ["demo", "design", "doctor"]},
+            {"type": "assistant", "message": {"role": "assistant", "content": [{
+                "type": "tool_use", "id": "toolu_01Ttn2zkj2An4sgwBUhBdCZ7", "name": "Skill",
+                "input": {"skill": invoked, "args": "Review this proposed change"}}]}},
+            {"type": "user", "message": {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "toolu_01Ttn2zkj2An4sgwBUhBdCZ7",
+                "content": f"Launching skill: {invoked}"}]}},
+            {"type": "result", "subtype": "success", "is_error": False, "result": "done"},
+        ]) + "\n"
+        return self._row(tm.ClaudeAdapter(), lambda plan: completed_invocation(stream))
+
+    def _codex_row(self, injected: str):
+        events = (CODEX_FIXTURES / "exec-skill-events.jsonl").read_text(encoding="utf-8")
+
+        def fake_run(plan):
+            home = Path(dict(plan.environment)["CODEX_HOME"])
+            rollout = (CODEX_FIXTURES / "rollout-skill-injection.jsonl").read_text(encoding="utf-8")
+            rollout = rollout.replace("<name>unslop</name>", f"<name>{injected}</name>").replace(
+                "/CODEX_HOME/skills/unslop/SKILL.md", f"{home}/skills/demo/SKILL.md")
+            day = home / "sessions" / "2026" / "09" / "13"
+            day.mkdir(parents=True)
+            (day / f"rollout-2026-09-13T13-30-23-{CODEX_THREAD_ID}.jsonl").write_text(rollout, encoding="utf-8")
+            return completed_invocation(events)
+
+        return self._row(tm.CodexAdapter(codex_cmd="codex exec --json"), fake_run)
+
+    def _vibe_row(self, invoked: str):
+        stream = "\n".join(json.dumps(record) for record in [
+            {"role": "assistant", "tool_calls": [{
+                "id": "call-1", "function": {"name": "skill", "arguments": json.dumps({"name": invoked})}}]},
+            {"role": "tool", "tool_call_id": "call-1", "content": "loaded"},
+            {"role": "assistant", "content": "done"},
+        ]) + "\n"
+        return self._row(tm.VibeAdapter(), lambda plan: completed_invocation(stream))
+
+    def test_claude_skill_call_by_mount_folder_triggers(self):
+        row = self._claude_row("demo")
+        self.assertTrue(row["observation_complete"], row.get("provider_error"))
+        self.assertTrue(row["triggered"])
+        self.assertEqual(row["evidence"], ["Skill tool invoked: demo"])
+
+    def test_claude_skill_call_by_frontmatter_or_host_name_does_not_trigger(self):
+        for invoked in ("demo-reviewer", "design"):
+            with self.subTest(invoked=invoked):
+                row = self._claude_row(invoked)
+                self.assertTrue(row["observation_complete"], row.get("provider_error"))
+                self.assertFalse(row["triggered"])
+
+    def test_codex_rollout_injection_by_frontmatter_name_triggers(self):
+        row = self._codex_row("demo-reviewer")
+        self.assertTrue(row["observation_complete"], row.get("provider_error"))
+        self.assertTrue(row["triggered"])
+        self.assertEqual(len(row["evidence"]), 1)
+        self.assertRegex(row["evidence"][0], r"^rollout skill injection: demo-reviewer \(.*/skills/demo/SKILL\.md\)$")
+
+    def test_codex_rollout_injection_by_folder_or_other_name_does_not_trigger(self):
+        for injected in ("demo", "unslop"):
+            with self.subTest(injected=injected):
+                row = self._codex_row(injected)
+                self.assertTrue(row["observation_complete"], row.get("provider_error"))
+                self.assertFalse(row["triggered"])
+
+    def test_vibe_skill_call_by_frontmatter_name_triggers(self):
+        row = self._vibe_row("demo-reviewer")
+        self.assertTrue(row["observation_complete"], row.get("provider_error"))
+        self.assertTrue(row["triggered"])
+        self.assertEqual(row["evidence"], ["Vibe skill tool invoked: demo-reviewer"])
+
+    def test_vibe_skill_call_by_folder_or_other_name_does_not_trigger(self):
+        for invoked in ("demo", "other"):
+            with self.subTest(invoked=invoked):
+                row = self._vibe_row(invoked)
+                self.assertTrue(row["observation_complete"], row.get("provider_error"))
+                self.assertFalse(row["triggered"])
+
+
 def _csv_env(name, default):
     raw = os.environ.get(name)
     if raw is None:
