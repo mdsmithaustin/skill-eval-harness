@@ -1365,6 +1365,37 @@ class ToolUsingJudgeTests(unittest.TestCase):
         self.assertNotEqual(probe["cwd"], os.getcwd())
         self.assertEqual(after, before)                                    # the scratch copy was cleaned up
 
+    def test_explore_snapshot_is_flaky_under_a_concurrent_sibling(self):
+        # REPRO for the intermittent CI failure: _tmp_explore_dirs() snapshots the
+        # SHARED system temp dir. A sibling test/pytest process minting its own
+        # judge-explore-* scratch dir at the same moment — outside this process's
+        # control — makes `after` differ from `before` even though THIS call's own
+        # scratch dir was cleaned up correctly. Simulate that sibling deterministically
+        # instead of relying on host timing.
+        sibling_dir = None
+        real_mkdtemp = tempfile.mkdtemp
+
+        def mint_sibling_then_real(*args, **kwargs):
+            nonlocal sibling_dir
+            sibling_dir = real_mkdtemp(prefix="judge-explore-")
+            return real_mkdtemp(*args, **kwargs)
+
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                run = self._run_dir(td)
+                stub = self._stub_claude(td)
+                before = self._tmp_explore_dirs()
+                with mock.patch.object(tempfile, "mkdtemp", side_effect=mint_sibling_then_real):
+                    sb.run_one_judge_task(self._task(run), judge_model="m", claude_bin=str(stub), explore=True)
+                after = self._tmp_explore_dirs()
+            # This is the same comparison test_explore_end_to_end_... makes. It fails
+            # here because the sibling's directory is still present in `after`, even
+            # though this call's own judge-explore-* dir was removed by construction.
+            self.assertEqual(after, before)
+        finally:
+            if sibling_dir is not None:
+                os.rmdir(sibling_dir)
+
     def test_explore_off_arms_no_tools_and_no_add_dir(self):
         with tempfile.TemporaryDirectory() as td:
             run = self._run_dir(td)
