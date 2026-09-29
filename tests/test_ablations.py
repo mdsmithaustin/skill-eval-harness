@@ -6,7 +6,9 @@ test_cbc) and test_skill_benchmark, which accreted by merge rather than by
 subject; docstrings citing finding/roadmap ids are preserved.
 """
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -14,6 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from helpers import (
     load_example_module,
@@ -2755,6 +2758,67 @@ class JettyModelVisibleTaskTests(unittest.TestCase):
             SubjectVisiblePromptTests().assert_organic(item["content"])
         task_paths = {self.task_item(p)["remote_path_hint"] for p in by_variant.values()}
         self.assertEqual(len(task_paths), 4)
+
+
+class JettyUploadTokenUniquenessTests(unittest.TestCase):
+    """Two payloads in one export must never share an upload token: they would
+    share the same task file, bundle archive, and sandbox paths in Jetty's
+    storage, so the second upload silently overwrites the first instead of
+    running its own task. export_jetty must die loudly instead."""
+
+    CASE_ID = "pos-token-uniqueness"
+
+    def export(self, root: Path, *, jetty_task_prefix=None):
+        p = make_eval_repo(
+            root, skill_name="good-pr", skill_text=SKILL_FIXTURE,
+            cases=[{"id": self.CASE_ID, "split": "holdout", "kind": "behavior",
+                    "prompt": "Review the diff.",
+                    "assertions": [{"name": "a", "type": "contains", "value": "x"}]}],
+        )
+        out = root / "jetty.jsonl"
+        return sb.export_jetty(SimpleNamespace(
+            manifest=str(p), split=None, runs_per_variant=1,
+            include_old_skill=False, include_ablations=False, allow_missing_prompts=False,
+            jetty_collection="skill-evals", jetty_task_prefix=jetty_task_prefix,
+            jetty_agent="claude-code", jetty_model="claude-sonnet-4-6",
+            jetty_model_provider="anthropic", jetty_snapshot="python312-uv",
+            use_trial_keys=False, out=str(out), dry_run=False,
+        ))
+
+    def test_export_jetty_dies_loudly_on_a_token_collision(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            stderr = io.StringIO()
+            with mock.patch("ablation_model.opaque_token", return_value="collide"), \
+                    contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                self.export(root)
+        message = stderr.getvalue()
+        # Both colliding tasks' identities (case/variant/run) must be named,
+        # not just the shared token, so a reader knows which two to fix.
+        self.assertIn(self.CASE_ID, message)
+        self.assertIn("with_skill", message)
+        self.assertIn("without_skill", message)
+        self.assertIn("collide", message)
+
+    def test_a_different_jetty_task_prefix_avoids_the_collision(self):
+        # Same fixture, no patched hash: with_skill and without_skill already
+        # get distinct tokens, so this is the control showing export succeeds
+        # absent a real collision.
+        with tempfile.TemporaryDirectory() as td:
+            rc = self.export(Path(td))
+        self.assertEqual(rc, 0)
+
+    def test_upload_token_folds_in_the_task_prefix_when_given(self):
+        pt = am.PreparedTask(
+            case_id="c1", split="tune", kind="behavior", variant_truth="with_skill",
+            run_number=1, skill_name="good-pr", repo_root="/r", skill_paths=(),
+            input_files=(), run_dir="c1/with_skill", instruction="i", prompt="p", tags=())
+        plain = pt.upload_token()
+        self.assertEqual(plain, pt.upload_token(None))    # no prefix: unchanged token
+        prefixed_a = pt.upload_token("batch-a")
+        prefixed_b = pt.upload_token("batch-b")
+        self.assertNotEqual(plain, prefixed_a)
+        self.assertNotEqual(prefixed_a, prefixed_b)        # two exports, two prefixes, no collision
 
 
 class MaterializeCarriesTypedArmTests(unittest.TestCase):
