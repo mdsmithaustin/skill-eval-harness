@@ -1147,6 +1147,127 @@ class CodexConfigFailureStderrRedactionTests(unittest.TestCase):
         self.assertIn("skills.config", result.stderr)
 
 
+class CodexRealHostPathStderrRedactionTests(unittest.TestCase):
+    """Every spelling of a host skill path that real Codex puts in stderr must
+    be gone from the saved row, while the mounted skill path stays.
+
+    tests/fixtures/codex/host-path-stderr.json holds stderr from codex-cli
+    0.156.1 run through CodexAdapter.invoke against a local 400 sink, captured
+    before the adapter redacted anything. `@ROOT@` stands for the directory
+    that held each fake HOME; every other byte is verbatim. `forcefail` was
+    captured with the pre-TOML JSON encoder, so Codex echoed the whole
+    skills.config value back with its own escaping on top. The cases cover
+    the spellings Codex prints: the raw path, the realpath of a symlinked skill
+    or root, a `file://` URL of the containing directory (percent-encoded,
+    with tab and newline dropped), and the config-load echo."""
+
+    FIXTURE = CODEX_FIXTURES / "host-path-stderr.json"
+
+    def _host_tree(self, case: str, home: Path) -> None:
+        skills = home / ".agents" / "skills"
+        skills.mkdir(parents=True)
+
+        def skill(d: Path, text: str) -> None:
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "SKILL.md").write_text(text, encoding="utf-8")
+
+        no_front = "no frontmatter\n"
+        if case == "badfront":
+            skill(skills / "bad-front", no_front)
+            skill(skills / 'bad "q" front', "---\nname: [unclosed\n---\n")
+        elif case == "symbad":
+            skill(home / "elsewhere" / "symtarget", no_front)
+            (skills / "symlinked").symlink_to(home / "elsewhere" / "symtarget")
+        elif case == "symbadspecial":
+            target = home / "else where" / 'sym "q" café-\U0001F680'
+            skill(target, no_front)
+            (skills / "symlinked").symlink_to(target)
+        elif case in ("tabdir", "special-home-file-url"):
+            skill(skills / "tab\there", skill_markdown("tabbed"))
+        elif case == "badspecial":
+            for name in ['q "quote"', "back\\slash", "ctl\x01", "rocket-\U0001F680", "café",
+                         "sp ace", "pct%41", "new\nline", "tab\tx"]:
+                skill(skills / name, no_front)
+        elif case == "forcefail":
+            for name in ["plain-ascii-secret", 'quote "secret"', "rocket-\U0001F680", "café-secret"]:
+                skill(skills / name, skill_markdown("p"))
+        elif case == "symroot":
+            skills.rmdir()
+            skill(home / "real skills" / "bad", no_front)
+            skills.symlink_to(home / "real skills")
+        else:
+            raise AssertionError(case)
+
+    def _row(self, case: str, fixture: dict, root: Path) -> tuple[dict, Path]:
+        home = root / fixture["home"]
+        self._host_tree(case, home)
+        stderr = fixture["stderr"].replace("@ROOT@", str(root))
+        seen: dict = {}
+
+        def fake_run(plan):
+            mounted = next((Path(dict(plan.environment)["CODEX_HOME"]) / "skills").rglob("SKILL.md"))
+            seen["mounted"] = mounted
+            read = json.dumps({"type": "item.completed", "item": {
+                "id": "item_1", "type": "command_execution", "status": "completed",
+                "exit_code": 0, "command": f"cat {mounted}"}})
+            return {"stdout": read + "\n", "stderr": stderr, "returncode": 1, "timed_out": False,
+                    "elapsed_ms": 5, "observation_complete": False}
+
+        tree = root / "tree"
+        if not tree.exists():
+            (tree / "demo").mkdir(parents=True)
+            (tree / "demo" / "SKILL.md").write_text(skill_markdown("demo"), encoding="utf-8")
+        with mock.patch.object(tm.CodexAdapter, "_run_argv", staticmethod(fake_run)), \
+             mock.patch.dict(os.environ, {"HOME": str(home), "CODEX_HOME": str(root / "ambient-codex")}):
+            observation = tm.observe_cell_query(
+                tm.CodexAdapter(codex_cmd="codex exec --json"), tree, "q", False, None, 5,
+                trace_dir=root / "trace" / case, metadata={"skill_tree_hash": sb.skill_tree_hash(tree)})
+        # The row keeps only the last 1,000 characters of stderr; check the
+        # full redacted stderr too so an early line cannot hide a leak.
+        return {**observation.as_row(), "full_stderr": observation.invocation.stderr}, seen["mounted"]
+
+    def _saved_text(self, row: dict) -> str:
+        texts = [json.dumps(row, ensure_ascii=False)]
+        texts += [p.read_text(encoding="utf-8") for p in Path(row["trace_dir"]).rglob("*") if p.is_file()]
+        return "\n".join(texts)
+
+    def test_no_host_path_spelling_from_real_codex_stderr_reaches_the_saved_row(self):
+        cases = json.loads(self.FIXTURE.read_text(encoding="utf-8"))["cases"]
+        self.assertEqual(set(cases), {"badfront", "badspecial", "forcefail", "special-home-file-url",
+                                      "symbad", "symbadspecial", "symroot", "tabdir"})
+        for case, fixture in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
+                root = Path(td).resolve()
+                row, mounted = self._row(case, fixture, root)
+                saved = self._saved_text(row)
+                raw_saved = json.dumps(row)
+                for spelling in fixture["host_path_spellings"]:
+                    spelling = spelling.replace("@ROOT@", str(root))
+                    self.assertNotIn(spelling, row["full_stderr"])
+                    self.assertNotIn(spelling, saved)
+                    self.assertNotIn(json.dumps(spelling)[1:-1], raw_saved)
+                self.assertNotIn(str(root / fixture["home"] / ".agents"), saved)
+                self.assertIn("[REDACTED]", row["full_stderr"])
+                self.assertEqual(row["evidence"], [f"cat {mounted}"])
+                self.assertIn(str(mounted), (Path(row["trace_dir"]) / "trace.jsonl").read_text(encoding="utf-8"))
+
+    def test_redaction_keeps_the_codex_error_text_around_the_path(self):
+        cases = json.loads(self.FIXTURE.read_text(encoding="utf-8"))["cases"]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            row, _ = self._row("badfront", cases["badfront"], root)
+            tab_row, _ = self._row("tabdir", cases["tabdir"], root)
+        self.assertEqual(row["stderr"].splitlines()[1:], [
+            ("2026-09-29T21:28:43.535905Z ERROR codex_core::session::session: "
+             "failed to load skill [REDACTED]: missing field `description`"),
+            ("2026-09-29T21:28:43.536274Z ERROR codex_core::session::session: "
+             "failed to load skill [REDACTED]: missing YAML frontmatter delimited by ---"),
+        ])
+        self.assertEqual(tab_row["stderr"].splitlines()[1],
+                         "2026-09-29T21:28:46.401772Z ERROR codex_skills_extension::loader::host: "
+                         "failed to scan skill path [REDACTED]: No such file or directory (os error 2)")
+
+
 class CodexAdapterTests(unittest.TestCase):
     """Codex trigger support without a live codex binary."""
 
