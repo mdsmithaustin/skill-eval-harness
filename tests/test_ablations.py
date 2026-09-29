@@ -90,6 +90,33 @@ print(json.dumps({"type": "agent_end", "messages": [{"role": "assistant", "conte
 '''
 
 
+# Pi's documented tool_execution_end carries only toolCallId, toolName,
+# result, and isError -- never args (Pi docs). This fake emits exactly that
+# real shape, correlating the read path only through the matching
+# tool_execution_start, to prove run_pi_smoke detects a documented-shape read.
+FAKE_PI_TOOL_TRACE = '''#!/usr/bin/env python3
+import sys, json
+args = sys.argv[1:]
+skill_path = None
+i = 0
+while i < len(args):
+    if args[i] == "--skill":
+        skill_path = args[i + 1]
+        i += 2
+    else:
+        i += 1
+events = []
+if skill_path:
+    events.append({"type": "tool_execution_start", "toolCallId": "call_1", "toolName": "read", "args": {"path": skill_path}})
+    events.append({"type": "tool_execution_end", "toolCallId": "call_1", "toolName": "read", "result": {"content": "skill instructions"}, "isError": False})
+assistant = {"role": "assistant", "content": [{"type": "text", "text": "done"}], "usage": {"input": 3, "output": 2, "totalTokens": 5}}
+events.append({"type": "message_end", "message": assistant})
+events.append({"type": "agent_end", "messages": [assistant]})
+for e in events:
+    print(json.dumps(e))
+'''
+
+
 def _is_subsequence(small: bytes, big: bytes) -> bool:
     """True if `small` can be obtained from `big` by deleting bytes only (no
     additions/substitutions) — i.e. the change is a pure deletion."""
@@ -1607,6 +1634,52 @@ class AblationLiveExecutionTests(unittest.TestCase):
             self.assertEqual(meta["skill_tree_hash"], meta["ablation"]["parent_skill_hash"])
             ws_meta = json.loads((root / "good-pr" / "eval-runs" / "run" / "ans" / "with_skill" / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(ws_meta["skill_tree_hash"], meta["ablation"]["parent_skill_hash"])   # both arms, same revision
+
+    def test_pi_smoke_detects_documented_shape_skill_read(self):
+        # run_case derives its own skill_invoked/evidence via detect_trigger
+        # BEFORE handing them to write_trace_artifacts as `metadata`; that
+        # detector must agree with the metrics.json write_trace_artifacts
+        # computes from the very same trace, not silently disagree and get
+        # masked because metrics happens to win the metadata.json merge.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bindir = root / "bin"
+            bindir.mkdir()
+            (bindir / "pi").write_text(FAKE_PI_TOOL_TRACE, encoding="utf-8")
+            (bindir / "pi").chmod(0o755)
+            repo = root / "good-pr"
+            sd = repo / "skills" / "good-pr"
+            sd.mkdir(parents=True)
+            (sd / "SKILL.md").write_text(SKILL_FIXTURE, encoding="utf-8")
+            (repo / "evals").mkdir()
+            manifest = {
+                "version": 1, "skill_name": "good-pr", "skill_paths": ["skills/good-pr/SKILL.md"],
+                "variants": ["with_skill", "without_skill"],
+                "cases": [{"id": "ans", "split": "tune", "prompt": "Review.", "assertions": [{"name": "a", "type": "contains", "value": "x"}]}],
+            }
+            (repo / "evals" / "shared-benchmark.json").write_text(json.dumps(manifest), encoding="utf-8")
+            captured: dict = {}
+            real_write = sb.write_trace_artifacts
+
+            def spy(*args, **kwargs):
+                captured["metadata"] = dict(kwargs.get("metadata") or {})
+                return real_write(*args, **kwargs)
+
+            old_root, old_path = smoke.ROOT, os.environ["PATH"]
+            try:
+                smoke.ROOT = root
+                os.environ["PATH"] = str(bindir) + os.pathsep + old_path
+                smoke.write_trace_artifacts = spy
+                smoke.run_case("good-pr", manifest, manifest["cases"][0], "with_skill", "run", 60)
+            finally:
+                smoke.write_trace_artifacts = real_write
+                smoke.ROOT, os.environ["PATH"] = old_root, old_path
+            run_dir = root / "good-pr" / "eval-runs" / "run" / "ans" / "with_skill"
+            metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+            self.assertTrue(metrics["skill_invoked"])  # sanity: the trace really shows a read
+            self.assertTrue(captured["metadata"]["skill_invoked"])
+            self.assertEqual(captured["metadata"]["skill_invoked"], metrics["skill_invoked"])
+            self.assertTrue(captured["metadata"]["skill_invocation_evidence"])
 
 
 class AblationReviewFixesTests(unittest.TestCase):
