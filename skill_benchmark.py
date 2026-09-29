@@ -10876,6 +10876,16 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
 # skills Claude Code bundles, so a without_skill arm sees no skill at all.
 CLAUDE_CONTEXT_ISOLATION_ARGS = ("--safe-mode", "--disable-slash-commands")
 
+# Trigger runs must keep the mounted project skill, which both flags above
+# hide. Loading only the project setting source drops ~/.claude skills, agents,
+# CLAUDE.md, hooks, and settings env; --strict-mcp-config drops every MCP
+# server, claude.ai connectors included; disableBundledSkills drops the skills
+# Claude Code ships.
+CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS = (
+    "--setting-sources", "project", "--strict-mcp-config",
+    "--settings", '{"disableBundledSkills":true}',
+)
+
 
 def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str = "claude",
                       timeout: int = DEFAULT_RUNNER_TIMEOUT_S, extra_args: list[str] | None = None, cwd: str | Path | None = None,
@@ -11178,6 +11188,35 @@ def codex_structured_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
 # version-manager lookups. Both options are repeatable, so a user-supplied
 # --codex-cmd that already carries them stays valid.
 CODEX_CONTEXT_ISOLATION_ARGS = ("-c", "skills.include_instructions=false", "--disable", "apps")
+
+
+def codex_trigger_context_isolation_args() -> tuple[list[str], list[str]]:
+    """Codex flags for a trigger run, and the form a row records.
+
+    A trigger run must keep `$CODEX_HOME/skills` listed, so it cannot hide the
+    skill catalog. Codex has no switch for the ~/.agents/skills root alone, so
+    each host skill is disabled by path; the recorded form counts them instead
+    of listing the operator's skill paths."""
+    host_skills: list[str] = []
+    walked: set[str] = set()
+    # Codex finds nested and symlinked skills, so follow links, but visit each
+    # real directory once so a symlink cycle cannot hang the run.
+    for directory, subdirs, files in os.walk(Path.home() / ".agents" / "skills", followlinks=True):
+        real = os.path.realpath(directory)
+        if real in walked:
+            subdirs.clear()
+            continue
+        walked.add(real)
+        if "SKILL.md" in files:
+            host_skills.append(str(Path(directory) / "SKILL.md"))
+    host_skills.sort()
+    entries = ",".join(f"{{path={json.dumps(path)},enabled=false}}" for path in host_skills)
+
+    def args(skills_config: str) -> list[str]:
+        return ["-c", "skills.bundled.enabled=false", "-c", skills_config, "--disable", "apps"]
+
+    return (args(f"skills.config=[{entries}]"),
+            args(f"skills.config=<{len(host_skills)} host skill(s) disabled>"))
 
 
 def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = "codex exec", timeout: int = DEFAULT_RUNNER_TIMEOUT_S,

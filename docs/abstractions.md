@@ -221,7 +221,7 @@ a manifest gets neither key. The claim does not feed `execution_valid`.
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:10776`), Claude (`run_claude:10955`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:10776`), Claude (`run_claude:10965`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
 subagent runner (`run_subagent:13582`, which hosts record/replay tool I/O via `ToolReplayStore`),
 Jetty (`JettyClient:4097` and the export/run/import commands), and any runner that writes the

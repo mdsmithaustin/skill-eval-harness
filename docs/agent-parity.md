@@ -63,3 +63,21 @@ skill-trigger-matrix examples/demo-skill/evals/shared-benchmark.json \
 ```
 
 The report-level evidence class is `raw_autonomous_trigger_measurement`; individual result rows use the shared `raw_measurement` enum value. These are rates for tuning descriptions, not provenance-confirmed causal lift claims.
+
+## Trigger context isolation
+
+A trigger run measures whether the agent loads the mounted skill on its own. Anything else the agent is shown can win that routing decision, so each trigger adapter hides the operator's host context and keeps only the mounted skill. The answer-run flags (`--safe-mode --disable-slash-commands` for Claude, `-c skills.include_instructions=false` for Codex) cannot be reused here, because they also hide the mounted skill.
+
+- `claude` adds `--setting-sources project --strict-mcp-config --settings '{"disableBundledSkills":true}'`. That removes `~/.claude` skills, user agents, `~/.claude/CLAUDE.md`, user settings (hooks, env, permissions), every MCP server including claude.ai connectors, and the skills Claude Code bundles. The workspace `.claude/skills` still loads.
+- `codex` adds `-c skills.bundled.enabled=false`, a `-c skills.config=[{path=...,enabled=false}, ...]` entry naming each `SKILL.md` under `~/.agents/skills`, and `--disable apps`. That removes host skills under `~/.agents/skills`, Codex's bundled system skills, the apps connector, and plugin recommendations. The isolated `$CODEX_HOME/skills` still loads.
+- `pi` adds `--no-skills --skill <mounted skills dir>` next to the existing `--no-context-files --no-prompt-templates --no-extensions`. That stops Pi's own discovery of `~/.agents/skills` and project `.agents/skills`. The mounted skills directory still loads, listed like a discovered skill and not force-loaded.
+
+Each trigger row records the flags it ran with as `context_isolation`. A Codex row records `skills.config=<N host skill(s) disabled>` in place of the operator's skill paths.
+
+This was checked on Claude Code CLI 2.1.284, codex-cli 0.156.1, and Pi 0.73.1. A census of each adapter's real invocation path found the following after the change.
+
+- Claude lists the mounted skill plus Claude Code's own `design` and `doctor` entries, only built-in agents, and no MCP servers. A live run with these flags does not see `~/.claude/CLAUDE.md` and still signs in through OAuth.
+- Codex lists only the mounted skill.
+- Pi lists only the mounted skill. Pi was checked through its own resource loader, not a live run.
+
+Limits. When Claude auth is not file-portable, the run still uses the operator's `CLAUDE_CONFIG_DIR`, so the row keeps its `config_isolation_warning`. Codex accepts an unknown `-c` key silently, so a Codex build that renames `skills.config` or `skills.bundled` would show host skills again while the row still records `context_isolation`; re-run the census after a Codex upgrade. Codex's admin skill root (`/etc/codex/skills`) is not disabled. Vibe was not measured.
