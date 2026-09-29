@@ -6,7 +6,9 @@ test_cbc) and test_skill_benchmark, which accreted by merge rather than by
 subject; docstrings citing finding/roadmap ids are preserved.
 """
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -14,6 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from helpers import (
     load_example_module,
@@ -786,8 +789,7 @@ class AblationRunnerIntegrationTests(unittest.TestCase):
             skill_md = next(f for f in skill_files if f["remote_path_hint"].endswith("SKILL.md"))
             self.assertNotIn("Regression-proof requirement", Path(skill_md["local_path"]).read_text(encoding="utf-8"))
             task_json = json.loads(next(f for f in payload["upload_plan"]["files"] if f["role"] == "task")["content"])
-            self.assertEqual(task_json["variant"], "with_skill")              # blinded: model sees with_skill
-            self.assertNotIn("ablation", task_json)                          # no hypothesis leaked to the model
+            self.assertEqual(sorted(task_json), ["input_files", "instruction", "prompt", "skill_files"])
             self.assertEqual(payload["harness"]["variant"], "ablation:no-rp")           # truth in harness-only record
             self.assertEqual(payload["harness"]["ablation"]["mode"], "materialized")
 
@@ -2540,18 +2542,16 @@ class PreparedTaskTests(unittest.TestCase):
                                input_files=(), run_dir="c/ablation:no-rp", instruction="...directive...",
                                prompt="Review.", tags=(), ablation=sim)
 
-    def test_materialized_arm_presents_as_with_skill(self):
+    def test_materialized_arm_is_blind(self):
         pt = self.mat_row()
         self.assertTrue(pt.is_materialized_ablation)
         self.assertTrue(pt.is_blind)
-        self.assertEqual(pt.model_facing_variant(), "with_skill")             # experiment-blind
         self.assertEqual(pt.harness_record()["variant"], "ablation:no-rp")    # truth on the row
 
     def test_instruction_simulated_arm_is_transparent(self):
         pt = self.sim_row()
         self.assertFalse(pt.is_materialized_ablation)
         self.assertFalse(pt.is_blind)
-        self.assertEqual(pt.model_facing_variant(), "ablation:no-rp")         # model is told what to simulate
 
     def test_upload_token_is_opaque_for_any_ablation(self):
         for pt in (self.mat_row(), self.sim_row()):
@@ -2561,8 +2561,7 @@ class PreparedTaskTests(unittest.TestCase):
 
     def test_no_model_facing_method_leaks_truth_for_a_blind_arm(self):
         pt = self.mat_row()
-        for out in (pt.model_facing_variant(), pt.upload_token()):
-            self.assertNotIn("no-rp", out)
+        self.assertNotIn("no-rp", pt.upload_token())
         self.assertIn("no-rp", pt.harness_record()["variant"])               # truth reachable only on the harness side
 
     def test_round_trips_through_the_row(self):
@@ -2617,13 +2616,11 @@ class ConsumersTakeAPreparedTaskTests(unittest.TestCase):
         sim = sb.build_task_prompt(self.sim_pt(), ["skills/root-0/SKILL.md"], [])
         self.assertIn("simulate this ablation", sim)       # instruction-simulated is told what to do
 
-    def test_safe_task_json_model_visible_variant_is_owned_by_the_object(self):
-        mat = sb.safe_task_json(self.mat_pt(), self.MANIFEST, task_name="t", upload_files=[])
-        self.assertEqual(mat["variant"], "with_skill")     # blinded via pt.model_facing_variant()
-        self.assertNotIn("ablation", mat)                  # no hypothesis leaked to the model
-        sim = sb.safe_task_json(self.sim_pt(), self.MANIFEST, task_name="t", upload_files=[])
-        self.assertEqual(sim["variant"], "ablation:no-rp")                          # non-blind: true variant shown
-        self.assertEqual(sim["ablation"]["removed_component"], "regression-proof")  # directive from the manifest
+    def test_safe_task_json_hides_the_arm_unless_the_arm_is_told_to_simulate(self):
+        mat = sb.safe_task_json(self.mat_pt(), self.MANIFEST, upload_files=[])
+        self.assertEqual(sorted(mat), ["input_files", "instruction", "prompt", "skill_files"])
+        sim = sb.safe_task_json(self.sim_pt(), self.MANIFEST, upload_files=[])
+        self.assertEqual(sim["ablation"]["removed_component"], "regression-proof")  # non-blind: directive from the manifest
 
 
 class SubjectVisiblePromptTests(unittest.TestCase):
@@ -2690,6 +2687,138 @@ class SubjectVisiblePromptTests(unittest.TestCase):
         self.assertIn("evaluation: programmatic\n", frontmatter)
         self.assert_organic(frontmatter.replace("evaluation: programmatic\n", ""))
         self.assert_organic(body)
+
+
+class JettyModelVisibleTaskTests(unittest.TestCase):
+    """The Jetty runbook tells the agent to read the uploaded task JSON, so that
+    file and its sandbox path are model-visible. They must carry only what the
+    runbook uses and must not name the case, split, run, or experiment arm."""
+
+    ABL = {"id": "no-rp", "removed_component": "regression-proof", "mechanism": "section",
+           "class": "instructions", "target": {"heading": "## Regression-proof requirement"}}
+    CASE_ID = "pos-security-review"
+
+    def export(self, root: Path) -> dict[str, dict]:
+        p = make_eval_repo(
+            root, skill_name="good-pr", skill_text=SKILL_FIXTURE,
+            cases=[{"id": self.CASE_ID, "split": "holdout", "kind": "behavior",
+                    "prompt": "Review the diff.",
+                    "assertions": [{"name": "a", "type": "contains", "value": "x"}]}],
+            ablations=[self.ABL],
+            extra={"old_skill_paths": ["old-skills/good-pr/SKILL.md"]},
+        )
+        old = root / "repo" / "old-skills" / "good-pr" / "SKILL.md"
+        old.parent.mkdir(parents=True)
+        old.write_text(SKILL_FIXTURE, encoding="utf-8")
+        out = root / "jetty.jsonl"
+        rc = sb.export_jetty(SimpleNamespace(
+            manifest=str(p), split=None, runs_per_variant=1,
+            include_old_skill=True, include_ablations=True, allow_missing_prompts=False,
+            jetty_collection="skill-evals", jetty_task_prefix=None,
+            jetty_agent="claude-code", jetty_model="claude-sonnet-4-6",
+            jetty_model_provider="anthropic", jetty_snapshot="python312-uv",
+            use_trial_keys=False, out=str(out), dry_run=False,
+            ablation_dir=str(root / "abl"),
+        ))
+        self.assertEqual(rc, 0)
+        payloads = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+        return {row["harness"]["variant"]: row for row in payloads}
+
+    @staticmethod
+    def task_item(payload: dict) -> dict:
+        return next(f for f in payload["upload_plan"]["files"] if f["role"] == "task")
+
+    def test_task_json_carries_only_runbook_fields_and_hides_the_arm(self):
+        with tempfile.TemporaryDirectory() as td:
+            by_variant = self.export(Path(td))
+        self.assertEqual(
+            sorted(by_variant),
+            ["ablation:no-rp", "old_skill", "with_skill", "without_skill"])
+        self.assertEqual(by_variant["ablation:no-rp"]["harness"]["ablation"]["mode"], "materialized")
+        for variant, payload in by_variant.items():
+            item = self.task_item(payload)
+            task_json = json.loads(item["content"])
+            self.assertEqual(
+                sorted(task_json), ["input_files", "instruction", "prompt", "skill_files"], variant)
+            self.assertRegex(item["remote_path_hint"], r"\Atasks/arm-[0-9a-f]{10}\.json\Z", variant)
+            self.assertEqual(
+                payload["jetty_request"]["jetty"]["template_variables"]["task_json"],
+                "/app/assets/" + item["remote_path_hint"], variant)
+            self.assertRegex(
+                payload["upload_plan"]["bundle"]["archive_name"], r"\Aarm-[0-9a-f]{10}\.zip\Z", variant)
+            model_visible = "\n".join([
+                item["content"],
+                *(f["remote_path_hint"] for f in payload["upload_plan"]["files"]),
+                json.dumps(payload["jetty_request"]["jetty"]["template_variables"]),
+                payload["upload_plan"]["bundle"]["archive_name"],
+            ]).lower()
+            for leak in (self.CASE_ID, "holdout", "with-skill", "without-skill", "old-skill",
+                         "with_skill", "without_skill", "old_skill", "ablation", "no-rp"):
+                self.assertNotIn(leak, model_visible, f"{variant} leaks {leak!r}")
+            SubjectVisiblePromptTests().assert_organic(item["content"])
+        task_paths = {self.task_item(p)["remote_path_hint"] for p in by_variant.values()}
+        self.assertEqual(len(task_paths), 4)
+
+
+class JettyUploadTokenUniquenessTests(unittest.TestCase):
+    """Two payloads in one export must never share an upload token: they would
+    share the same task file, bundle archive, and sandbox paths in Jetty's
+    storage, so the second upload silently overwrites the first instead of
+    running its own task. export_jetty must die loudly instead."""
+
+    CASE_ID = "pos-token-uniqueness"
+
+    def export(self, root: Path, *, jetty_task_prefix=None):
+        p = make_eval_repo(
+            root, skill_name="good-pr", skill_text=SKILL_FIXTURE,
+            cases=[{"id": self.CASE_ID, "split": "holdout", "kind": "behavior",
+                    "prompt": "Review the diff.",
+                    "assertions": [{"name": "a", "type": "contains", "value": "x"}]}],
+        )
+        out = root / "jetty.jsonl"
+        return sb.export_jetty(SimpleNamespace(
+            manifest=str(p), split=None, runs_per_variant=1,
+            include_old_skill=False, include_ablations=False, allow_missing_prompts=False,
+            jetty_collection="skill-evals", jetty_task_prefix=jetty_task_prefix,
+            jetty_agent="claude-code", jetty_model="claude-sonnet-4-6",
+            jetty_model_provider="anthropic", jetty_snapshot="python312-uv",
+            use_trial_keys=False, out=str(out), dry_run=False,
+        ))
+
+    def test_export_jetty_dies_loudly_on_a_token_collision(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            stderr = io.StringIO()
+            with mock.patch("ablation_model.opaque_token", return_value="collide"), \
+                    contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                self.export(root)
+        message = stderr.getvalue()
+        # Both colliding tasks' identities (case/variant/run) must be named,
+        # not just the shared token, so a reader knows which two to fix.
+        self.assertIn(self.CASE_ID, message)
+        self.assertIn("with_skill", message)
+        self.assertIn("without_skill", message)
+        self.assertIn("collide", message)
+
+    def test_a_different_jetty_task_prefix_avoids_the_collision(self):
+        # Same fixture, no patched hash: with_skill and without_skill already
+        # get distinct tokens, so this is the control showing export succeeds
+        # absent a real collision.
+        with tempfile.TemporaryDirectory() as td:
+            rc = self.export(Path(td))
+        self.assertEqual(rc, 0)
+
+    def test_upload_token_folds_in_the_task_prefix_when_given(self):
+        pt = am.PreparedTask(
+            case_id="c1", split="tune", kind="behavior", variant_truth="with_skill",
+            run_number=1, skill_name="good-pr", repo_root="/r", skill_paths=(),
+            input_files=(), run_dir="c1/with_skill", instruction="i", prompt="p", tags=())
+        plain = pt.upload_token()
+        self.assertEqual(plain, pt.upload_token(None))    # no prefix: unchanged token
+        prefixed_a = pt.upload_token("batch-a")
+        prefixed_b = pt.upload_token("batch-b")
+        self.assertNotEqual(plain, prefixed_a)
+        self.assertNotEqual(prefixed_a, prefixed_b)        # two exports, two prefixes, no collision
 
 
 class MaterializeCarriesTypedArmTests(unittest.TestCase):

@@ -3424,12 +3424,12 @@ def slugify(value: str) -> str:
 
 
 def jetty_task_name(pt: PreparedTask, prefix: str | None = None) -> str:
+    """Jetty's server-side task name, which keys trajectory routes and its UI.
+    The runbook and template_variables never pass it into the sandbox, so
+    model-visible upload paths use pt.upload_token() instead."""
     base = prefix or pt.skill_name or "skill-eval"
-    # The task filename and upload placeholders are MODEL-VISIBLE (the runbook
-    # directs the agent to read the task JSON by that path). The PreparedTask owns
-    # the rule that a blind (ablation) arm never exposes "ablation:<id>" — its
-    # upload_token() is opaque and deterministic. The truth stays harness-only.
-    return "-".join(slugify(str(part)) for part in [base, pt.case_id, pt.upload_token(), str(pt.run_number)])
+    arm_label = Arm(variant_truth=pt.variant_truth, blind=pt.is_ablation).upload_token()
+    return "-".join(slugify(str(part)) for part in [base, pt.case_id, arm_label, str(pt.run_number)])
 
 
 def canonical_jetty_runbook(agent: str, model: str, model_provider: str, snapshot: str) -> str:
@@ -3606,23 +3606,15 @@ def jetty_sandbox_path(remote_path_hint: str) -> str:
     return f"{JETTY_SANDBOX_ASSETS_DIR}/{jetty_archive_member_path(remote_path_hint)}"
 
 
-def safe_task_json(pt: PreparedTask, manifest: dict[str, Any], *, task_name: str, upload_files: list[dict[str, Any]]) -> dict[str, Any]:
+def safe_task_json(pt: PreparedTask, manifest: dict[str, Any], *, upload_files: list[dict[str, Any]]) -> dict[str, Any]:
+    """The model-visible task file: carries only the task text and file lists.
+    Case, split, arm, and run identity live in the payload's harness block."""
     variant = pt.variant_truth
-    safe = {
-        "case_id": pt.case_id,
-        "split": pt.split,
-        "kind": pt.kind,
-        # The model-visible variant is OWNED by the PreparedTask: model_facing_variant()
-        # presents a blind (materialized) arm as with_skill and leaves every other arm
-        # as its true variant — one authority, no per-branch override that could drift.
-        "variant": pt.model_facing_variant(),
-        "run_number": pt.run_number,
-        "skill_name": pt.skill_name,
+    safe: dict[str, Any] = {
         "instruction": pt.instruction,
         "prompt": pt.prompt,
         "input_files": [item["sandbox_path"] for item in upload_files if item.get("role") == "fixture"],
         "skill_files": [],
-        "tags": list(pt.tags),
     }
     if variant == "with_skill":
         safe["skill_files"] = [item["sandbox_path"] for item in upload_files if item.get("role") == "skill"]
@@ -3671,6 +3663,7 @@ def build_jetty_payload(
     # come from it — not from a raw row re-indexed key by key.
     variant = pt.variant_truth
     task_name = jetty_task_name(pt, task_prefix)
+    upload_name = pt.upload_token(task_prefix)
     files: list[dict[str, Any]] = []
     fixture_destinations: set[str] = set()
     for i, local in enumerate(pt.input_files, 1):
@@ -3680,7 +3673,7 @@ def build_jetty_payload(
         fixture_destinations.add(destination)
         files.append({
             "role": "fixture",
-            "placeholder": placeholder(task_name, "fixture", i),
+            "placeholder": placeholder(upload_name, "fixture", i),
             "local_path": str(Path(local).resolve()),
             "remote_path_hint": destination,
             "private": False,
@@ -3692,7 +3685,7 @@ def build_jetty_payload(
             for i, (abs_path, rel) in enumerate(enumerate_tree(Path(with_skill_tree_dir)), 1):
                 files.append({
                     "role": "skill",
-                    "placeholder": placeholder(task_name, "skill", i),
+                    "placeholder": placeholder(upload_name, "skill", i),
                     "local_path": str(abs_path),
                     "remote_path_hint": f"skills/{pt.skill_name}/{rel}",
                     "private": False,
@@ -3701,7 +3694,7 @@ def build_jetty_payload(
             for i, (local, rel) in enumerate(enumerate_prepared_skill_roots(pt), 1):
                 files.append({
                     "role": "skill",
-                    "placeholder": placeholder(task_name, "skill", i),
+                    "placeholder": placeholder(upload_name, "skill", i),
                     "local_path": str(Path(local).resolve()),
                     "remote_path_hint": f"skills/{pt.skill_name}/{rel}",
                     "private": False,
@@ -3716,7 +3709,7 @@ def build_jetty_payload(
         for i, (local, rel) in enumerate(enumerate_prepared_skill_roots(pt), 1):
             files.append({
                 "role": "old_skill",
-                "placeholder": placeholder(task_name, "old-skill", i),
+                "placeholder": placeholder(upload_name, "old-skill", i),
                 "local_path": str(Path(local).resolve()),
                 "remote_path_hint": f"skills/{pt.skill_name}/{rel}",
                 "private": False,
@@ -3730,7 +3723,7 @@ def build_jetty_payload(
             for i, (abs_path, rel) in enumerate(enumerate_tree(Path(tree.dir)), 1):
                 files.append({
                     "role": "skill",
-                    "placeholder": placeholder(task_name, "skill", i),
+                    "placeholder": placeholder(upload_name, "skill", i),
                     "local_path": str(abs_path),
                     "remote_path_hint": f"skills/{pt.skill_name}/{rel}",
                     "private": False,
@@ -3743,7 +3736,7 @@ def build_jetty_payload(
             for i, (abs_path, rel) in enumerate(enumerate_tree(Path(with_skill_tree_dir)), 1):
                 files.append({
                     "role": "skill",
-                    "placeholder": placeholder(task_name, "skill", i),
+                    "placeholder": placeholder(upload_name, "skill", i),
                     "local_path": str(abs_path),
                     "remote_path_hint": f"skills/{pt.skill_name}/{rel}",
                     "private": False,
@@ -3752,7 +3745,7 @@ def build_jetty_payload(
             for i, (local, rel) in enumerate(enumerate_prepared_skill_roots(pt), 1):
                 files.append({
                     "role": "skill",
-                    "placeholder": placeholder(task_name, "skill", i),
+                    "placeholder": placeholder(upload_name, "skill", i),
                     "local_path": str(Path(local).resolve()),
                     "remote_path_hint": f"skills/{pt.skill_name}/{rel}",
                     "private": False,
@@ -3787,11 +3780,11 @@ def build_jetty_payload(
             f"{pt.case_id}: Jetty mounted skill tree hash "
             f"{mounted_skill_tree_hash!r} does not match expected {expected_skill_hash!r}"
         )
-    task_json = safe_task_json(pt, manifest, task_name=task_name, upload_files=files)
-    task_remote_hint = f"tasks/{task_name}.json"
+    task_json = safe_task_json(pt, manifest, upload_files=files)
+    task_remote_hint = f"tasks/{upload_name}.json"
     task_item = {
         "role": "task",
-        "placeholder": placeholder(task_name, "task", "json"),
+        "placeholder": placeholder(upload_name, "task", "json"),
         "content": json.dumps(task_json, ensure_ascii=False, indent=2) + "\n",
         "remote_path_hint": task_remote_hint,
         "sandbox_path": jetty_sandbox_path(task_remote_hint),
@@ -3807,7 +3800,7 @@ def build_jetty_payload(
     # /app/assets/ with member paths preserved) is the only shape that keeps
     # skills/fixtures/tasks trees intact. Only the zip's storage path is
     # unknown until run time, hence the single placeholder in file_paths.
-    bundle_placeholder = placeholder(task_name, "bundle", "zip")
+    bundle_placeholder = placeholder(upload_name, "bundle", "zip")
     jetty_block = {
         "runbook": True,
         "collection": collection,
@@ -3855,7 +3848,7 @@ def build_jetty_payload(
             "jetty": jetty_block,
         },
         "upload_plan": {
-            "bundle": {"placeholder": bundle_placeholder, "archive_name": f"{task_name}.zip"},
+            "bundle": {"placeholder": bundle_placeholder, "archive_name": f"{upload_name}.zip"},
             "files": all_files,
         },
     }
@@ -3920,8 +3913,23 @@ def export_jetty(args: argparse.Namespace) -> int:
     if any(row.get("turns") for row in rows):
         raise AssertionError("Jetty multi-turn case passed the pre-export gate")
     answer_design = answer_design_from_tasks(rows, default_model=model)
+    prepared = [PreparedTask.from_row(row) for row in rows]
+    # Two payloads sharing an upload token would share one task file path and
+    # bundle name, so neither run could be attributed from its uploads.
+    seen_by_token: dict[str, PreparedTask] = {}
+    for pt in prepared:
+        token = pt.upload_token(task_prefix)
+        prior = seen_by_token.get(token)
+        if prior is not None:
+            die(
+                f"Jetty export: upload token {token!r} collides for "
+                f"{prior.case_id!r}/{prior.variant_truth} run {prior.run_number} and "
+                f"{pt.case_id!r}/{pt.variant_truth} run {pt.run_number} — "
+                "their task file, bundle archive, and sandbox paths would overwrite each other"
+            )
+        seen_by_token[token] = pt
     payloads = [build_jetty_payload(
-        PreparedTask.from_row(row),
+        pt,
         manifest,
         collection=collection,
         task_prefix=task_prefix,
@@ -3933,7 +3941,7 @@ def export_jetty(args: argparse.Namespace) -> int:
         ablation_trees=ablation_trees,
         with_skill_tree_dir=with_skill_tree_dir,
         answer_design=answer_design,
-    ) for row in rows]
+    ) for pt in prepared]
     out = Path(args.out) if getattr(args, "out", None) else None
     fh = out.open("w", encoding="utf-8") if out else sys.stdout
     try:
