@@ -27,14 +27,17 @@ whole loop, runnable with no key:
 cd examples/demo-skill
 HARNESS=../../skill_benchmark.py
 
-# (assumes /tmp/demo-runs exists from the demo README's prepare + run-codex steps)
+# (assumes /tmp/demo-runs exists from the demo README's prepare + run-codex + judge
+#  steps — c-review carries a judge assertion, so skipping judge leaves grading
+#  "partial" and `report` below prints "incomplete experiment evidence" instead)
 python3 $HARNESS benchmark evals/shared-benchmark.json --runs /tmp/demo-runs \
-  --variant with_skill --variant without_skill --out /tmp/demo-benchmark.json
+  --variant with_skill --variant without_skill \
+  --judge-results /tmp/demo-judge-results.jsonl --out /tmp/demo-benchmark.json
 
 python3 $HARNESS report --benchmark /tmp/demo-benchmark.json --format github
 ```
 
-Real output (2026-07-05, Python 3.11):
+Real output (2026-09-29, Python 3.12, the demo README's 6-run walkthrough):
 
 ```text
 # Skill eval — demo-reviewer
@@ -43,27 +46,44 @@ Real output (2026-07-05, Python 3.11):
 
 | variant | cases | runs | mean objective | mean combined | missing | exec errors |
 |---|---|---|---|---|---|---|
-| with_skill | 2 | 2 | 1.00 | 1.00 | 0 | 0 |
-| without_skill | 2 | 2 | 0.00 | 0.00 | 0 | 0 |
+| with_skill | 2 | 12 | 1.00 | 1.00 | 0 | 0 |
+| without_skill | 2 | 12 | 0.00 | 0.00 | 0 | 0 |
 ```
 
 `--format github` writes a job-summary table (and annotations) straight into a GitHub
 Actions run. `--format junit` writes the same result as JUnit XML, one `<testcase>` per
-case/variant/run, which any CI that reads JUnit will render and gate on:
+case/variant/run, which any CI that reads JUnit will render and gate on (trimmed to the
+first two runs of each case/variant; the demo's 6 runs each produce `run-1` .. `run-6`):
 
 ```text
-<testsuite name="skill-eval:demo-reviewer" tests="4" failures="2" errors="0" ...>
-  <testcase classname="demo-reviewer.c-review" name="with_skill/run-1" />
-  <testcase classname="demo-reviewer.c-review" name="without_skill/run-1">
-    <failure message="2 failing check(s)">severity-label: none matched: ['Blocking', 'Minor', 'Clean']
-cite-checklist: none matched: ['file and line']</failure>
+<testsuite name="skill-eval:demo-reviewer" tests="24" failures="12" errors="0" ...>
+  <testcase classname="demo-reviewer.c-review.default-model" name="default-model/with_skill/run-1" />
+  <testcase classname="demo-reviewer.c-review.default-model" name="default-model/with_skill/run-2" />
+  <testcase classname="demo-reviewer.c-review.default-model" name="default-model/without_skill/run-1">
+    <failure message="3 failing check(s)">severity-label: none matched: ['Blocking', 'Minor', 'Clean']
+cite-checklist: none matched: ['file and line']
+actionable-review: no justification for the finding, or the concrete gap (the missing test) is never named</failure>
   </testcase>
-  <testcase classname="demo-reviewer.c-adversarial" name="with_skill/run-1" />
-  <testcase classname="demo-reviewer.c-adversarial" name="without_skill/run-1">
+  <testcase classname="demo-reviewer.c-review.default-model" name="default-model/without_skill/run-2">
+    <failure message="3 failing check(s)">severity-label: none matched: ['Blocking', 'Minor', 'Clean']
+cite-checklist: none matched: ['file and line']
+actionable-review: no justification for the finding, or the concrete gap (the missing test) is never named</failure>
+  </testcase>
+  <testcase classname="demo-reviewer.c-adversarial.default-model" name="default-model/with_skill/run-1" />
+  <testcase classname="demo-reviewer.c-adversarial.default-model" name="default-model/without_skill/run-1">
     <failure message="1 failing check(s)">severity-label: none matched: ['Blocking', 'Minor', 'Clean']</failure>
   </testcase>
 </testsuite>
 ```
+
+`c-review`'s failures now list all three assertions (the two objective checks plus the
+`actionable-review` judge verdict) because the benchmark above passed `--judge-results`.
+Drop that flag and `--format junit` still emits the objective testcases (minus the judge
+assertion) plus one extra `<testcase classname="demo-reviewer.experiment"
+name="answer-design-coverage">` `<error>`; `--format github` is stricter and blanks the
+whole table instead — `**Experiment status:** incomplete (deferred judge verdicts, blocked
+grading evidence)`, lift `— − — = —`, and an `::error title=skill-eval demo-reviewer::`
+annotation.
 
 The `without_skill` failures are *expected* here — that arm exists to prove the skill is
 what passes the cases. Which is the first subtlety of gating an eval: you do not gate on
