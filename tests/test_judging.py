@@ -31,6 +31,7 @@ from helpers import (
 import judge_contracts as jc
 import judge_verdict as jv
 import skill_benchmark as sb
+from manifest_contracts import RunNumber
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1018,6 +1019,15 @@ class CrossJudgeConsensusTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "delimiter"):
             sb.judge_task_id(
                 "a", "with_skill", 1, assertion, model="b::c")
+
+    def test_judge_task_id_accepts_the_run_identity_type(self):
+        """RunNumber (manifest_contracts) is the canonical run-identity type;
+        its constructor already rejects bool and non-positive values, so
+        judge_task_id must accept it like any other int, not just plain int."""
+        assertion = {"name": "j", "type": "judge"}
+        self.assertEqual(
+            sb.judge_task_id("c", "with_skill", RunNumber(1), assertion),
+            "c::with_skill::run-1::j")
 
     def test_consensus_row_joins_like_a_single_verdict(self):
         jassert = {"name": "j", "type": "judge", "severity": "gate"}

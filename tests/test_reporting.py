@@ -593,7 +593,12 @@ class G1_TokenOverheadScorableTests(unittest.TestCase):
         a plain int. Regression: grading a qualitative assertion threads that
         RunNumber into judge_task_id, whose `type(run_number) is not int` check
         rejects any int subclass -- so token-overhead crashed on every manifest
-        with a judge/qualitative assertion, even a single clean run per arm."""
+        with a judge/qualitative assertion, even a single clean run per arm.
+
+        A judge assertion with no --judge-results also leaves the benchmark
+        surface's design gate at "deferred_judge_verdicts"; token-overhead must
+        report that real reason, not a generic "answer_run_coverage_incomplete"
+        that hides why the row is blocked."""
         judge_case = {"id": "c", "split": "tune", "prompt": "x",
                       "assertions": [{"name": "quality", "type": "judge", "severity": "gate",
                                       "rubric": ["Pass only when the answer is correct."]}]}
@@ -605,6 +610,7 @@ class G1_TokenOverheadScorableTests(unittest.TestCase):
             attest_answer_design(p, runs)
             rep = sb.paired_token_overhead_report(p, runs=runs)
             self.assertEqual(rep["summary"]["observed"]["paired_runtime_rows"], 1)
+            self.assertEqual(rep["summary"]["design_coverage_reason"], "deferred_judge_verdicts")
 
 
 class G2_BenchmarkMetricsScorableTests(unittest.TestCase):
