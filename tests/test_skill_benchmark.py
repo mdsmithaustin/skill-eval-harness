@@ -410,6 +410,30 @@ class SkillBenchmarkTests(unittest.TestCase):
         self.assertEqual(metrics["output_tokens"], 9)
         self.assertEqual(metrics["total_tokens"], 109)
 
+    def test_codex_lifecycle_events_do_not_misclassify_as_file_reads(self):
+        # "read" is a substring of "thread"; thread.started must not normalize
+        # as a file_read just because the provider type name contains it.
+        records = [
+            {"type": "thread.started", "thread_id": "thread_1"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"id": "item_0", "type": "command_execution",
+                                                 "command": "echo hi", "aggregated_output": "hi\n",
+                                                 "exit_code": 0, "status": "completed"}},
+            {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message",
+                                                 "text": "codex-trace-ok"}},
+            {"type": "turn.completed", "usage": {"input_tokens": 50, "cached_input_tokens": 5,
+                                                 "output_tokens": 10, "reasoning_output_tokens": 0}},
+        ]
+        events, metrics = sb.normalize_trace_records(records, source="codex")
+        self.assertEqual(
+            [e["type"] for e in events["events"]],
+            ["event", "event", "command", "message", "metric"])
+        self.assertEqual(metrics["commands"], 1)
+        self.assertEqual(metrics["file_reads"], 0)
+        self.assertEqual(metrics["input_tokens"], 50)
+        self.assertEqual(metrics["output_tokens"], 10)
+        self.assertEqual(metrics["total_tokens"], 60)
+
     def test_import_jetty_results_roundtrip_can_be_benchmarked(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
