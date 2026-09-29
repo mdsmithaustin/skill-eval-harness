@@ -22,6 +22,7 @@ observed trigger-eval runs and at least one autonomous load.
 """
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -1757,13 +1758,13 @@ class MountedSkillNameTests(unittest.TestCase):
       `name` (a folder mismatch only logs a warning), and the `skill` tool
       looks its `name` argument up in that map."""
 
-    def _row(self, adapter, fake_run):
+    def _row(self, adapter, fake_run, tree_dir=DEMO_SKILLS):
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(type(adapter), "_run_argv", staticmethod(fake_run)), \
              mock.patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "ambient-codex")}):
             return tm.run_cell_query(
-                adapter, DEMO_SKILLS, "Review this proposed change", True, None, 12,
-                metadata={"skill_tree_hash": sb.skill_tree_hash(DEMO_SKILLS)},
+                adapter, tree_dir, "Review this proposed change", True, None, 12,
+                metadata={"skill_tree_hash": sb.skill_tree_hash(tree_dir)},
             )
 
     def _claude_row(self, invoked: str):
@@ -1779,7 +1780,7 @@ class MountedSkillNameTests(unittest.TestCase):
         ]) + "\n"
         return self._row(tm.ClaudeAdapter(), lambda plan: completed_invocation(stream))
 
-    def _codex_row(self, injected: str):
+    def _codex_row(self, injected: str, tree_dir=DEMO_SKILLS):
         events = (CODEX_FIXTURES / "exec-skill-events.jsonl").read_text(encoding="utf-8")
 
         def fake_run(plan):
@@ -1792,7 +1793,7 @@ class MountedSkillNameTests(unittest.TestCase):
             (day / f"rollout-2026-09-13T13-30-23-{CODEX_THREAD_ID}.jsonl").write_text(rollout, encoding="utf-8")
             return completed_invocation(events)
 
-        return self._row(tm.CodexAdapter(codex_cmd="codex exec --json"), fake_run)
+        return self._row(tm.CodexAdapter(codex_cmd="codex exec --json"), fake_run, tree_dir)
 
     def _vibe_row(self, invoked: str):
         stream = "\n".join(json.dumps(record) for record in [
@@ -1842,6 +1843,27 @@ class MountedSkillNameTests(unittest.TestCase):
                 row = self._vibe_row(invoked)
                 self.assertTrue(row["observation_complete"], row.get("provider_error"))
                 self.assertFalse(row["triggered"])
+
+    def test_codex_rollout_injection_matches_padded_frontmatter_name(self):
+        # A SKILL.md frontmatter `name:` value can carry stray whitespace
+        # (`" demo-reviewer "`). Codex strips it before listing/injecting the
+        # skill, so detection must strip it too, or a real injection of the
+        # trimmed name never matches the padded needle `mounted_skill_names`
+        # read straight from frontmatter.
+        with tempfile.TemporaryDirectory() as copy_root:
+            tree_dir = Path(copy_root) / "skills"
+            shutil.copytree(DEMO_SKILLS, tree_dir)
+            skill_md = tree_dir / "demo" / "SKILL.md"
+            skill_md.write_text(
+                skill_md.read_text(encoding="utf-8").replace(
+                    "name: demo-reviewer", 'name: " demo-reviewer "', 1),
+                encoding="utf-8",
+            )
+            row = self._codex_row("demo-reviewer", tree_dir=tree_dir)
+        self.assertTrue(row["observation_complete"], row.get("provider_error"))
+        self.assertTrue(row["triggered"])
+        self.assertEqual(len(row["evidence"]), 1)
+        self.assertRegex(row["evidence"][0], r"^rollout skill injection: demo-reviewer \(.*/skills/demo/SKILL\.md\)$")
 
 
 def _csv_env(name, default):
