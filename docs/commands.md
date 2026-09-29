@@ -66,7 +66,9 @@ skill-benchmark import-trace \
 
 ## Run Codex JSONL tasks
 
-`run-codex` is a compatibility wrapper for `run-agent --agent codex`. It executes prepared rows through a command compatible with `codex exec --json`, adds `--output-last-message <file>` for final-answer capture, saves JSONL as `trace.jsonl`, normalizes events/metrics, runs with isolated `CODEX_HOME` outside the model workdir, and records nonzero/timeouts as failed run artifacts. The shared subprocess owner observes CLI-leader exit independently of inherited capture-pipe EOF, then terminates remaining members of the original process group on POSIX before bounded retry/backoff removes the isolated home. An escaped process cannot make pipe draining unbounded: POSIX capture descriptors are closed after a short grace period, while non-POSIX reader threads are abandoned and reported. Cleanup recovery or fallback is recorded in stderr and `environment.json` without replacing an already captured answer. Non-POSIX runs report process-group cleanup as unsupported while retaining bounded, non-throwing home cleanup. Each run also records the model's workspace edits in `workspace-changes.json`, `candidate.patch`, and `candidate-files/` (see the run-output layout in the README); under the default `--sandbox read-only` that change set is empty:
+`run-codex` is a compatibility wrapper for `run-agent --agent codex`. It executes prepared rows through a command compatible with `codex exec --json`, adds `--output-last-message <file>` for final-answer capture, saves JSONL as `trace.jsonl`, normalizes events/metrics, runs with isolated `CODEX_HOME` outside the model workdir, and records nonzero/timeouts as failed run artifacts. The shared subprocess owner observes CLI-leader exit independently of inherited capture-pipe EOF, then terminates remaining members of the original process group on POSIX before bounded retry/backoff removes the isolated home. An escaped process cannot make pipe draining unbounded: POSIX capture descriptors are closed after a short grace period, while non-POSIX reader threads are abandoned and reported. Cleanup recovery or fallback is recorded in stderr and `environment.json` without replacing an already captured answer. Non-POSIX runs report process-group cleanup as unsupported while retaining bounded, non-throwing home cleanup. Each run also records the model's workspace edits in `workspace-changes.json`, `candidate.patch`, and `candidate-files/` (see the run-output layout in the README); under the default `--sandbox read-only` that change set is empty.
+
+Every invocation also appends `-c skills.include_instructions=false --disable apps`, recorded as `context_isolation` in `environment.json`, so an answer run cannot read `~/.agents/skills` or reach the `codex_apps` connector even inside the isolated `CODEX_HOME`. Auth, `--model`, Codex's built-in tools, and its own `--sandbox`/permission flags keep working as documented by `codex exec --help`. A `--codex-cmd` wrapper still receives both isolation flags, appended after the wrapper's own argv, so a custom Codex launcher cannot silently opt back into host skills or apps:
 
 ```bash
 skill-benchmark prepare ../repo/evals/shared-benchmark.json --split tune --out tasks.jsonl
@@ -96,6 +98,8 @@ skill-benchmark run-agent --agent gemini --tasks tasks.jsonl --runs ../repo/eval
   --model gemini-2.5-flash
 ```
 
+The Claude and Codex isolation flags above (`--safe-mode --disable-slash-commands`, `-c skills.include_instructions=false --disable apps`) were verified against Claude Code CLI 2.1.284 and codex-cli 0.150.1 and 0.156.1. An unknown `--disable` feature name or an unrecognized Claude flag fails the invocation loudly, so a broken pin on either CLI surfaces immediately as a run failure. An unrecognized Codex `-c` key is accepted silently: a Codex build that drops `skills.include_instructions` support would still expose host skills to the model while `environment.json` keeps recording `context_isolation` as applied, so that flag alone is not proof of isolation on an unverified Codex build. `run_trigger_matrix.py` is a separate code path (its own `ClaudeAdapter`/`CodexAdapter`, not `claude_cli_invoke`/`codex_cli_invoke`) and still runs with host skills visible; it is not covered by these flags.
+
 The Gemini backend invokes the official CLI in headless `stream-json` mode and
 accepts final text only from a complete typed stream. It creates a fresh
 `GEMINI_CLI_HOME` outside the task workspace, copies only minimal auth state,
@@ -120,6 +124,8 @@ skill-benchmark run-claude --tasks tasks.jsonl --runs ../repo/eval-runs/claude-t
 ```
 
 `--model` is optional (omit for the CLI default); `--claude-bin` overrides the executable (a stub in tests). A nonzero exit/timeout is written as a `[CLAUDE FAILURE …]` body, which `execution_valid` treats as a non-scorable infra failure, exactly like the Codex/Jetty runners.
+
+Every invocation also appends `--safe-mode --disable-slash-commands`, recorded as `context_isolation` in `environment.json`, so an answer run cannot read host skills, plugins, user agents, instruction files (`CLAUDE.md`, `AGENTS.md`), hooks, or configured MCP servers. Auth still works (`--safe-mode` keeps OAuth login; `--bare` would need API-key auth instead), and `--model`, Claude's built-in tools, and its own permission flags keep working as documented by `claude --help`.
 
 ## Run subagent tasks (in-process seam, tool replay, multi-turn)
 

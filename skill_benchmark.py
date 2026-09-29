@@ -12228,6 +12228,7 @@ def claude_judge_invoke(prompt: str, *, judge_model: str | None, claude_bin: str
                             extra_args=claude_extra_args, cwd=explore_hint)
     provider_error = res.get("provider_error")
     returncode = cast(int, res.get("returncode"))
+    context_isolation = res.get("context_isolation")
     return JudgeInvocation(
         stdout=res.get("answer", ""),
         stderr=(_stderr_with_warning(res.get("stderr", "") or "", provider_error)
@@ -12242,6 +12243,10 @@ def claude_judge_invoke(prompt: str, *, judge_model: str | None, claude_bin: str
         usage=res.get("usage") if isinstance(res.get("usage"), dict) else None,
         usage_source="provider_reported",
         model_label=judge_model,
+        # Same isolation contract as the answer runner: recorded here, not on the
+        # verdict row, since only --transcripts persists it (provider-metadata.json).
+        metadata=({"context_isolation": list(context_isolation)}
+                  if isinstance(context_isolation, list) else {}),
     )
 
 
@@ -12253,6 +12258,7 @@ def codex_judge_invoke(prompt: str, *, judge_model: str | None, codex_cmd: str,
     usage = res.get("usage") if isinstance(res.get("usage"), dict) else None
     returncode = cast(int, res.get("returncode"))
     provider_error = res.get("provider_error")
+    environment = res.get("environment")
     return JudgeInvocation(
         stdout=res.get("answer") or "",
         stderr=res.get("stderr", "") or "",
@@ -12265,6 +12271,11 @@ def codex_judge_invoke(prompt: str, *, judge_model: str | None, codex_cmd: str,
         usage=usage,
         usage_source="trace_normalized" if usage else "provider_reported",
         model_label=str(res.get("model") or f"codex/{judge_model or 'default'}"),
+        # Same convention gemini_judge_invoke already uses: stash the isolated-home
+        # environment block (context_isolation included) in metadata, since only
+        # --transcripts persists it (provider-metadata.json), never the verdict row.
+        metadata=({"environment": dict(environment)}
+                  if isinstance(environment, Mapping) else {}),
     )
 
 
