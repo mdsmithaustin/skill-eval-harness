@@ -85,7 +85,13 @@ completeness through the same gate `benchmark` uses. That gate reports
 `deferred_judge_verdicts` for any manifest with an ungraded qualitative assertion, and
 `token-overhead` has no `--judge-results` flag to clear it — so this top-level row stays
 `None` for a manifest with a judge assertion whether or not you ran `judge` separately,
-and it never fills in from a later run: read `reports[0].summary.observed` instead.
+and it never fills in from a later run: read `reports[0].summary.observed` instead. The
+reason itself is `reports[0].summary.design_coverage_reason` — one of
+`deferred_judge_verdicts`, `unscorable_answer_attempts`, `answer_design_incomplete`,
+`grading_evidence_incomplete`, or `incomplete_answer_pairing`. When more than one of
+those blocked the row (a crashed arm behind an ungraded judge, say),
+`design_coverage_reason` names only the most recent one; the full ordered list is
+`reports[0].summary.incomplete_reasons`.
 
 ```bash
 python3 ../../skill_benchmark.py token-overhead evals/shared-benchmark.json \
@@ -149,15 +155,17 @@ has no `--judge-results` flag, so a judge-bearing manifest like this demo's `c-r
 case keeps the top-level row `None` forever, no matter how real the runs get. For that
 manifest, read `reports[0].summary.observed` (above) instead of the table:
 
-- **High `Lift per 1k total tokens` / `Lift per $`** → the footprint is earning its
-  keep. Leave it. This is the case the skill exists for.
-- **Positive footprint, `Mean objective lift` ≈ 0** → you are paying tokens for nothing
-  measurable. Either the cases are **saturated** (the base model already passes them —
-  the benchmark's `saturated`/`no-lift` case flags catch this) so the eval can't *see*
-  the lift, or the skill genuinely isn't helping. Check the flags before you cut:
-  saturation is an eval problem, no-lift is a skill problem. `Saturated/no-lift cost
-  USD` totals exactly the spend on cases that bought no lift — that column is the
-  trim list.
+- **High `Lift per 1k total tokens` / `Lift per $`**
+  (`summary.observed.objective_lift_per_1k_total_tokens`) → the footprint is
+  earning its keep. Leave it. This is the case the skill exists for.
+- **Positive footprint, `Mean objective lift` ≈ 0** (`summary.observed.objective_delta`)
+  → you are paying tokens for nothing measurable. Either the cases are
+  **saturated** (the base model already passes them — the benchmark's
+  `saturated`/`no-lift` case flags catch this) so the eval can't *see* the lift, or
+  the skill genuinely isn't helping. Check the flags before you cut: saturation is
+  an eval problem, no-lift is a skill problem. `Saturated/no-lift cost USD`
+  (`summary.observed.saturated_or_no_lift_cost_usd`) totals exactly the spend on
+  cases that bought no lift — that column is the trim list.
 - **Large `Reference tokens`, small lift** → suspect a reference. `profile-skill`
   tells you which module carries the bytes; drop it from the skill, re-run, and if the
   lift holds, the reference was dead weight. (This is a footprint ablation you can do
