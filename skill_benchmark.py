@@ -10480,6 +10480,21 @@ class CodexBackend(AgentBackend):
             environment={"runner": "codex", **dict(result.get("environment") or {})})
 
 
+def claude_result_usage(result: dict[str, Any]) -> tuple[dict[str, Any], float | None]:
+    """The ONE reading of a claude_cli_invoke result's usage and cost: a
+    numeric token-count mapping (already normalize_usage-shaped, minus
+    "source") plus the dollar cost, exactly as run_agent_tasks's ClaudeBackend
+    reports them. Both Claude-touching runners call this instead of each
+    reaching into ``result`` on its own, so they cannot drift onto different
+    shapes — as run-subagent's default backend once did by reporting
+    claude_run_metrics()'s metrics.json body (schema_version, source, ...) as
+    its usage, which is not a numeric mapping."""
+    usage = result.get("usage")
+    cost = result.get("cost_usd")
+    return (dict(usage) if isinstance(usage, dict) else {},
+            float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None)
+
+
 class ClaudeBackend(AgentBackend):
     name = "claude"
 
@@ -10490,6 +10505,7 @@ class ClaudeBackend(AgentBackend):
         # process assertion on a Claude run fails closed for missing evidence.
         result = claude_cli_invoke(request.prompt, model=request.model, claude_bin=str(options.get("claude_bin") or "claude"),
                                    timeout=request.timeout_s, cwd=str(request.workspace), output_format="stream-json")
+        usage, cost_usd = claude_result_usage(result)
         return RunnerOutcome(
             provider="claude", answer=result.get("answer") or "",
             returncode=result.get("returncode"), timed_out=bool(result.get("timed_out", False)),
@@ -10498,7 +10514,7 @@ class ClaudeBackend(AgentBackend):
             error=(result.get("provider_error") or result.get("parse_error")),
             trace_text=result.get("raw_response") or "",
             trace_utf8_valid=(result.get("trace_utf8_valid") is not False),
-            usage=result.get("usage"), cost_usd=result.get("cost_usd"), model=request.model,
+            usage=usage or None, cost_usd=cost_usd, model=request.model,
             environment={
                 "runner": "claude",
                 "command": result.get("command") or "claude -p",
@@ -10870,23 +10886,6 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
         "command": command,
     })
     return parsed
-
-
-def claude_run_metrics(result: dict[str, Any]) -> dict[str, Any]:
-    """The metrics.json body for one Claude run: the token usage, the real dollar
-    cost, and timing — the fields the benchmark report aggregates."""
-    usage = result.get("usage") or {}
-    metrics: dict[str, Any] = {"schema_version": 1, "source": "claude"}
-    for k in ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_creation_tokens"):
-        if isinstance(usage.get(k), (int, float)):
-            metrics[k] = int(usage[k])
-    if isinstance(result.get("cost_usd"), (int, float)):
-        metrics["cost_usd"] = float(result["cost_usd"])
-    if isinstance(result.get("elapsed_ms"), (int, float)):
-        metrics["elapsed_ms"] = int(result["elapsed_ms"])
-    if result.get("returncode") is not None:
-        metrics["returncode"] = result["returncode"]
-    return metrics
 
 
 def run_claude(args: argparse.Namespace) -> int:
@@ -13510,9 +13509,15 @@ def run_subagent(args: argparse.Namespace) -> int:
             # claude-invoke-cwd- temp dir where those paths resolve to nothing.
             result = claude_cli_invoke(prompt, model=model, claude_bin=claude_bin, timeout=timeout,
                                        cwd=str(workspace))
+            usage, cost_usd = claude_result_usage(result)
+            # The subagent-response contract has no separate cost field (unlike
+            # RunnerOutcome), so cost rides inside usage, same as every other
+            # subagent backend's response (_subagent_cost_usd reads it there).
+            if cost_usd is not None:
+                usage = {**usage, "cost_usd": cost_usd}
             return {"answer": result.get("answer"), "returncode": result.get("returncode"),
                     "timed_out": result.get("timed_out", False), "elapsed_ms": result.get("elapsed_ms"),
-                    "usage": claude_run_metrics(result)}
+                    "usage": usage}
     return run_subagent_tasks(tasks, runs, backend, model=getattr(args, "model", None),
                               replay_mode=getattr(args, "tool_replay", None) or tool_replay_mode())
 
