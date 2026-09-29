@@ -31,8 +31,11 @@ real failing run down to a class and a decision.
 Run the bundled demo ([`examples/demo-skill/`](../examples/demo-skill/)) with the
 deterministic stub — no model, no key. This grades a `with_skill` / `without_skill` pair
 plus two materialized ablation arms, which produces a spread of failures with known
-causes: the baseline fails both assertions, and each ablation arm fails exactly the one
-assertion whose skill piece it removed.
+causes: the baseline fails both assertions; `ablation:no-checklist` fails exactly
+`cite-checklist`, the one objective assertion whose skill piece it removed; and
+`ablation:no-severity` fails both `severity-label` and the judge assertion
+`actionable-review` on `c-review`. With the severity line gone, its output also drops
+the reasoned "label, because" phrasing the judge requires, so both checks miss together.
 
 ```bash
 cd examples/demo-skill
@@ -149,7 +152,12 @@ No severity label anywhere — the assertion is right, the text really lacks it.
   "returncode": 0,
   "timed_out": false,
   "elapsed_ms": 18,
-  "usage_normalized": { "source": "missing" },
+  "usage_normalized": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "source": "trace_normalized"
+  },
   "cost_normalized": { "source": "missing" },
   "skill_invoked": false,
   "trace_source": "codex"
@@ -157,10 +165,12 @@ No severity label anywhere — the assertion is right, the text really lacks it.
 ```
 
 `returncode: 0`, `timed_out: false` — the run completed cleanly and produced real text.
-This is a genuine quality miss, not a crash or an empty output. (`source: "missing"` on
-the cost blocks is the offline-stub telemetry marker: the deterministic stub is not a
-model, so it wrote no token or dollar numbers, and the ledger records *missing* rather
-than a misleading `0`.)
+This is a genuine quality miss, not a crash or an empty output. `usage_normalized` reads
+real zeros sourced from the trace (`source: "trace_normalized"`). The deterministic stub
+runner emits a trace with no token counts, and the harness normalizes that into `0`, not
+a missing measurement. `cost_normalized` is the one that is actually absent
+(`source: "missing"`). The stub never claimed a dollar cost at all, so there is nothing
+to normalize into even a `0`.
 
 **Layer 3 — the failure class.** Map it to the four classes. `without_skill` is the
 baseline arm; by construction it cannot read the skill files, so it never had the
