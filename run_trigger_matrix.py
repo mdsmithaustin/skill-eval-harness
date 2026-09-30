@@ -45,6 +45,9 @@ canonical tree where that agent discovers skills) and invoke() (run the agent
 headless on the raw query, return its JSON event stream), then add one row to
 agent_capabilities.BACKENDS and its explicit trace-dialect semantics. detect()
 only needs overriding when load evidence is not a file path in the stream.
+An adapter whose detect() matches a mounted skill by name must also set
+skill_name_source, or exposed_skill_names() hands it no names and it can
+never trigger by name.
 
 Every number this emits is a RAW autonomous-trigger measurement (the same
 evidence class as run_pi_trigger_eval.py) — a rate to steer description edits,
@@ -65,8 +68,10 @@ import tempfile
 import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 # Preserve one module identity under the documented direct-script entrypoint;
 # lazy trigger bindings resolve the canonical ``run_trigger_matrix`` name.
@@ -167,20 +172,42 @@ SENSITIVE_WORKSPACE_FILES = (
 SENSITIVE_ENV_VARS = ("MISTRAL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CODEX_ACCESS_TOKEN")
 
 
-def mounted_skill_names(copied: list[Path]) -> list[str]:
-    """The `name:` each mounted SKILL.md declares in frontmatter (falling back
-    to its directory name). Claude Code invokes skills by this name, so it is
-    the needle for Skill-tool detection. Parsed with the harness's real
-    frontmatter parser, not a regex that breaks on quoted/folded values."""
-    names: list[str] = []
+class SkillNameSource(Enum):
+    """Where a CLI's own load event takes a mounted skill's name from."""
+
+    MOUNT_FOLDER = "mount_folder"
+    FRONTMATTER = "frontmatter"
+
+
+@dataclass(frozen=True)
+class MountedSkillName:
+    """Both names a mounted skill can go by. `mount_skill_tree` copies a skill
+    root to `skills_dir / root_dir.name`, so `folder` is that directory;
+    `frontmatter` is the SKILL.md `name:` (the folder when absent). They
+    diverge in practice: `examples/demo-skill` mounts as `demo` with
+    frontmatter name `demo-reviewer`."""
+
+    folder: str
+    frontmatter: str
+
+    def exposed_by(self, source: SkillNameSource) -> str:
+        return self.folder if source is SkillNameSource.MOUNT_FOLDER else self.frontmatter
+
+
+def mounted_skill_names(copied: list[Path]) -> list[MountedSkillName]:
+    """Folder and frontmatter name of each mounted skill, parsed with the
+    harness's real frontmatter parser rather than a regex that breaks on
+    quoted or folded values. The declared name is stripped: a CLI's own
+    load event carries the trimmed name (Codex strips a padded quoted
+    `name: " demo-reviewer "` before listing or injecting it), so an
+    untrimmed needle here would never match a real invocation."""
+    names: list[MountedSkillName] = []
     for p in copied:
         skill_md = p if p.name == "SKILL.md" else p / "SKILL.md"
-        name = skill_md.parent.name
-        if skill_md.exists():
-            declared = frontmatter_value(skill_md.read_text(encoding="utf-8"), "name")
-            if declared:
-                name = str(declared)
-        names.append(name)
+        folder = skill_md.parent.name
+        declared = frontmatter_value(skill_md.read_text(encoding="utf-8"), "name") if skill_md.exists() else None
+        stripped = str(declared).strip() if declared else ""
+        names.append(MountedSkillName(folder=folder, frontmatter=stripped or folder))
     return names
 
 
@@ -360,10 +387,19 @@ class AgentAdapter:
     detect(stdout, skill_names, copied) -> (triggered, evidence). The default
         is the shared path-evidence detector; override only when load evidence
         is not a file path (e.g. Claude Code's Skill tool carries a name).
+        A detect() override that matches by name must set skill_name_source,
+        or exposed_skill_names() gives it no names and it can never trigger.
     """
 
     name = "base"
     default_models: list[str | None] = [None]
+    # The name this CLI's own load event carries for a mounted skill, which is
+    # the only name detect() may match. None means detection uses paths only.
+    skill_name_source: ClassVar[SkillNameSource | None] = None
+
+    def exposed_skill_names(self, mounted: list[MountedSkillName]) -> list[str]:
+        source = self.skill_name_source
+        return [] if source is None else [skill.exposed_by(source) for skill in mounted]
 
     def mount(self, tree_dir: Path, workspace: Path) -> list[Path]:
         raise NotImplementedError
@@ -404,6 +440,8 @@ class ClaudeAdapter(AgentAdapter):
     selects haiku/sonnet/opus (or any full model id)."""
 
     name = "claude"
+    # Claude Code 2.1.284 lists and invokes skills by folder: init `"skills": ["demo"]`, `Skill {"skill": "demo"}`.
+    skill_name_source = SkillNameSource.MOUNT_FOLDER
     default_models: list[str | None] = ["haiku", "sonnet", "opus"]
 
     def __init__(self, claude_bin: str = "claude", max_turns: int = 6) -> None:
@@ -512,6 +550,9 @@ class CodexAdapter(AgentAdapter):
     measurement is about autonomous discovery, not task scaffolding."""
 
     name = "codex"
+    # Codex 0.156.1 lists and injects skills by frontmatter name:
+    # `<skill><name>demo-reviewer</name><path>.../skills/demo/SKILL.md`.
+    skill_name_source = SkillNameSource.FRONTMATTER
     default_models: list[str | None] = [None]
 
     def __init__(self, codex_cmd: str = DEFAULT_CODEX_CMD) -> None:
@@ -633,6 +674,8 @@ class VibeAdapter(AgentAdapter):
     skill loading rather than a forced-load answer prompt."""
 
     name = "vibe"
+    # Vibe 2.25.8 keys its skill map, and so its `skill` tool, by frontmatter name.
+    skill_name_source = SkillNameSource.FRONTMATTER
     default_models: list[str | None] = [None]
 
     def __init__(self, vibe_cmd: str = VIBE_DEFAULT_CMD, max_turns: int = 6) -> None:
@@ -901,7 +944,7 @@ def observe_cell_query(
         if mounted_hash != expected_hash:
             raise ValueError(
                 f"{adapter.name} mounted skill tree hash {mounted_hash} does not match {expected_hash}")
-        names = mounted_skill_names(copied)
+        names = adapter.exposed_skill_names(mounted_skill_names(copied))
         invocation = validate_invoke_result(adapter.name, adapter.invoke(query, model, workspace, timeout))
         secrets = workspace_secret_values(workspace) + ambient_secret_values()
         detection = adapter.detect(invocation, names, copied)
