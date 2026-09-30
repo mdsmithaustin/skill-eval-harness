@@ -456,7 +456,7 @@ class VerdictSchemaTests(unittest.TestCase):
             "cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 1},
         }
         claude_isolation = ["--setting-sources", "project", "--strict-mcp-config",
-                            "--settings", '{"disableBundledSkills":true}']
+                            "--settings", '{"disableBundledSkills":true,"autoMemoryEnabled":false}']
         claude_result = {**base_result, "context_isolation": claude_isolation}
         with mock.patch.object(sb, "claude_cli_invoke", return_value=claude_result):
             claude = sb.claude_judge_invoke(

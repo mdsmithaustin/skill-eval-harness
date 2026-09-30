@@ -10965,11 +10965,13 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
 # MCP servers. Loading only the project setting source drops those and keeps
 # the skills and agents a run mounts under its workspace's .claude/;
 # --strict-mcp-config drops every MCP server, claude.ai connectors included;
-# disableBundledSkills drops the skills Claude Code ships. --safe-mode is not
+# disableBundledSkills drops the skills Claude Code ships; autoMemoryEnabled
+# false keeps the memory under ~/.claude/projects/<cwd> out of the prompt and
+# stops the run writing there. --safe-mode is not
 # used: it also hides the workspace's own skills and agents.
 CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS = (
     "--setting-sources", "project", "--strict-mcp-config",
-    "--settings", '{"disableBundledSkills":true}',
+    "--settings", '{"disableBundledSkills":true,"autoMemoryEnabled":false}',
 )
 
 

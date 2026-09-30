@@ -30,7 +30,7 @@ def stream_text(records: list[dict]) -> str:
 
 # Hides ~/.claude but keeps the workspace's .claude/skills and .claude/agents.
 CLAUDE_ISOLATION = ["--setting-sources", "project", "--strict-mcp-config",
-                    "--settings", '{"disableBundledSkills":true}']
+                    "--settings", '{"disableBundledSkills":true,"autoMemoryEnabled":false}']
 
 
 def _manifest(rp: Path, cases):
