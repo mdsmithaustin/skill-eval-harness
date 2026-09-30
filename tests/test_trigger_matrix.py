@@ -1045,6 +1045,7 @@ class TriggerContextIsolationTests(unittest.TestCase):
         self.assertEqual(Path(argv[argv.index("--skill") + 1]).name, "skills")
 
 
+@unittest.skipIf(sys.version_info < (3, 11), "tomllib is stdlib from Python 3.11")
 class CodexSkillConfigTomlEncodingTests(unittest.TestCase):
     """The `-c skills.config=[...]` argv value must be a TOML value Codex can
     parse. `json.dumps` escapes characters above U+FFFF as UTF-16 surrogate
