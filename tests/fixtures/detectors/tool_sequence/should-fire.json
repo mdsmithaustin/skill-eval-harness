@@ -1,0 +1,129 @@
+{
+  "detector": "tool_sequence",
+  "cases": [
+    {
+      "note": "strict mode fires on a reversed order",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "strict",
+        "expected": ["Read", "Write"]
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": [
+            {"type": "tool_call", "name": "Write", "status": "completed"},
+            {"type": "tool_call", "name": "Read", "status": "completed"}
+          ]
+        }
+      }
+    },
+    {
+      "note": "strict mode fires on an extra call that was not expected",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "strict",
+        "expected": ["Read", "Write"]
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": [
+            {"type": "tool_call", "name": "Read", "status": "completed"},
+            {"type": "tool_call", "name": "Write", "status": "completed"},
+            {"type": "tool_call", "name": "Grep", "status": "completed"}
+          ]
+        }
+      }
+    },
+    {
+      "note": "unordered mode fires when a repeat is missing (multiset, not set)",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "unordered",
+        "expected": ["Read", "Read"]
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": [
+            {"type": "tool_call", "name": "Read", "status": "completed"}
+          ]
+        }
+      }
+    },
+    {
+      "note": "subset mode fires when an expected call never ran",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "subset",
+        "expected": ["Read", "WebSearch"]
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": [
+            {"type": "tool_call", "name": "Read", "status": "completed"}
+          ]
+        }
+      }
+    },
+    {
+      "note": "superset mode fires when the trajectory ran a call outside the listed set",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "superset",
+        "expected": ["Read"]
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": [
+            {"type": "tool_call", "name": "Read", "status": "completed"},
+            {"type": "tool_call", "name": "Grep", "status": "completed"}
+          ]
+        }
+      }
+    },
+    {
+      "note": "min_f1 fires when the mode is satisfied but overlap quality is too low",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "subset",
+        "expected": ["Read"],
+        "min_f1": 0.9
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": [
+            {"type": "tool_call", "name": "Read", "status": "completed"},
+            {"type": "tool_call", "name": "Grep", "status": "completed"}
+          ]
+        }
+      }
+    },
+    {
+      "note": "missing events.json fails closed rather than passing",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "strict",
+        "expected": ["Read"]
+      },
+      "output": "done",
+      "files": {}
+    }
+  ]
+}

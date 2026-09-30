@@ -1,0 +1,119 @@
+{
+  "detector": "tool_sequence",
+  "cases": [
+    {
+      "note": "strict mode: exact order and length across a shell command and two normalized tool calls",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "strict",
+        "expected": ["bash", "Read", "Write"]
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": [
+            {"type": "command", "command": "ls -la", "status": "completed"},
+            {"type": "tool_call", "name": "Read", "input_summary": "skills/demo/refs.md", "status": "completed"},
+            {"type": "tool_call", "name": "Write", "input_summary": "out.md", "status": "completed"}
+          ]
+        }
+      }
+    },
+    {
+      "note": "unordered mode: same multiset in a different order still matches",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "unordered",
+        "expected": ["Write", "Read", "Read"]
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": [
+            {"type": "tool_call", "name": "Read", "status": "completed"},
+            {"type": "tool_call", "name": "Write", "status": "completed"},
+            {"type": "tool_call", "name": "Read", "status": "completed"}
+          ]
+        }
+      }
+    },
+    {
+      "note": "subset mode: every expected call ran, extra steps allowed",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "subset",
+        "expected": ["Read", "Write"]
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": [
+            {"type": "tool_call", "name": "Read", "status": "completed"},
+            {"type": "tool_call", "name": "Write", "status": "completed"},
+            {"type": "tool_call", "name": "Grep", "status": "completed"}
+          ]
+        }
+      }
+    },
+    {
+      "note": "superset mode: actual trajectory skips a listed step, never exceeds it",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "superset",
+        "expected": ["Read", "Write", "Grep"]
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": [
+            {"type": "tool_call", "name": "Read", "status": "completed"},
+            {"type": "tool_call", "name": "Write", "status": "completed"}
+          ]
+        }
+      }
+    },
+    {
+      "note": "in-progress calls do not count; the completed subset still satisfies strict",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "strict",
+        "expected": ["Read"]
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": [
+            {"type": "tool_call", "name": "Read", "status": "completed"},
+            {"type": "tool_call", "name": "Write", "status": "in_progress"}
+          ]
+        }
+      }
+    },
+    {
+      "note": "empty expected against an empty completed trajectory passes strict",
+      "assertion": {
+        "type": "tool_sequence",
+        "mode": "strict",
+        "expected": []
+      },
+      "output": "done",
+      "files": {
+        "events.json": {
+          "schema_version": 2,
+          "source": "fixture",
+          "events": []
+        }
+      }
+    }
+  ]
+}
