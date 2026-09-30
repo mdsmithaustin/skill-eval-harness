@@ -45,6 +45,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass as _dataclass
 from decimal import ROUND_CEILING, Decimal
+from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn, Protocol, cast
 
@@ -13238,7 +13239,8 @@ def merge_cross_judge_rows(rows: list[dict[str, Any]], *, quorum: int | None = N
         out["score"] = median_score
     out["evidence"] = " | ".join(str(r.get("evidence", "")) for r in rows if r.get("evidence"))[:4000]
     out["agreement"] = {"concur": concur, "n": n, "concur_fraction": round(concur / n, 4),
-                        "unanimous": concur in (0, n), "unresolved": unresolved}
+                        "unanimous": concur in (0, n), "unresolved": unresolved,
+                        "quorum": quorum if isinstance(quorum, int) and quorum > 0 else None}
     aggregate_judge_member_telemetry(rows, out)
     out["judge_panel"] = rows
     out["judge_observation_complete"] = True
@@ -14221,21 +14223,119 @@ CALIBRATION_BINS = 10
 _CALIBRATION_METRICS = ("brier", "ece", "auroc", "reliability", "threshold_sweep", "best_f1")
 
 
+@_dataclass(frozen=True)
+class ScoreThresholdRule:
+    """A judge that passes when its stored 0-1 score reaches a threshold, so its
+    score can be calibrated against human labels."""
+    decides: str
+    knob: str
+
+
+@_dataclass(frozen=True)
+class OtherDecisionRule:
+    """A judge whose pass is not its score reaching one threshold."""
+    decides: str
+    why_not: str
+
+
+JUDGE_DECISION_RULES: dict[str, ScoreThresholdRule | OtherDecisionRule] = {
+    "scored": ScoreThresholdRule(
+        "score >= threshold", "threshold, or atLeast when the assertion sets it"),
+    "per_step": ScoreThresholdRule(
+        "met steps / steps >= min_met_fraction", "per_step.min_met_fraction"),
+    "majority_consensus": ScoreThresholdRule(
+        "strict majority of scored members, which is median member score >= their threshold",
+        "the members' threshold, or atLeast when the assertion sets it"),
+    "boolean": OtherDecisionRule(
+        "the judge's own pass/fail call", "a boolean verdict carries no score"),
+    "dynamic_rubric": OtherDecisionRule(
+        "met criteria >= minimum_criteria",
+        "a dynamic-rubric verdict passes on met criteria >= minimum_criteria over a criteria "
+        "count the judge drafts per run, so its met/total score has no fixed pass threshold"),
+    "dimensions": OtherDecisionRule(
+        "mean normalized 1-5 grade >= dimension threshold",
+        "a graded-dimension verdict passes when its mean 1-5 grade, normalized to 0-1, reaches "
+        "the dimension threshold; that score is a quality grade, not a pass probability"),
+    "quorum_consensus": OtherDecisionRule(
+        "at least --quorum panel members pass",
+        "a quorum consensus passes when at least --quorum panel members pass, "
+        "not on its median score"),
+    "consensus_member_vote": OtherDecisionRule(
+        "majority vote of members",
+        "a consensus passes on a majority vote of members that do not all pass on "
+        "score >= one shared threshold"),
+    "consensus_unrecorded": OtherDecisionRule(
+        "majority or --quorum, not recorded",
+        "a consensus verdict that does not record its members and quorum cannot show "
+        "whether it passed by majority or by --quorum"),
+}
+
+
+def judge_decision(row: Mapping[str, Any]) -> tuple[str, float | None]:
+    """The JUDGE_DECISION_RULES kind a stored verdict row shows, and the
+    threshold the harness compared its score with when the row records one.
+    A per-step row records its step fingerprint but not min_met_fraction."""
+    kind = row.get("verdict_kind", "boolean")
+    if kind == "scored":
+        return kind, float(row["threshold"])
+    if kind == "dynamic":
+        return ("per_step" if "trajectory_steps_sha256" in row else "dynamic_rubric"), None
+    if kind != "consensus":
+        return kind, None
+    members = row.get("judge_panel", row.get("judge_runs"))
+    agreement = row.get("agreement")
+    is_panel = "judge_panel" in row
+    if (not isinstance(members, list) or not members
+            or not all(isinstance(member, Mapping) for member in members)
+            or (is_panel and not (isinstance(agreement, Mapping) and "quorum" in agreement))):
+        return "consensus_unrecorded", None
+    if is_panel and cast(Mapping[str, Any], agreement)["quorum"] is not None:
+        return "quorum_consensus", None
+    member_decisions = {judge_decision(member) for member in members}
+    if len(member_decisions) == 1:
+        member_kind, threshold = member_decisions.pop()
+        if member_kind in ("scored", "majority_consensus"):
+            return "majority_consensus", threshold
+    return "consensus_member_vote", None
+
+
+def decision_rule_summary(decisions: dict[str, tuple[str, float | None]]) -> dict[str, Any]:
+    """Per decision-rule kind among the matched verdicts: how many, whether it
+    is calibrated, and the thresholds the harness used (null when unrecorded)."""
+    grouped: dict[str, list[float | None]] = {}
+    for kind, threshold in decisions.values():
+        grouped.setdefault(kind, []).append(threshold)
+    summary = {}
+    for kind, thresholds in grouped.items():
+        rule = JUDGE_DECISION_RULES[kind]
+        recorded = sorted({value for value in thresholds if value is not None})
+        summary[kind] = {
+            "n": len(thresholds),
+            "calibrated": isinstance(rule, ScoreThresholdRule),
+            "decides": rule.decides,
+            "knob": rule.knob if isinstance(rule, ScoreThresholdRule) else None,
+            "thresholds": recorded or None,
+        }
+    return summary
+
+
 def calibration_pairs(ids: list[str], human: dict[str, dict[str, Any]],
-                      judge: dict[str, dict[str, Any]]) -> tuple[list[tuple[float, bool]], dict[str, str]]:
-    """(judge score, human passed) for each matched id whose verdict carries a
-    normalized score, plus why every other id was left out. Stored scores are
-    already on [0, 1] (graded 1-5 dimensions are normalized when parsed), and no
-    stored field declares another maximum, so an off-scale score is excluded
-    rather than rescaled by a guess."""
+                      judge: dict[str, dict[str, Any]],
+                      decisions: dict[str, tuple[str, float | None]],
+                      ) -> tuple[list[tuple[float, bool]], dict[str, str]]:
+    """(judge score, human passed) for each matched id whose judge passes on
+    score >= threshold, plus why every other id was left out. Those scores are
+    stored on [0, 1] and no stored field declares another maximum, so an
+    off-scale score is excluded rather than rescaled by a guess."""
     pairs: list[tuple[float, bool]] = []
     excluded: dict[str, str] = {}
     for identifier in ids:
-        raw = judge[identifier].get("score")
-        score = float(raw) if raw is not None and finite_real(raw) else None
-        if score is None:
-            excluded[identifier] = "verdict carries no score"
-        elif not 0 <= score <= 1:
+        rule = JUDGE_DECISION_RULES[decisions[identifier][0]]
+        if isinstance(rule, OtherDecisionRule):
+            excluded[identifier] = rule.why_not
+            continue
+        score = float(judge[identifier]["score"])
+        if not 0 <= score <= 1:
             excluded[identifier] = (f"score {score:g} is outside [0, 1]; "
                                     "stored verdicts declare no maximum to rescale by")
         else:
@@ -14258,6 +14358,14 @@ def mann_whitney_auroc(pairs: list[tuple[float, bool]]) -> float | None:
             tied = bisect.bisect_right(ordered, score) - below
             rank_sum += below + (tied + 1) / 2
     return (rank_sum - positives * (positives + 1) / 2) / (positives * negatives)
+
+
+def _exact_sweep_rank(row: dict[str, Any]) -> tuple[Fraction, Fraction, float]:
+    """Best-F1 order: exact F1, then exact agreement, then the lower threshold.
+    The displayed values are rounded, and two thresholds can round alike."""
+    c = row["confusion"]
+    return (Fraction(2 * c["tp"], 2 * c["tp"] + c["fp"] + c["fn"]),
+            Fraction(c["tp"] + c["tn"], sum(c.values())), -row["threshold"])
 
 
 def calibration_metrics(pairs: list[tuple[float, bool]]) -> dict[str, Any]:
@@ -14287,8 +14395,7 @@ def calibration_metrics(pairs: list[tuple[float, bool]]) -> dict[str, Any]:
         row = binary_alignment_metrics(labels, [score >= threshold for score, _ in pairs])
         sweep.append({"threshold": threshold,
                       **{key: row[key] for key in ("agreement", "precision", "recall", "f1", "confusion")}})
-    best_f1 = (max(sweep, key=lambda row: (row["f1"], row["agreement"], -row["threshold"]))
-               if any(labels) else None)
+    best_f1 = max(sweep, key=_exact_sweep_rank) if any(labels) else None
     auroc = mann_whitney_auroc(pairs)
     return {
         "brier": round(brier, 4),
@@ -14301,28 +14408,38 @@ def calibration_metrics(pairs: list[tuple[float, bool]]) -> dict[str, Any]:
 
 
 def judge_calibration(ids: list[str], human: dict[str, dict[str, Any]],
-                      judge: dict[str, dict[str, Any]], *, population_complete: bool,
+                      judge: dict[str, dict[str, Any]], *, population_gaps: list[str],
                       min_labels: int) -> dict[str, Any]:
     """Whether the judge's score means what it says, over the same matched
-    population as the agreement metrics. Headline metrics follow the report's
-    rule: null unless the scored population is complete; `observed` always
-    carries what the scored subset shows."""
-    pairs, excluded = calibration_pairs(ids, human, judge)
+    population as the agreement metrics. Only a judge that passes on
+    score >= threshold is calibrated (JUDGE_DECISION_RULES). Headline metrics
+    follow the report's rule: null unless the population is complete and every
+    matched verdict is calibrated; `observed` carries what the calibrated subset shows."""
+    decisions = {identifier: judge_decision(judge[identifier]) for identifier in ids}
+    pairs, excluded = calibration_pairs(ids, human, judge, decisions)
     empty = dict.fromkeys(_CALIBRATION_METRICS)
     block: dict[str, Any] = {
         "availability": "unavailable", "reason": None, "n": len(pairs),
+        "decision_rules": decision_rule_summary(decisions),
         "excluded_judge_ids": dict(sorted(excluded.items())[:20]),
         **empty, "observed": None, "warnings": []}
     if not ids:
         return {**block, "reason": "no complete matched labels to calibrate against"}
     if not pairs:
-        if all(reason == "verdict carries no score" for reason in excluded.values()):
+        kinds = {kind for kind, _ in decisions.values()}
+        not_applicable = [rule.why_not for kind, rule in JUDGE_DECISION_RULES.items()
+                          if kind in kinds and isinstance(rule, OtherDecisionRule)]
+        if len(not_applicable) == len(kinds):
             return {**block, "availability": "not_applicable",
-                    "reason": ("no matched judge verdict carries a score "
-                               "(boolean-only judge); calibration needs scored verdicts")}
+                    "reason": ("no matched verdict passes on score >= threshold: "
+                               + "; ".join(not_applicable))}
         return {**block, "reason": "no matched judge verdict carries a score in [0, 1]"}
     observed = calibration_metrics(pairs)
-    complete = population_complete and not excluded
+    causes = list(population_gaps)
+    if excluded:
+        causes.append(f"matched verdicts excluded from calibration: {len(excluded)} of "
+                      f"{len(ids)} (see excluded_judge_ids)")
+    complete = not causes
     warnings = []
     if len(pairs) < min_labels:
         warnings.append(f"only {len(pairs)} scored matched labels (< {min_labels}); "
@@ -14334,11 +14451,8 @@ def judge_calibration(ids: list[str], human: dict[str, dict[str, Any]],
     if observed["best_f1"] is None:
         warnings.append("best-F1 threshold is unavailable: no human label is pass "
                         "(F1 is 0 at every threshold)")
-    reason = None
-    if not complete:
-        reason = (f"{len(pairs)} of {len(ids)} matched verdicts carry a score in [0, 1]"
-                  if excluded else "alignment population is incomplete")
-    return {**block, "availability": "complete" if complete else "partial", "reason": reason,
+    return {**block, "availability": "complete" if complete else "partial",
+            "reason": "; ".join(causes) or None,
             **(observed if complete else empty), "observed": observed, "warnings": warnings}
 
 
@@ -14366,10 +14480,12 @@ def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, di
     j = [judge[i]["passed"] for i in ids]
     n = len(ids)
     observed = binary_alignment_metrics(h, j)
-    coverage_complete = (
-        bool(human_ids) and human_ids == judge_ids
-        and not invalid_human_ids and not incomplete_judge
-    )
+    population_gaps = [f"{label}: {count}" for label, count in (
+        ("unmatched human labels", len(human_ids - judge_ids)),
+        ("unmatched judge verdicts", len(judge_ids - human_ids)),
+        ("invalid human labels", len(invalid_human_ids)),
+        ("incomplete judge verdicts", len(incomplete_judge))) if count]
+    coverage_complete = bool(human_ids) and not population_gaps
     warnings = []
     if not coverage_complete:
         warnings.append(
@@ -14397,7 +14513,7 @@ def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, di
         "observed": observed,
         "warnings": warnings,
         "calibration": judge_calibration(
-            ids, human, judge, population_complete=coverage_complete, min_labels=min_labels),
+            ids, human, judge, population_gaps=population_gaps, min_labels=min_labels),
     }
 
 
