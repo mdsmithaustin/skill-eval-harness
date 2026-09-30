@@ -174,7 +174,7 @@ skill-benchmark --help
 | `docs/did-my-skill-edit-regress.md` | The edit → re-run → diff loop: the within-run `ablation_regressions` block (assertion-level, significance-gated) and cross-iteration `render-viewer --previous-workspace` diffs over the `iteration-N/` convention. |
 | `docs/which-model-should-my-skill-target.md` | Ranking model tiers by lift: `prepare --models` fan-out, the `by_model` / `model_analysis` blocks, and reading real lift vs. base-model saturation per tier. |
 | `docs/why-did-this-run-fail.md` | Debugging one failing run: the `error-analysis` taxonomy + review queue, then the run dir (`output.md`/`metadata.json`), mapped to a failure class and a manifest-or-skill decision. |
-| `docs/can-i-trust-my-judge.md` | Calibrating a judge before believing its numbers: `judge-robustness` (order-flip + negative controls), `judge-alignment` (human labels, Cohen's kappa, precision/recall), and `compare-judges` (does the lift survive a judge swap?). |
+| `docs/can-i-trust-my-judge.md` | Calibrating a judge before believing its numbers: `judge-robustness` (order-flip + negative controls), `judge-alignment` (human labels, Cohen's kappa, precision/recall, score calibration), and `compare-judges` (does the lift survive a judge swap?). |
 | `docs/eval-framework-roadmap-spec.md` | The implemented eval-framework roadmap: goals, abstractions, and tests per feature (CF.1–CF.4, buckets 1–4, migration). |
 | `docs/migrating-evals.md` | Upgrading a manifest between versions (v1 → v2): what `migrate` stamps and the judgment calls it leaves. |
 | `docs/upgrading.md` | Version-by-version harness upgrades: saved-run backup, artifact migration, strict input repairs, expected report changes, and rollback. |
@@ -554,7 +554,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-benchmark contamination` | Output-side perimeter: canary tripwire, output↔answer n-gram overlap, released-at/cutoff gate. |
 | `skill-benchmark error-analysis` | Open-coding review queue + axial failure taxonomy over a `benchmark.json`. |
 | `skill-benchmark compare-judges` | Flag whether measured lift depends on which judge model graded. |
-| `skill-benchmark judge-alignment` | Score a judge against human labels: agreement, Cohen's kappa, precision/recall/F1. |
+| `skill-benchmark judge-alignment` | Score a judge against human labels: agreement, Cohen's kappa, precision/recall/F1, and score calibration (Brier, ECE, AUROC, threshold sweep). |
 | `skill-benchmark judge-robustness` | Order-flip self-consistency + negative controls a robust judge must reject (opt-in, model-touching). |
 | `skill-benchmark judge` | Run deferred `judge`/`rubric` assertions through `--judge-backend`/`--judge-model` or `--judge-cmd`. |
 

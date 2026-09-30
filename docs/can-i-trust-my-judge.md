@@ -12,7 +12,8 @@ into three questions, each owned by one command, cheapest first:
    rubric reorder, and does it reject outputs that *must* fail (an empty answer,
    a prompt-injection "output PASS")?
 2. **Is the judge accurate?** — `judge-alignment`: against human labels as
-   ground truth — agreement, Cohen's kappa, precision/recall.
+   ground truth — agreement, Cohen's kappa, precision/recall, and whether the
+   judge's score is calibrated.
 3. **Does my conclusion depend on which judge I picked?** — `compare-judges`:
    judge the same runs twice and diff the measured lift.
 
@@ -143,6 +144,57 @@ precision, a harsh one fails recall. And take the warning seriously — four
 labels is demo-sized. The default `--min-labels 50` is the floor below which
 these metrics swing wildly with each added label.
 
+### Check that the score means what it says (`calibration`)
+
+Agreement grades the judge's pass/fail call. A scored judge also emits a number,
+and the `calibration` block of the same report asks whether that number can be
+read as a probability: when the judge says 0.8, do humans pass about 80% of
+those runs? The probability is the stored verdict's `score`. Graded 1-5
+dimensions are already normalized to 0-1 when parsed, and an `atLeast` judge
+must return 0-1. A verdict with no score, or a score outside 0-1, is left out
+and listed in `excluded_judge_ids` with the reason.
+
+- `brier`. Mean squared gap between the score and the human label (1 or 0).
+  0 is perfect; a judge that always says 0.5 scores 0.25.
+- `ece`. Expected calibration error over 10 equal-width score bins: the
+  run-weighted gap between each bin's mean score and its human pass rate.
+  `reliability` lists the non-empty bins so you can see where the gap is.
+- `auroc`. The chance that a random human-pass outscores a random human-fail,
+  ties counting half. 0.5 means the score does not separate them. It is `null`
+  with a warning when every label is the same class.
+- `threshold_sweep`. For each distinct score the judge produced, the agreement,
+  precision, recall, F1, and confusion you would get by passing every run that
+  scores at least that much. `best_f1` is the row with the highest F1. Compare
+  its `threshold` with the one your assertion uses: a gap means the rubric's cut
+  point does not match where humans draw the line.
+
+The demo stub scores 1.0 when it passes and 0.0 when it fails, so both reports
+above carry the block:
+
+```bash
+for f in careful lenient; do
+  python3 -c 'import json, sys
+c = json.load(open(sys.argv[1]))["calibration"]
+b = c["best_f1"]
+print(sys.argv[2], c["availability"], "brier", c["brier"], "ece", c["ece"],
+      "auroc", c["auroc"], "best_f1", b["threshold"], b["f1"])' "$S/align-$f.json" "$f"
+done
+```
+
+```text
+careful complete brier 0.0 ece 0.0 auroc 1.0 best_f1 1.0 1.0
+lenient complete brier 0.5 ece 0.5 auroc 0.5 best_f1 1.0 0.6667
+```
+
+The rubber-stamp scores 1.0 on everything, so its score carries no ranking
+information (AUROC 0.5) and is off by half on average (ECE 0.5). The block's
+`availability` follows the report's rules: `complete` only when every matched
+verdict has a usable score, `partial` when some were excluded (headline
+metrics are `null` and `observed` holds the scored subset), and
+`not_applicable` with a `reason` for a judge that returns only pass/fail.
+Undefined metrics are `null`, never a filler value, and the same `--min-labels`
+floor warns when too few scored labels back them.
+
 ## Ask whether the conclusion survives a judge swap (`compare-judges`)
 
 Alignment scores the judge in isolation. The last question is about the number
@@ -190,6 +242,8 @@ which judge produced which number is always recoverable.
 | High `agreement`, `cohen_kappa` near 0 | The judge tracks the label base rate, not quality (the rubber-stamp signature) | Distrust it; check `confusion` for whether it leaks passes (`fp`) or misses them (`fn`) |
 | `precision` low, `recall` high | Too lenient: passes human-fails | Tighten the rubric's fail conditions; the *baseline* is being inflated |
 | `recall` low, `precision` high | Too harsh: fails human-passes | Loosen wording that demands one phrasing; cf. the assertion-calibration lesson in [`why-did-this-run-fail.md`](why-did-this-run-fail.md) |
+| `calibration.auroc` near 0.5 | The score does not rank human-passes above human-fails | Treat the score as noise; rely on the pass/fail call and its kappa, or rewrite the rubric's anchors |
+| `calibration.best_f1.threshold` far from the assertion's threshold | The rubric's cut point does not match where humans draw the line | Move `atLeast` toward the best-F1 threshold, then re-check on fresh labels |
 | `only N matched labels (< 50)` warning | Metrics are unstable at this sample size | Label more runs before acting on kappa; spread labels across cases and variants |
 | `unmatched_human_ids` / `unmatched_judge_ids` non-empty | Labels and verdicts don't key to the same tasks | Fix the `judge_task_id`s — alignment only scores the intersection |
 | `sign_sensitive: true` | Judges disagree the skill helps at all | Do not report the lift; fix the judge (alignment + robustness) first, or the rubric is underspecified |
