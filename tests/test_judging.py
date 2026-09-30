@@ -1891,7 +1891,7 @@ class JudgeCalibrationTests(unittest.TestCase):
             "b": scored_judge_result(0.2),
             "c": judge_result(True, verdict_kind="dimensions", score=0.75, threshold=0.5,
                               dimension_scores={"clarity": 5, "depth": 3}),
-            "d": scored_judge_result(4.0, threshold=3.0),
+            "d": scored_judge_result(4.0, threshold=1.0),
             "e": judge_result(False),
         }
         cal = sb.judge_alignment_report(human, judge)["calibration"]
@@ -1909,7 +1909,7 @@ class JudgeCalibrationTests(unittest.TestCase):
         self.assertEqual(cal["observed"]["auroc"], 1.0)
         self.assertEqual({kind: (rule["n"], rule["calibrated"], rule["thresholds"])
                           for kind, rule in cal["decision_rules"].items()},
-                         {"scored": (3, True, [0.5, 3.0]), "dimensions": (1, False, None),
+                         {"scored": (3, True, [0.5, 1.0]), "dimensions": (1, False, None),
                           "boolean": (1, False, None)})
 
     def test_only_off_scale_scores_is_unavailable(self):

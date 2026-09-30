@@ -156,9 +156,9 @@ judge kind, and calibrates only the kinds marked yes:
 
 | `decision_rules` key | The harness passes it when | Calibrated | Knob that moves the cut point |
 |---|---|---|---|
-| `scored` (a plain judge with `threshold`, or with `atLeast`) | `score >= threshold` | yes | the assertion's `threshold`, or `atLeast` when set |
+| `scored` (a plain judge with `threshold`, or with `atLeast`) | `score >= threshold` | yes, when `threshold` is in [0, 1] | the assertion's `threshold`, or `atLeast` when set |
 | `per_step` | met steps `>= ceil(min_met_fraction x steps)`, which is met steps / steps `>= min_met_fraction` | yes | `per_step.min_met_fraction` |
-| `majority_consensus` (`--judge-panel` without `--quorum`, or an odd number of `--judge-runs` repeats, over plain scored members sharing one threshold) | a strict majority of members pass (a panel tie goes to the median), which is the median member score `>=` their threshold | yes | the members' `threshold`, or `atLeast` |
+| `majority_consensus` (`--judge-panel` without `--quorum`, or an odd number of `--judge-runs` repeats, over plain scored members sharing one threshold) | a strict majority of members pass (a panel tie goes to the median), which is the median member score `>=` their threshold | yes, when the members' `threshold` is in [0, 1] and the row's recorded decision reproduces from its members | the members' `threshold`, or `atLeast` |
 | `dynamic_rubric` | met criteria `>= minimum_criteria`, over a criteria count the judge drafts per run | no | |
 | `dimensions` | the mean 1-5 grade, normalized to 0-1, reaches the dimension threshold | no | |
 | `quorum_consensus` | at least `--quorum` panel members pass | no | |
@@ -174,6 +174,24 @@ grades every human-pass 4 (0.75) and every human-fail 3 (0.5) separates them
 perfectly yet would read as ECE 0.375. A 1-of-3 quorum can pass at a median
 score of 0.2. Each excluded verdict is listed in `excluded_judge_ids` with the
 reason, and so is a calibrated kind's verdict whose score lies outside 0-1.
+
+A `scored` or `majority_consensus` verdict is excluded the same way when its
+own `threshold` sits outside [0, 1]: that threshold is a cut on some other
+scale, so the row's score cannot be read as a pass probability even where the
+score itself happens to land in [0, 1]. This is not a hypothetical — the
+bundled `factuality` preset (`expand_judge_preset`; `judge --preset factuality`
+or `type: factuality`) expands to `threshold: 4` on its 1-5 anchored rubric,
+and that preset is the only one `JUDGE_PRESETS` ships today. A factuality
+verdict that grades the worst case (a raw score of 1) sits inside [0, 1] by
+coincidence, so without this check it would read as `P(pass) = 1.0` instead of
+being excluded as off-scale. Check every future preset the same way before
+shipping it: if its `threshold` is not on [0, 1], its verdicts calibrate only
+as `dimensions` or another quality-grade kind would, never as `scored`. A
+`majority_consensus` row is also excluded when it does not reproduce from its
+own members — each member's `passed` must equal its own `score >= threshold`,
+and the top-level `passed` must equal the majority (or median tie-break) those
+members imply; a row that disagrees with its members is either tampered with
+or read from a file the harness never wrote.
 
 Each `decision_rules` entry carries `n`, `calibrated`, `decides`, `knob`, and
 `thresholds`, the distinct thresholds the harness recorded on those rows. A

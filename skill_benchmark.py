@@ -14324,6 +14324,40 @@ def decision_rule_summary(decisions: dict[str, tuple[str, float | None]]) -> dic
     return summary
 
 
+def majority_consensus_contradiction(row: Mapping[str, Any]) -> str | None:
+    """None when a `majority_consensus` row's recorded passed calls agree with
+    its members (each member's passed == its own score >= threshold, and the
+    top-level passed == the strict majority of member passed, ties resolved
+    by the merge's own median-vs-threshold rule); otherwise the reason a
+    tampered or hand-written row cannot be trusted as that consensus."""
+    reason = "recorded decision contradicts its members; verdict may be forged or from a foreign file"
+    members = row.get("judge_panel", row.get("judge_runs"))
+    if not isinstance(members, list) or not members:
+        return reason
+    for member in members:
+        if not isinstance(member, Mapping):
+            return reason
+        try:
+            member_score = float(member["score"])
+            member_threshold = float(member["threshold"])
+        except (KeyError, TypeError, ValueError):
+            return reason
+        if bool(member.get("passed")) != (member_score >= member_threshold):
+            return reason
+    concur = sum(1 for member in members if member.get("passed"))
+    n = len(members)
+    if concur * 2 > n:
+        expected = True
+    elif concur * 2 < n:
+        expected = False
+    else:
+        median_score = statistics.median(float(member["score"]) for member in members)
+        expected = median_score >= float(members[0]["threshold"])
+    if bool(row.get("passed")) != expected:
+        return reason
+    return None
+
+
 def calibration_pairs(ids: list[str], human: dict[str, dict[str, Any]],
                       judge: dict[str, dict[str, Any]],
                       decisions: dict[str, tuple[str, float | None]],
@@ -14331,15 +14365,33 @@ def calibration_pairs(ids: list[str], human: dict[str, dict[str, Any]],
     """(judge score, human passed) for each matched id whose judge passes on
     score >= threshold, plus why every other id was left out. Those scores are
     stored on [0, 1] and no stored field declares another maximum, so an
-    off-scale score is excluded rather than rescaled by a guess."""
+    off-scale score is excluded rather than rescaled by a guess. A `scored` or
+    `majority_consensus` verdict whose threshold itself sits off that scale is
+    a raw grade, not a pass probability, and is excluded the same way. A
+    `majority_consensus` row is also excluded when its recorded decision does
+    not reproduce from its own members."""
     pairs: list[tuple[float, bool]] = []
     excluded: dict[str, str] = {}
     for identifier in ids:
-        rule = JUDGE_DECISION_RULES[decisions[identifier][0]]
+        kind, threshold = decisions[identifier]
+        rule = JUDGE_DECISION_RULES[kind]
         if isinstance(rule, OtherDecisionRule):
             excluded[identifier] = rule.why_not
             continue
-        score = float(judge[identifier]["score"])
+        if threshold is not None and not 0 <= threshold <= 1:
+            excluded[identifier] = (f"threshold {threshold:g} is outside [0, 1]; "
+                                    "stored verdicts declare no maximum to rescale by")
+            continue
+        if kind == "majority_consensus":
+            contradiction = majority_consensus_contradiction(judge[identifier])
+            if contradiction is not None:
+                excluded[identifier] = contradiction
+                continue
+        score = judge[identifier].get("score")
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            excluded[identifier] = f"a {kind} verdict carries no top-level score to calibrate"
+            continue
+        score = float(score)
         if not 0 <= score <= 1:
             excluded[identifier] = (f"score {score:g} is outside [0, 1]; "
                                     "stored verdicts declare no maximum to rescale by")
@@ -14485,8 +14537,12 @@ def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, di
     j = [judge[i]["passed"] for i in ids]
     n = len(ids)
     observed = binary_alignment_metrics(h, j)
+    # An id with no judge verdict AND an invalid human label is one gap, not
+    # two: it is reported under "invalid human labels", not double-counted
+    # into "unmatched human labels" as well.
+    unmatched_human_ids = (human_ids - judge_ids) - set(invalid_human_ids)
     population_gaps = [f"{label}: {count}" for label, count in (
-        ("unmatched human labels", len(human_ids - judge_ids)),
+        ("unmatched human labels", len(unmatched_human_ids)),
         ("unmatched judge verdicts", len(judge_ids - human_ids)),
         ("invalid human labels", len(invalid_human_ids)),
         ("incomplete judge verdicts", len(incomplete_judge))) if count]
