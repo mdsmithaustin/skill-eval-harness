@@ -10960,17 +10960,13 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     }
 
 
-# Without these, `claude -p` loads the operator's ~/.claude skills, agents,
-# CLAUDE.md, hooks, plugins, and MCP servers into every arm. --safe-mode keeps
-# OAuth working (unlike --bare); --disable-slash-commands also drops the
-# skills Claude Code bundles, so a without_skill arm sees no skill at all.
-CLAUDE_CONTEXT_ISOLATION_ARGS = ("--safe-mode", "--disable-slash-commands")
-
-# Trigger runs must keep the mounted project skill, which both flags above
-# hide. Loading only the project setting source drops ~/.claude skills, agents,
-# CLAUDE.md, hooks, and settings env; --strict-mcp-config drops every MCP
-# server, claude.ai connectors included; disableBundledSkills drops the skills
-# Claude Code ships.
+# Answer, judge, and trigger runs all use these. Without them `claude -p`
+# loads the operator's ~/.claude skills, agents, CLAUDE.md, hooks, plugins, and
+# MCP servers. Loading only the project setting source drops those and keeps
+# the skills and agents a run mounts under its workspace's .claude/;
+# --strict-mcp-config drops every MCP server, claude.ai connectors included;
+# disableBundledSkills drops the skills Claude Code ships. --safe-mode is not
+# used: it also hides the workspace's own skills and agents.
 CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS = (
     "--setting-sources", "project", "--strict-mcp-config",
     "--settings", '{"disableBundledSkills":true}',
@@ -10996,7 +10992,7 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
     if output_format == "stream-json":
         argv.append("--verbose")
     argv.append("--no-session-persistence")
-    argv += CLAUDE_CONTEXT_ISOLATION_ARGS
+    argv += CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS
     if model:
         argv += ["--model", model]
     if extra_args:
@@ -11020,7 +11016,7 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
         return {"answer": "", "cost_usd": None, "usage": {}, "parse_error": None,
                 "returncode": 124, "timed_out": True, "elapsed_ms": result.elapsed_ms,
                 "stderr": result.stderr, "raw_response": result.stdout, "command": command,
-                "context_isolation": list(CLAUDE_CONTEXT_ISOLATION_ARGS),
+                "context_isolation": list(CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS),
                 "invocation_state": result.invocation_state.value,
                 "trace_utf8_valid": result.stdout_utf8_valid}
     parsed = (
@@ -11047,7 +11043,7 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
         # run's trace; in envelope mode they preserve the failure diagnostics.
         "raw_response": result.stdout,
         "command": command,
-        "context_isolation": list(CLAUDE_CONTEXT_ISOLATION_ARGS),
+        "context_isolation": list(CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS),
     })
     return parsed
 
@@ -11271,15 +11267,6 @@ def codex_structured_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return converted
 
 
-# An isolated CODEX_HOME still lets Codex list every skill under the
-# operator's ~/.agents/skills (and its bundled system skills) in the prompt,
-# and still exposes the ChatGPT account's codex_apps connector MCP server.
-# Hiding the skill catalog beats moving HOME, which would also move tool and
-# version-manager lookups. Both options are repeatable, so a user-supplied
-# --codex-cmd that already carries them stays valid.
-CODEX_CONTEXT_ISOLATION_ARGS = ("-c", "skills.include_instructions=false", "--disable", "apps")
-
-
 def _walk_codex_host_skills() -> tuple[Path, list[str], list[str]]:
     """The host skill root, every `SKILL.md` under it (sorted), and every
     directory walked.
@@ -11412,12 +11399,16 @@ def toml_basic_string(value: str) -> str:
 
 
 def codex_trigger_context_isolation_args() -> tuple[list[str], list[str]]:
-    """Codex flags for a trigger run, and the form a row records.
+    """Codex flags for a trigger, answer, or judge run, and the form a row records.
 
-    A trigger run must keep `$CODEX_HOME/skills` listed, so it cannot hide the
-    skill catalog. Codex has no switch for the ~/.agents/skills root alone, so
-    each host skill is disabled by path; the recorded form counts them instead
-    of listing the operator's skill paths."""
+    An isolated CODEX_HOME still lists every skill under the operator's
+    ~/.agents/skills, Codex's bundled skills, and the account's codex_apps
+    connector. A run must keep the skills it mounts (`$CODEX_HOME/skills`, the
+    workspace's `.agents/skills`) listed, so it cannot hide the skill catalog.
+    Codex has no switch for the ~/.agents/skills root alone, so each host
+    skill is disabled by path; the recorded form counts them instead of
+    listing the operator's skill paths. Moving HOME would also move tool and
+    version-manager lookups."""
     host_skills = codex_host_skill_paths()
     entries = ",".join(f"{{path={toml_basic_string(path)},enabled=false}}" for path in host_skills)
 
@@ -11460,7 +11451,10 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
         argv.append("--ignore-rules")
     if sandbox and "--sandbox" not in argv:
         argv += ["--sandbox", sandbox]
-    argv += CODEX_CONTEXT_ISOLATION_ARGS
+    isolation_args, recorded_isolation = codex_trigger_context_isolation_args()
+    argv += isolation_args
+    # Codex echoes a rejected skills.config back, host paths included.
+    redact_host_paths = codex_host_path_redactor()
     tmp = Path(tempfile.mkdtemp(prefix="codex-invoke-"))
     cleanup_meta: dict[str, Any]
     try:
@@ -11488,6 +11482,7 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
             cwd=invoke_cwd,
             environment=env,
             timeout_s=timeout,
+            redact_output=redact_host_paths,
         ))
         last_message_found = last_message.exists()
         last_message_utf8_valid = True
@@ -11511,7 +11506,8 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
                 "fallback_attempted": False,
                 "warning": f"isolated Codex temporary-home cleanup failed unexpectedly ({code}); its unique directory will not be reused",
             }
-    command = " ".join(shlex.quote(a) for a in argv)
+    recorded = dict(zip(isolation_args, recorded_isolation))
+    command = " ".join(shlex.quote(recorded.get(a, a)) for a in argv)
     usage: dict[str, Any] = {}
     cost_usd = None
     protocol_error: str | None = (
@@ -11553,7 +11549,7 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
             "last_message_utf8_valid": last_message_utf8_valid,
             "temporary_home_cleanup": cleanup_meta,
             "command": command,
-            "context_isolation": list(CODEX_CONTEXT_ISOLATION_ARGS),
+            "context_isolation": recorded_isolation,
             "cwd": "<isolated workspace>",
         },
     }
