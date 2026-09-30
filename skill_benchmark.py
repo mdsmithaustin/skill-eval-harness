@@ -14325,15 +14325,18 @@ def decision_rule_summary(decisions: dict[str, tuple[str, float | None]]) -> dic
 
 
 def majority_consensus_contradiction(row: Mapping[str, Any]) -> str | None:
-    """None when a `majority_consensus` row's recorded passed calls agree with
-    its members (each member's passed == its own score >= threshold, and the
-    top-level passed == the strict majority of member passed, ties resolved
-    by the merge's own median-vs-threshold rule); otherwise the reason a
-    tampered or hand-written row cannot be trusted as that consensus."""
+    """None when a `majority_consensus` row's recorded passed AND score agree
+    with its members (each member's passed == its own score >= threshold, in
+    [0, 1]; the top-level passed == the strict majority of member passed, ties
+    resolved by the merge's own median-vs-threshold rule; and the top-level
+    score, when present, equals the merge's own statistics.median(member
+    scores)); otherwise the reason a tampered or hand-written row cannot be
+    trusted as that consensus."""
     reason = "recorded decision contradicts its members; verdict may be forged or from a foreign file"
     members = row.get("judge_panel", row.get("judge_runs"))
     if not isinstance(members, list) or not members:
         return reason
+    member_scores = []
     for member in members:
         if not isinstance(member, Mapping):
             return reason
@@ -14342,8 +14345,11 @@ def majority_consensus_contradiction(row: Mapping[str, Any]) -> str | None:
             member_threshold = float(member["threshold"])
         except (KeyError, TypeError, ValueError):
             return reason
+        if not 0 <= member_score <= 1:
+            return reason
         if bool(member.get("passed")) != (member_score >= member_threshold):
             return reason
+        member_scores.append(member_score)
     concur = sum(1 for member in members if member.get("passed"))
     n = len(members)
     if concur * 2 > n:
@@ -14351,9 +14357,14 @@ def majority_consensus_contradiction(row: Mapping[str, Any]) -> str | None:
     elif concur * 2 < n:
         expected = False
     else:
-        median_score = statistics.median(float(member["score"]) for member in members)
+        median_score = statistics.median(member_scores)
         expected = median_score >= float(members[0]["threshold"])
     if bool(row.get("passed")) != expected:
+        return reason
+    row_score = row.get("score")
+    if (isinstance(row_score, (int, float)) and not isinstance(row_score, bool)
+            and not math.isclose(float(row_score), statistics.median(member_scores),
+                                 rel_tol=1e-9, abs_tol=1e-9)):
         return reason
     return None
 
@@ -14425,6 +14436,14 @@ def _exact_sweep_rank(row: dict[str, Any]) -> tuple[Fraction, Fraction, float]:
             Fraction(c["tp"] + c["tn"], sum(c.values())), -row["threshold"])
 
 
+def exclusion_reason_summary(excluded: dict[str, str]) -> str:
+    """Every distinct reason a matched verdict was excluded from calibration,
+    with the count of ids that share it, so `unavailable` names the actual
+    causes instead of one sentence that fits none of them exactly."""
+    counts = collections.Counter(excluded.values())
+    return "; ".join(f"{text} ({count})" for text, count in sorted(counts.items()))
+
+
 def calibration_metrics(pairs: list[tuple[float, bool]]) -> dict[str, Any]:
     """Brier score, 10-bin ECE with its reliability table, AUROC, and a sweep of
     pass thresholds over the distinct observed scores. `pairs` is non-empty."""
@@ -14490,7 +14509,7 @@ def judge_calibration(ids: list[str], human: dict[str, dict[str, Any]],
             return {**block, "availability": "not_applicable",
                     "reason": ("no matched verdict passes on score >= threshold: "
                                + "; ".join(not_applicable))}
-        return {**block, "reason": "no matched judge verdict carries a score in [0, 1]"}
+        return {**block, "reason": exclusion_reason_summary(excluded)}
     observed = calibration_metrics(pairs)
     causes = list(population_gaps)
     if excluded:
