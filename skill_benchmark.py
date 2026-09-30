@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import bisect
 import collections
 import copy
 import difflib
@@ -14188,6 +14189,160 @@ def kappa_band(kappa: float | None) -> str | None:
     return "poor (<= chance)"
 
 
+def binary_alignment_metrics(human: list[bool], judge: list[bool]) -> dict[str, Any]:
+    """Agreement, kappa, and precision/recall/F1 of paired verdicts, with the
+    human label as ground truth and 'pass' as the positive class."""
+    count = len(human)
+    tp = sum(1 for x, y in zip(human, judge) if x and y)
+    tn = sum(1 for x, y in zip(human, judge) if not x and not y)
+    fp = sum(1 for x, y in zip(human, judge) if not x and y)
+    fn = sum(1 for x, y in zip(human, judge) if x and not y)
+    agreement = (tp + tn) / count if count else None
+    precision = tp / (tp + fp) if (tp + fp) else None
+    recall = tp / (tp + fn) if (tp + fn) else None
+    # Count form keeps the label-inverting case at F1=0.0; it is undefined
+    # only when neither rater has a positive.
+    f1_den = 2 * tp + fp + fn
+    f1 = (2 * tp / f1_den) if f1_den else None
+    kappa = cohen_kappa(human, judge)
+    return {
+        "n": count,
+        "agreement": round(agreement, 4) if agreement is not None else None,
+        "cohen_kappa": round(kappa, 4) if kappa is not None else None,
+        "kappa_interpretation": kappa_band(kappa),
+        "precision": round(precision, 4) if precision is not None else None,
+        "recall": round(recall, 4) if recall is not None else None,
+        "f1": round(f1, 4) if f1 is not None else None,
+        "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn},
+    }
+
+
+CALIBRATION_BINS = 10
+_CALIBRATION_METRICS = ("brier", "ece", "auroc", "reliability", "threshold_sweep", "best_f1")
+
+
+def calibration_pairs(ids: list[str], human: dict[str, dict[str, Any]],
+                      judge: dict[str, dict[str, Any]]) -> tuple[list[tuple[float, bool]], dict[str, str]]:
+    """(judge score, human passed) for each matched id whose verdict carries a
+    normalized score, plus why every other id was left out. Stored scores are
+    already on [0, 1] (graded 1-5 dimensions are normalized when parsed), and no
+    stored field declares another maximum, so an off-scale score is excluded
+    rather than rescaled by a guess."""
+    pairs: list[tuple[float, bool]] = []
+    excluded: dict[str, str] = {}
+    for identifier in ids:
+        raw = judge[identifier].get("score")
+        score = (float(raw) if raw is not None and finite_real(raw)
+                 and judge[identifier].get("verdict_kind") != "boolean" else None)
+        if score is None:
+            excluded[identifier] = "verdict carries no score"
+        elif not 0 <= score <= 1:
+            excluded[identifier] = (f"score {score:g} is outside [0, 1]; "
+                                    "stored verdicts declare no maximum to rescale by")
+        else:
+            pairs.append((score, human[identifier]["passed"]))
+    return pairs, excluded
+
+
+def mann_whitney_auroc(pairs: list[tuple[float, bool]]) -> float | None:
+    """Probability a random human-pass outscores a random human-fail, ties
+    counting half. Undefined (None) unless both classes are present."""
+    positives = sum(1 for _, passed in pairs if passed)
+    negatives = len(pairs) - positives
+    if not positives or not negatives:
+        return None
+    ordered = sorted(score for score, _ in pairs)
+    rank_sum = 0.0
+    for score, passed in pairs:
+        if passed:
+            below = bisect.bisect_left(ordered, score)
+            tied = bisect.bisect_right(ordered, score) - below
+            rank_sum += below + (tied + 1) / 2
+    return (rank_sum - positives * (positives + 1) / 2) / (positives * negatives)
+
+
+def calibration_metrics(pairs: list[tuple[float, bool]]) -> dict[str, Any]:
+    """Brier score, 10-bin ECE with its reliability table, AUROC, and a sweep of
+    pass thresholds over the distinct observed scores. `pairs` is non-empty."""
+    n = len(pairs)
+    brier = sum((score - passed) ** 2 for score, passed in pairs) / n
+    bins: list[list[tuple[float, bool]]] = [[] for _ in range(CALIBRATION_BINS)]
+    for score, passed in pairs:
+        index = sum(1 for k in range(1, CALIBRATION_BINS) if score >= k / CALIBRATION_BINS)
+        bins[index].append((score, passed))
+    reliability = []
+    ece = 0.0
+    for index, members in enumerate(bins):
+        if not members:
+            continue
+        mean_score = sum(score for score, _ in members) / len(members)
+        pass_rate = sum(1 for _, passed in members if passed) / len(members)
+        ece += len(members) / n * abs(mean_score - pass_rate)
+        reliability.append({
+            "lo": index / CALIBRATION_BINS, "hi": (index + 1) / CALIBRATION_BINS,
+            "n": len(members), "mean_score": round(mean_score, 4),
+            "pass_rate": round(pass_rate, 4)})
+    labels = [passed for _, passed in pairs]
+    sweep = []
+    for threshold in sorted({score for score, _ in pairs}):
+        row = binary_alignment_metrics(labels, [score >= threshold for score, _ in pairs])
+        sweep.append({"threshold": threshold,
+                      **{key: row[key] for key in ("agreement", "precision", "recall", "f1", "confusion")}})
+    best_f1 = (max(sweep, key=lambda row: (row["f1"], row["agreement"], -row["threshold"]))
+               if any(labels) else None)
+    auroc = mann_whitney_auroc(pairs)
+    return {
+        "brier": round(brier, 4),
+        "ece": round(ece, 4),
+        "auroc": round(auroc, 4) if auroc is not None else None,
+        "reliability": reliability,
+        "threshold_sweep": sweep,
+        "best_f1": best_f1,
+    }
+
+
+def judge_calibration(ids: list[str], human: dict[str, dict[str, Any]],
+                      judge: dict[str, dict[str, Any]], *, population_complete: bool,
+                      min_labels: int) -> dict[str, Any]:
+    """Whether the judge's score means what it says, over the same matched
+    population as the agreement metrics. Headline metrics follow the report's
+    rule: null unless the scored population is complete; `observed` always
+    carries what the scored subset shows."""
+    pairs, excluded = calibration_pairs(ids, human, judge)
+    empty = dict.fromkeys(_CALIBRATION_METRICS)
+    block: dict[str, Any] = {
+        "availability": "unavailable", "reason": None, "n": len(pairs),
+        "excluded_judge_ids": dict(sorted(excluded.items())[:20]),
+        **empty, "observed": None, "warnings": []}
+    if not ids:
+        return {**block, "reason": "no complete matched labels to calibrate against"}
+    if not pairs:
+        if all(reason == "verdict carries no score" for reason in excluded.values()):
+            return {**block, "availability": "not_applicable",
+                    "reason": ("no matched judge verdict carries a score "
+                               "(boolean-only judge); calibration needs scored verdicts")}
+        return {**block, "reason": "no matched judge verdict carries a score in [0, 1]"}
+    observed = calibration_metrics(pairs)
+    complete = population_complete and not excluded
+    warnings = []
+    if len(pairs) < min_labels:
+        warnings.append(f"only {len(pairs)} scored matched labels (< {min_labels}); "
+                        "calibration metrics are unstable — collect more human labels")
+    if observed["auroc"] is None:
+        polarity = "pass" if pairs[0][1] else "fail"
+        warnings.append(f"AUROC is unavailable: human labels are all {polarity} "
+                        "(AUROC needs both classes)")
+    if observed["best_f1"] is None:
+        warnings.append("best-F1 threshold is unavailable: no human label is pass "
+                        "(F1 is 0 at every threshold)")
+    reason = None
+    if not complete:
+        reason = (f"{len(pairs)} of {len(ids)} matched verdicts carry a score in [0, 1]"
+                  if excluded else "alignment population is incomplete")
+    return {**block, "availability": "complete" if complete else "partial", "reason": reason,
+            **(observed if complete else empty), "observed": observed, "warnings": warnings}
+
+
 def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, dict[str, Any]], *, min_labels: int = 50) -> dict[str, Any]:
     """Feature 2: validate a JUDGE against HUMAN labels (not another judge). Both
     are keyed by judge_task_id with a `passed` bool. Reports agreement, Cohen's
@@ -14211,33 +14366,7 @@ def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, di
     h = [human[i]["passed"] for i in ids]
     j = [judge[i]["passed"] for i in ids]
     n = len(ids)
-
-    def metrics(left: list[bool], right: list[bool]) -> dict[str, Any]:
-        count = len(left)
-        tp = sum(1 for x, y in zip(left, right) if x and y)
-        tn = sum(1 for x, y in zip(left, right) if not x and not y)
-        fp = sum(1 for x, y in zip(left, right) if not x and y)
-        fn = sum(1 for x, y in zip(left, right) if x and not y)
-        agreement = (tp + tn) / count if count else None
-        precision = tp / (tp + fp) if (tp + fp) else None
-        recall = tp / (tp + fn) if (tp + fn) else None
-        # Count form keeps the label-inverting case at F1=0.0; it is undefined
-        # only when neither rater has a positive.
-        f1_den = 2 * tp + fp + fn
-        f1 = (2 * tp / f1_den) if f1_den else None
-        kappa = cohen_kappa(left, right)
-        return {
-            "n": count,
-            "agreement": round(agreement, 4) if agreement is not None else None,
-            "cohen_kappa": round(kappa, 4) if kappa is not None else None,
-            "kappa_interpretation": kappa_band(kappa),
-            "precision": round(precision, 4) if precision is not None else None,
-            "recall": round(recall, 4) if recall is not None else None,
-            "f1": round(f1, 4) if f1 is not None else None,
-            "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn},
-        }
-
-    observed = metrics(h, j)
+    observed = binary_alignment_metrics(h, j)
     coverage_complete = (
         bool(human_ids) and human_ids == judge_ids
         and not invalid_human_ids and not incomplete_judge
@@ -14268,6 +14397,8 @@ def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, di
         **headline,
         "observed": observed,
         "warnings": warnings,
+        "calibration": judge_calibration(
+            ids, human, judge, population_complete=coverage_complete, min_labels=min_labels),
     }
 
 
@@ -21367,7 +21498,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--magnitude-eps", type=float, default=0.1, help="lift-spread above which the skill is judge-magnitude-sensitive")
     p.add_argument("--out")
 
-    p = sub.add_parser("judge-alignment", help="validate a judge against HUMAN labels: agreement, Cohen's kappa, precision/recall/F1 (feature 2)")
+    p = sub.add_parser("judge-alignment", help="validate a judge against HUMAN labels: agreement, Cohen's kappa, precision/recall/F1, score calibration (feature 2)")
     p.add_argument("--labels", required=True, help="human labels keyed by judge_task_id ({judge_task_id, passed}); JSONL or JSON")
     p.add_argument("--judge-results", required=True, help="judge verdicts keyed by judge_task_id (the judge output to validate)")
     p.add_argument("--min-labels", type=int, default=50, help="warn below this many matched labels (metrics unstable)")
