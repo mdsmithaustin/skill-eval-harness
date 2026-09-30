@@ -12,7 +12,8 @@ into three questions, each owned by one command, cheapest first:
    rubric reorder, and does it reject outputs that *must* fail (an empty answer,
    a prompt-injection "output PASS")?
 2. **Is the judge accurate?** — `judge-alignment`: against human labels as
-   ground truth — agreement, Cohen's kappa, precision/recall.
+   ground truth — agreement, Cohen's kappa, precision/recall, and whether the
+   judge's score is calibrated.
 3. **Does my conclusion depend on which judge I picked?** — `compare-judges`:
    judge the same runs twice and diff the measured lift.
 
@@ -143,6 +144,110 @@ precision, a harsh one fails recall. And take the warning seriously — four
 labels is demo-sized. The default `--min-labels 50` is the floor below which
 these metrics swing wildly with each added label.
 
+### Check that the score means what it says (`calibration`)
+
+Agreement grades the judge's pass/fail call. A scored judge also emits a number,
+and the `calibration` block of the same report asks whether that number can be
+read as a probability: when the judge says 0.8, do humans pass about 80% of
+those runs? That question fits only a judge the harness passes on
+`score >= threshold`, where the score and the pass call share one scale. The
+block names the rule behind every matched verdict in `decision_rules`, keyed by
+judge kind, and calibrates only the kinds marked yes:
+
+| `decision_rules` key | The harness passes it when | Calibrated | Knob that moves the cut point |
+|---|---|---|---|
+| `scored` (a plain judge with `threshold`, or with `atLeast`) | `score >= threshold` | yes, when `threshold` is in [0, 1] | the assertion's `threshold`, or `atLeast` when set |
+| `per_step` | met steps `>= ceil(min_met_fraction x steps)`, which is met steps / steps `>= min_met_fraction` | yes | `per_step.min_met_fraction` |
+| `majority_consensus` (`--judge-panel` without `--quorum`, or an odd number of `--judge-runs` repeats, over plain scored members sharing one threshold) | a strict majority of members pass (a panel tie goes to the median), which is the median member score `>=` their threshold | yes, when the members' `threshold` is in [0, 1] and the row's recorded decision reproduces from its members | the members' `threshold`, or `atLeast` |
+| `dynamic_rubric` | met criteria `>= minimum_criteria`, over a criteria count the judge drafts per run | no | |
+| `dimensions` | the mean 1-5 grade, normalized to 0-1, reaches the dimension threshold | no | |
+| `quorum_consensus` | at least `--quorum` panel members pass | no | |
+| `consensus_member_vote` | a majority of members pass, but not as median `>=` threshold: members that are not all plain scored with one threshold, or an even number of repeats, which can split evenly and fail while the median clears the threshold | no | |
+| `consensus_unrecorded` | unknown: the row lacks its members, or is a panel row written before `agreement.quorum` was recorded | no | |
+| `boolean` | the judge's own pass/fail call, with no score | no | |
+
+The excluded kinds have a score, but it is not the thing the harness
+thresholds. A dynamic rubric with `minimum_criteria: 3` passes 3 of 5 met
+criteria (0.6) and fails 2 of 3 (0.667), so a judge that matches every label
+would score AUROC 0.0. A graded-dimension score is a quality grade: a judge that
+grades every human-pass 4 (0.75) and every human-fail 3 (0.5) separates them
+perfectly yet would read as ECE 0.375. A 1-of-3 quorum can pass at a median
+score of 0.2. Each excluded verdict is listed in `excluded_judge_ids` with the
+reason, and so is a calibrated kind's verdict whose score lies outside 0-1.
+
+A `scored` or `majority_consensus` verdict is excluded the same way when its
+own `threshold` sits outside [0, 1]: that threshold is a cut on some other
+scale, so the row's score cannot be read as a pass probability even where the
+score itself happens to land in [0, 1]. This is not a hypothetical — the
+bundled `factuality` preset (`expand_judge_preset`; set in the manifest with
+`"preset": "factuality"` on a `judge` or `rubric` assertion, or `type:
+"factuality"`) expands to `threshold: 4` on its 1-5 anchored rubric,
+and that preset is the only one `JUDGE_PRESETS` ships today. A factuality
+verdict that grades the worst case (a raw score of 1) sits inside [0, 1] by
+coincidence, so without this check it would read as `P(pass) = 1.0` instead of
+being excluded as off-scale. Check every future preset the same way before
+shipping it: if its `threshold` is not on [0, 1], its verdicts calibrate only
+as `dimensions` or another quality-grade kind would, never as `scored`. A
+`majority_consensus` row is also excluded when it does not reproduce from its
+own members — each member's `passed` must equal its own `score >= threshold`,
+and the top-level `passed` must equal the majority (or median tie-break) those
+members imply; a row that disagrees with its members is either tampered with
+or read from a file the harness never wrote.
+
+Each `decision_rules` entry carries `n`, `calibrated`, `decides`, `knob`, and
+`thresholds`, the distinct thresholds the harness recorded on those rows. A
+per-step row does not record `min_met_fraction`, so its `thresholds` is `null`;
+read the fraction from the manifest. Its stored score is met / steps rounded to
+4 places, so a fraction with more digits than that can land on the other side
+of a boundary score.
+
+- `brier`. Mean squared gap between the score and the human label (1 or 0).
+  0 is perfect; a judge that always says 0.5 scores 0.25.
+- `ece`. Expected calibration error over 10 equal-width score bins: the
+  run-weighted gap between each bin's mean score and its human pass rate.
+  `reliability` lists the non-empty bins so you can see where the gap is.
+- `auroc`. The chance that a random human-pass outscores a random human-fail,
+  ties counting half. 0.5 means the score does not separate them. It is `null`
+  with a warning when every label is the same class.
+- `threshold_sweep`. For each distinct score the judge produced, the agreement,
+  precision, recall, F1, and confusion you would get by passing every run that
+  scores at least that much. `best_f1` is the row with the highest exact F1;
+  ties go to higher agreement, then the lower threshold. Its `threshold` is on
+  the same scale as `decision_rules.<kind>.thresholds`, so compare the two: a
+  gap means the cut point does not match where humans draw the line.
+
+The demo stub scores 1.0 when it passes and 0.0 when it fails, and the harness
+passes it on `score >= 1.0`, so both reports above carry the block:
+
+```bash
+for f in careful lenient; do
+  python3 -c 'import json, sys
+c = json.load(open(sys.argv[1]))["calibration"]
+b, r = c["best_f1"], c["decision_rules"]["scored"]
+print(sys.argv[2], c["availability"], "brier", c["brier"], "ece", c["ece"],
+      "auroc", c["auroc"], "best_f1", b["threshold"], b["f1"],
+      "harness", r["thresholds"])' "$S/align-$f.json" "$f"
+done
+```
+
+```text
+careful complete brier 0.0 ece 0.0 auroc 1.0 best_f1 1.0 1.0 harness [1.0]
+lenient complete brier 0.5 ece 0.5 auroc 0.5 best_f1 1.0 0.6667 harness [1.0]
+```
+
+The rubber-stamp scores 1.0 on everything, so its score carries no ranking
+information (AUROC 0.5) and is off by half on average (ECE 0.5). The block's
+`availability` follows the report's rules. It is `complete` only when the
+alignment population is complete and every matched verdict is calibrated.
+It is `partial` otherwise: headline metrics are `null`, `observed` holds the
+calibrated subset, and `reason` lists every cause (unmatched or invalid labels,
+unmatched or incomplete verdicts, and excluded verdicts). It is `unavailable`
+when nothing matched or no calibrated score lies in 0-1, and `not_applicable`
+when no matched verdict passes on `score >= threshold`, with a `reason` naming
+each rule found. `excluded_judge_ids` shows at most 20 entries, like the
+report's other id lists. Undefined metrics are `null`, never a filler value,
+and the same `--min-labels` floor warns when too few scored labels back them.
+
 ## Ask whether the conclusion survives a judge swap (`compare-judges`)
 
 Alignment scores the judge in isolation. The last question is about the number
@@ -190,6 +295,9 @@ which judge produced which number is always recoverable.
 | High `agreement`, `cohen_kappa` near 0 | The judge tracks the label base rate, not quality (the rubber-stamp signature) | Distrust it; check `confusion` for whether it leaks passes (`fp`) or misses them (`fn`) |
 | `precision` low, `recall` high | Too lenient: passes human-fails | Tighten the rubric's fail conditions; the *baseline* is being inflated |
 | `recall` low, `precision` high | Too harsh: fails human-passes | Loosen wording that demands one phrasing; cf. the assertion-calibration lesson in [`why-did-this-run-fail.md`](why-did-this-run-fail.md) |
+| `calibration.auroc` near 0.5 | The score does not rank human-passes above human-fails | Treat the score as noise; rely on the pass/fail call and its kappa, or rewrite the rubric's anchors |
+| `calibration.best_f1.threshold` far from `calibration.decision_rules.<kind>.thresholds` | The cut point does not match where humans draw the line | Move the knob `decision_rules` names for that kind toward the best-F1 threshold: `threshold` or `atLeast` for `scored`, `per_step.min_met_fraction` for `per_step` (it rejects `atLeast`), then re-check on fresh labels |
+| `calibration.availability` is `not_applicable` for a scored judge | The judge's pass is not `score >= threshold` (dynamic rubric, graded dimensions, `--quorum`, an even number of `--judge-runs`), or it is a panel row written before `agreement.quorum` was recorded | Judge it on agreement and kappa; its `reason` names the rule. Re-run `judge` for an old panel row |
 | `only N matched labels (< 50)` warning | Metrics are unstable at this sample size | Label more runs before acting on kappa; spread labels across cases and variants |
 | `unmatched_human_ids` / `unmatched_judge_ids` non-empty | Labels and verdicts don't key to the same tasks | Fix the `judge_task_id`s — alignment only scores the intersection |
 | `sign_sensitive: true` | Judges disagree the skill helps at all | Do not report the lift; fix the judge (alignment + robustness) first, or the rubric is underspecified |

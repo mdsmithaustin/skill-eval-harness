@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import bisect
 import collections
 import copy
 import difflib
@@ -44,6 +45,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass as _dataclass
 from decimal import ROUND_CEILING, Decimal
+from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn, Protocol, cast
 
@@ -13237,7 +13239,8 @@ def merge_cross_judge_rows(rows: list[dict[str, Any]], *, quorum: int | None = N
         out["score"] = median_score
     out["evidence"] = " | ".join(str(r.get("evidence", "")) for r in rows if r.get("evidence"))[:4000]
     out["agreement"] = {"concur": concur, "n": n, "concur_fraction": round(concur / n, 4),
-                        "unanimous": concur in (0, n), "unresolved": unresolved}
+                        "unanimous": concur in (0, n), "unresolved": unresolved,
+                        "quorum": quorum if isinstance(quorum, int) and quorum > 0 else None}
     aggregate_judge_member_telemetry(rows, out)
     out["judge_panel"] = rows
     out["judge_observation_complete"] = True
@@ -14188,6 +14191,347 @@ def kappa_band(kappa: float | None) -> str | None:
     return "poor (<= chance)"
 
 
+def binary_alignment_metrics(human: list[bool], judge: list[bool]) -> dict[str, Any]:
+    """Agreement, kappa, and precision/recall/F1 of paired verdicts, with the
+    human label as ground truth and 'pass' as the positive class."""
+    count = len(human)
+    tp = sum(1 for x, y in zip(human, judge) if x and y)
+    tn = sum(1 for x, y in zip(human, judge) if not x and not y)
+    fp = sum(1 for x, y in zip(human, judge) if not x and y)
+    fn = sum(1 for x, y in zip(human, judge) if x and not y)
+    agreement = (tp + tn) / count if count else None
+    precision = tp / (tp + fp) if (tp + fp) else None
+    recall = tp / (tp + fn) if (tp + fn) else None
+    # Count form keeps the label-inverting case at F1=0.0; it is undefined
+    # only when neither rater has a positive.
+    f1_den = 2 * tp + fp + fn
+    f1 = (2 * tp / f1_den) if f1_den else None
+    kappa = cohen_kappa(human, judge)
+    return {
+        "n": count,
+        "agreement": round(agreement, 4) if agreement is not None else None,
+        "cohen_kappa": round(kappa, 4) if kappa is not None else None,
+        "kappa_interpretation": kappa_band(kappa),
+        "precision": round(precision, 4) if precision is not None else None,
+        "recall": round(recall, 4) if recall is not None else None,
+        "f1": round(f1, 4) if f1 is not None else None,
+        "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn},
+    }
+
+
+CALIBRATION_BINS = 10
+_CALIBRATION_METRICS = ("brier", "ece", "auroc", "reliability", "threshold_sweep", "best_f1")
+
+
+@_dataclass(frozen=True)
+class ScoreThresholdRule:
+    """A judge that passes when its stored 0-1 score reaches a threshold, so its
+    score can be calibrated against human labels."""
+    decides: str
+    knob: str
+
+
+@_dataclass(frozen=True)
+class OtherDecisionRule:
+    """A judge whose pass is not its score reaching one threshold."""
+    decides: str
+    why_not: str
+
+
+JUDGE_DECISION_RULES: dict[str, ScoreThresholdRule | OtherDecisionRule] = {
+    "scored": ScoreThresholdRule(
+        "score >= threshold", "threshold, or atLeast when the assertion sets it"),
+    "per_step": ScoreThresholdRule(
+        "met steps >= ceil(min_met_fraction x steps)", "per_step.min_met_fraction"),
+    "majority_consensus": ScoreThresholdRule(
+        "strict majority of scored members sharing one threshold, or the median on a tie, which is "
+        "median member score >= that threshold",
+        "the members' threshold, or atLeast when the assertion sets it"),
+    "boolean": OtherDecisionRule(
+        "the judge's own pass/fail call", "a boolean verdict carries no score"),
+    "dynamic_rubric": OtherDecisionRule(
+        "met criteria >= minimum_criteria",
+        "a dynamic-rubric verdict passes on met criteria >= minimum_criteria over a criteria "
+        "count the judge drafts per run, so its met/total score has no fixed pass threshold"),
+    "dimensions": OtherDecisionRule(
+        "mean normalized 1-5 grade >= dimension threshold",
+        "a graded-dimension verdict passes when its mean 1-5 grade, normalized to 0-1, reaches "
+        "the dimension threshold; that score is a quality grade, not a pass probability"),
+    "quorum_consensus": OtherDecisionRule(
+        "at least --quorum panel members pass",
+        "a quorum consensus passes when at least --quorum panel members pass, "
+        "not on its median score"),
+    "consensus_member_vote": OtherDecisionRule(
+        "majority vote of members",
+        "a consensus passes on a member vote that equals median score >= threshold only "
+        "over scored members sharing one threshold, and for repeats only when their count is odd"),
+    "consensus_unrecorded": OtherDecisionRule(
+        "majority or --quorum, not recorded",
+        "a consensus verdict that does not record its members and quorum cannot show "
+        "whether it passed by majority or by --quorum"),
+}
+
+
+def judge_decision(row: Mapping[str, Any]) -> tuple[str, float | None]:
+    """The JUDGE_DECISION_RULES kind a stored verdict row shows, and the
+    threshold the harness compared its score with when the row records one.
+    A per-step row records its step fingerprint but not min_met_fraction."""
+    kind = row.get("verdict_kind", "boolean")
+    if kind == "scored":
+        return kind, float(row["threshold"])
+    if kind == "dynamic":
+        return ("per_step" if "trajectory_steps_sha256" in row else "dynamic_rubric"), None
+    if kind != "consensus":
+        return kind, None
+    members = row.get("judge_panel", row.get("judge_runs"))
+    agreement = row.get("agreement")
+    is_panel = "judge_panel" in row
+    if (not isinstance(members, list) or not members
+            or not all(isinstance(member, Mapping) for member in members)
+            or (is_panel and not (isinstance(agreement, Mapping) and "quorum" in agreement))):
+        return "consensus_unrecorded", None
+    if is_panel and cast(Mapping[str, Any], agreement)["quorum"] is not None:
+        return "quorum_consensus", None
+    thresholds = {member.get("threshold") for member in members
+                  if member.get("verdict_kind") == "scored"}
+    # A repeat merge has no median tie-break, so an even count can split evenly
+    # and fail while its median clears the threshold.
+    if (len(thresholds) == 1 and (threshold := thresholds.pop()) is not None
+            and finite_real(threshold)
+            and all(member.get("verdict_kind") == "scored" for member in members)
+            and (is_panel or len(members) % 2 == 1)):
+        return "majority_consensus", float(threshold)
+    return "consensus_member_vote", None
+
+
+def decision_rule_summary(decisions: dict[str, tuple[str, float | None]]) -> dict[str, Any]:
+    """Per decision-rule kind among the matched verdicts: how many, whether it
+    is calibrated, and the thresholds the harness used (null when unrecorded)."""
+    grouped: dict[str, list[float | None]] = {}
+    for kind, threshold in decisions.values():
+        grouped.setdefault(kind, []).append(threshold)
+    summary = {}
+    for kind, thresholds in grouped.items():
+        rule = JUDGE_DECISION_RULES[kind]
+        recorded = sorted({value for value in thresholds if value is not None})
+        summary[kind] = {
+            "n": len(thresholds),
+            "calibrated": isinstance(rule, ScoreThresholdRule),
+            "decides": rule.decides,
+            "knob": rule.knob if isinstance(rule, ScoreThresholdRule) else None,
+            "thresholds": recorded or None,
+        }
+    return summary
+
+
+def majority_consensus_contradiction(row: Mapping[str, Any]) -> str | None:
+    """None when a `majority_consensus` row's recorded passed AND score agree
+    with its members (each member's passed == its own score >= threshold, in
+    [0, 1]; the top-level passed == the strict majority of member passed, ties
+    resolved by the merge's own median-vs-threshold rule; and the top-level
+    score, when present, equals the merge's own statistics.median(member
+    scores)); otherwise the reason a tampered or hand-written row cannot be
+    trusted as that consensus."""
+    reason = "recorded decision contradicts its members; verdict may be forged or from a foreign file"
+    members = row.get("judge_panel", row.get("judge_runs"))
+    if not isinstance(members, list) or not members:
+        return reason
+    member_scores = []
+    for member in members:
+        if not isinstance(member, Mapping):
+            return reason
+        try:
+            member_score = float(member["score"])
+            member_threshold = float(member["threshold"])
+        except (KeyError, TypeError, ValueError):
+            return reason
+        if not 0 <= member_score <= 1:
+            return reason
+        if bool(member.get("passed")) != (member_score >= member_threshold):
+            return reason
+        member_scores.append(member_score)
+    concur = sum(1 for member in members if member.get("passed"))
+    n = len(members)
+    if concur * 2 > n:
+        expected = True
+    elif concur * 2 < n:
+        expected = False
+    else:
+        median_score = statistics.median(member_scores)
+        expected = median_score >= float(members[0]["threshold"])
+    if bool(row.get("passed")) != expected:
+        return reason
+    row_score = row.get("score")
+    if (isinstance(row_score, (int, float)) and not isinstance(row_score, bool)
+            and not math.isclose(float(row_score), statistics.median(member_scores),
+                                 rel_tol=1e-9, abs_tol=1e-9)):
+        return reason
+    return None
+
+
+def calibration_pairs(ids: list[str], human: dict[str, dict[str, Any]],
+                      judge: dict[str, dict[str, Any]],
+                      decisions: dict[str, tuple[str, float | None]],
+                      ) -> tuple[list[tuple[float, bool]], dict[str, str]]:
+    """(judge score, human passed) for each matched id whose judge passes on
+    score >= threshold, plus why every other id was left out. Those scores are
+    stored on [0, 1] and no stored field declares another maximum, so an
+    off-scale score is excluded rather than rescaled by a guess. A `scored` or
+    `majority_consensus` verdict whose threshold itself sits off that scale is
+    a raw grade, not a pass probability, and is excluded the same way. A
+    `majority_consensus` row is also excluded when its recorded decision does
+    not reproduce from its own members."""
+    pairs: list[tuple[float, bool]] = []
+    excluded: dict[str, str] = {}
+    for identifier in ids:
+        kind, threshold = decisions[identifier]
+        rule = JUDGE_DECISION_RULES[kind]
+        if isinstance(rule, OtherDecisionRule):
+            excluded[identifier] = rule.why_not
+            continue
+        if threshold is not None and not 0 <= threshold <= 1:
+            excluded[identifier] = (f"threshold {threshold:g} is outside [0, 1]; "
+                                    "stored verdicts declare no maximum to rescale by")
+            continue
+        if kind == "majority_consensus":
+            contradiction = majority_consensus_contradiction(judge[identifier])
+            if contradiction is not None:
+                excluded[identifier] = contradiction
+                continue
+        score = judge[identifier].get("score")
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            excluded[identifier] = f"a {kind} verdict carries no top-level score to calibrate"
+            continue
+        score = float(score)
+        if not 0 <= score <= 1:
+            excluded[identifier] = (f"score {score:g} is outside [0, 1]; "
+                                    "stored verdicts declare no maximum to rescale by")
+        else:
+            pairs.append((score, human[identifier]["passed"]))
+    return pairs, excluded
+
+
+def mann_whitney_auroc(pairs: list[tuple[float, bool]]) -> float | None:
+    """Probability a random human-pass outscores a random human-fail, ties
+    counting half. Undefined (None) unless both classes are present."""
+    positives = sum(1 for _, passed in pairs if passed)
+    negatives = len(pairs) - positives
+    if not positives or not negatives:
+        return None
+    ordered = sorted(score for score, _ in pairs)
+    rank_sum = 0.0
+    for score, passed in pairs:
+        if passed:
+            below = bisect.bisect_left(ordered, score)
+            tied = bisect.bisect_right(ordered, score) - below
+            rank_sum += below + (tied + 1) / 2
+    return (rank_sum - positives * (positives + 1) / 2) / (positives * negatives)
+
+
+def _exact_sweep_rank(row: dict[str, Any]) -> tuple[Fraction, Fraction, float]:
+    """Best-F1 order: exact F1, then exact agreement, then the lower threshold.
+    The displayed values are rounded, and two thresholds can round alike."""
+    c = row["confusion"]
+    return (Fraction(2 * c["tp"], 2 * c["tp"] + c["fp"] + c["fn"]),
+            Fraction(c["tp"] + c["tn"], sum(c.values())), -row["threshold"])
+
+
+def exclusion_reason_summary(excluded: dict[str, str]) -> str:
+    """Every distinct reason a matched verdict was excluded from calibration,
+    with the count of ids that share it, so `unavailable` names the actual
+    causes instead of one sentence that fits none of them exactly."""
+    counts = collections.Counter(excluded.values())
+    return "; ".join(f"{text} ({count})" for text, count in sorted(counts.items()))
+
+
+def calibration_metrics(pairs: list[tuple[float, bool]]) -> dict[str, Any]:
+    """Brier score, 10-bin ECE with its reliability table, AUROC, and a sweep of
+    pass thresholds over the distinct observed scores. `pairs` is non-empty."""
+    n = len(pairs)
+    brier = sum((score - passed) ** 2 for score, passed in pairs) / n
+    bins: list[list[tuple[float, bool]]] = [[] for _ in range(CALIBRATION_BINS)]
+    for score, passed in pairs:
+        index = sum(1 for k in range(1, CALIBRATION_BINS) if score >= k / CALIBRATION_BINS)
+        bins[index].append((score, passed))
+    reliability = []
+    ece = 0.0
+    for index, members in enumerate(bins):
+        if not members:
+            continue
+        mean_score = sum(score for score, _ in members) / len(members)
+        pass_rate = sum(1 for _, passed in members if passed) / len(members)
+        ece += len(members) / n * abs(mean_score - pass_rate)
+        reliability.append({
+            "lo": index / CALIBRATION_BINS, "hi": (index + 1) / CALIBRATION_BINS,
+            "n": len(members), "mean_score": round(mean_score, 4),
+            "pass_rate": round(pass_rate, 4)})
+    labels = [passed for _, passed in pairs]
+    sweep = []
+    for threshold in sorted({score for score, _ in pairs}):
+        row = binary_alignment_metrics(labels, [score >= threshold for score, _ in pairs])
+        sweep.append({"threshold": threshold,
+                      **{key: row[key] for key in ("agreement", "precision", "recall", "f1", "confusion")}})
+    best_f1 = max(sweep, key=_exact_sweep_rank) if any(labels) else None
+    auroc = mann_whitney_auroc(pairs)
+    return {
+        "brier": round(brier, 4),
+        "ece": round(ece, 4),
+        "auroc": round(auroc, 4) if auroc is not None else None,
+        "reliability": reliability,
+        "threshold_sweep": sweep,
+        "best_f1": best_f1,
+    }
+
+
+def judge_calibration(ids: list[str], human: dict[str, dict[str, Any]],
+                      judge: dict[str, dict[str, Any]], *, population_gaps: list[str],
+                      min_labels: int) -> dict[str, Any]:
+    """Whether the judge's score means what it says, over the same matched
+    population as the agreement metrics. Only a judge that passes on
+    score >= threshold is calibrated (JUDGE_DECISION_RULES). Headline metrics
+    follow the report's rule: null unless the population is complete and every
+    matched verdict is calibrated; `observed` carries what the calibrated subset shows."""
+    decisions = {identifier: judge_decision(judge[identifier]) for identifier in ids}
+    pairs, excluded = calibration_pairs(ids, human, judge, decisions)
+    empty = dict.fromkeys(_CALIBRATION_METRICS)
+    block: dict[str, Any] = {
+        "availability": "unavailable", "reason": None, "n": len(pairs),
+        "decision_rules": decision_rule_summary(decisions),
+        "excluded_judge_ids": dict(sorted(excluded.items())[:20]),
+        **empty, "observed": None, "warnings": []}
+    if not ids:
+        return {**block, "reason": "no complete matched labels to calibrate against"}
+    if not pairs:
+        kinds = {kind for kind, _ in decisions.values()}
+        not_applicable = [rule.why_not for kind, rule in JUDGE_DECISION_RULES.items()
+                          if kind in kinds and isinstance(rule, OtherDecisionRule)]
+        if len(not_applicable) == len(kinds):
+            return {**block, "availability": "not_applicable",
+                    "reason": ("no matched verdict passes on score >= threshold: "
+                               + "; ".join(not_applicable))}
+        return {**block, "reason": exclusion_reason_summary(excluded)}
+    observed = calibration_metrics(pairs)
+    causes = list(population_gaps)
+    if excluded:
+        causes.append(f"matched verdicts excluded from calibration: {len(excluded)} of "
+                      f"{len(ids)} (see excluded_judge_ids)")
+    complete = not causes
+    warnings = []
+    if len(pairs) < min_labels:
+        warnings.append(f"only {len(pairs)} scored matched labels (< {min_labels}); "
+                        "calibration metrics are unstable — collect more human labels")
+    if observed["auroc"] is None:
+        polarity = "pass" if pairs[0][1] else "fail"
+        warnings.append(f"AUROC is unavailable: human labels are all {polarity} "
+                        "(AUROC needs both classes)")
+    if observed["best_f1"] is None:
+        warnings.append("best-F1 threshold is unavailable: no human label is pass "
+                        "(F1 is 0 at every threshold)")
+    return {**block, "availability": "complete" if complete else "partial",
+            "reason": "; ".join(causes) or None,
+            **(observed if complete else empty), "observed": observed, "warnings": warnings}
+
+
 def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, dict[str, Any]], *, min_labels: int = 50) -> dict[str, Any]:
     """Feature 2: validate a JUDGE against HUMAN labels (not another judge). Both
     are keyed by judge_task_id with a `passed` bool. Reports agreement, Cohen's
@@ -14211,37 +14555,17 @@ def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, di
     h = [human[i]["passed"] for i in ids]
     j = [judge[i]["passed"] for i in ids]
     n = len(ids)
-
-    def metrics(left: list[bool], right: list[bool]) -> dict[str, Any]:
-        count = len(left)
-        tp = sum(1 for x, y in zip(left, right) if x and y)
-        tn = sum(1 for x, y in zip(left, right) if not x and not y)
-        fp = sum(1 for x, y in zip(left, right) if not x and y)
-        fn = sum(1 for x, y in zip(left, right) if x and not y)
-        agreement = (tp + tn) / count if count else None
-        precision = tp / (tp + fp) if (tp + fp) else None
-        recall = tp / (tp + fn) if (tp + fn) else None
-        # Count form keeps the label-inverting case at F1=0.0; it is undefined
-        # only when neither rater has a positive.
-        f1_den = 2 * tp + fp + fn
-        f1 = (2 * tp / f1_den) if f1_den else None
-        kappa = cohen_kappa(left, right)
-        return {
-            "n": count,
-            "agreement": round(agreement, 4) if agreement is not None else None,
-            "cohen_kappa": round(kappa, 4) if kappa is not None else None,
-            "kappa_interpretation": kappa_band(kappa),
-            "precision": round(precision, 4) if precision is not None else None,
-            "recall": round(recall, 4) if recall is not None else None,
-            "f1": round(f1, 4) if f1 is not None else None,
-            "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn},
-        }
-
-    observed = metrics(h, j)
-    coverage_complete = (
-        bool(human_ids) and human_ids == judge_ids
-        and not invalid_human_ids and not incomplete_judge
-    )
+    observed = binary_alignment_metrics(h, j)
+    # An id with no judge verdict AND an invalid human label is one gap, not
+    # two: it is reported under "invalid human labels", not double-counted
+    # into "unmatched human labels" as well.
+    unmatched_human_ids = (human_ids - judge_ids) - set(invalid_human_ids)
+    population_gaps = [f"{label}: {count}" for label, count in (
+        ("unmatched human labels", len(unmatched_human_ids)),
+        ("unmatched judge verdicts", len(judge_ids - human_ids)),
+        ("invalid human labels", len(invalid_human_ids)),
+        ("incomplete judge verdicts", len(incomplete_judge))) if count]
+    coverage_complete = bool(human_ids) and not population_gaps
     warnings = []
     if not coverage_complete:
         warnings.append(
@@ -14268,6 +14592,8 @@ def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, di
         **headline,
         "observed": observed,
         "warnings": warnings,
+        "calibration": judge_calibration(
+            ids, human, judge, population_gaps=population_gaps, min_labels=min_labels),
     }
 
 
@@ -21367,7 +21693,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--magnitude-eps", type=float, default=0.1, help="lift-spread above which the skill is judge-magnitude-sensitive")
     p.add_argument("--out")
 
-    p = sub.add_parser("judge-alignment", help="validate a judge against HUMAN labels: agreement, Cohen's kappa, precision/recall/F1 (feature 2)")
+    p = sub.add_parser("judge-alignment", help="validate a judge against HUMAN labels: agreement, Cohen's kappa, precision/recall/F1, score calibration (feature 2)")
     p.add_argument("--labels", required=True, help="human labels keyed by judge_task_id ({judge_task_id, passed}); JSONL or JSON")
     p.add_argument("--judge-results", required=True, help="judge verdicts keyed by judge_task_id (the judge output to validate)")
     p.add_argument("--min-labels", type=int, default=50, help="warn below this many matched labels (metrics unstable)")

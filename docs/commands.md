@@ -163,6 +163,8 @@ skill-benchmark judge-alignment \
 
 It reports `agreement`, **Cohen's `cohen_kappa`** (chance-corrected, so an imbalanced label set can't flatter the judge) with a `kappa_interpretation` band, and `precision`/`recall`/`f1` plus the `confusion` matrix. Below `--min-labels` (default 50) matched labels it warns that the metrics are unstable. Fully model-free — it grades a judge you already ran.
 
+A `calibration` block adds the `brier` score, 10-bin expected calibration error (`ece`) with its `reliability` bins, `auroc`, and a `threshold_sweep` over the observed scores with the `best_f1` threshold. It covers only judges the harness passes on `score >= threshold`: plain scored judges (`threshold` or `atLeast`), `per_step` judges (`min_met_fraction`), and consensus over plain scored members sharing one threshold (`--judge-panel` without `--quorum`, or an odd number of `--judge-runs` repeats). There the score and the pass call share one scale, so `best_f1.threshold` compares directly with the thresholds listed in `decision_rules`. Dynamic-rubric, graded-dimension, quorum-consensus, even-repeat or mixed-member consensus, and boolean judges pass by another rule, so their verdicts are excluded with a reason, and a report with no calibrated verdict gets `availability: "not_applicable"`. Any metric that is undefined for the labels given is `null` with a warning. See [Can I trust my judge?](can-i-trust-my-judge.md) for how to read it.
+
 The end-to-end calibration loop over this command, `compare-judges`, and `judge-robustness` — runnable offline on the demo — is [`can-i-trust-my-judge.md`](can-i-trust-my-judge.md).
 
 ## Error analysis (open coding → axial taxonomy)

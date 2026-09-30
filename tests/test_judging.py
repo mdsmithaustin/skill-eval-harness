@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,7 +21,10 @@ from helpers import (
     demo_manifest as base_manifest,
 )
 from helpers import (
+    file_judge_cmd,
+    judge_result,
     judge_task,
+    scored_judge_result,
     trace_event,
     write_run,
 )
@@ -920,7 +924,8 @@ class CrossJudgeConsensusTests(unittest.TestCase):
         self.assertEqual(out["score"], 4)                      # median(4,5,3)
         self.assertEqual(out["judge_model"], "consensus")
         self.assertEqual(out["judge_models"], ["m1", "m2", "m3"])
-        self.assertEqual(out["agreement"], {"concur": 3, "n": 3, "concur_fraction": 1.0, "unanimous": True, "unresolved": False})
+        self.assertEqual(out["agreement"], {"concur": 3, "n": 3, "concur_fraction": 1.0, "unanimous": True,
+                                            "unresolved": False, "quorum": None})
         self.assertEqual(len(out["judge_panel"]), 3)           # members nested
         self.assertIn("m1-ev", out["evidence"])
 
@@ -1764,6 +1769,462 @@ class JudgeAlignmentTests(unittest.TestCase):
         self.assertEqual(sb.kappa_band(0.0), "poor (<= chance)")
         self.assertEqual(sb.kappa_band(-0.2), "poor (<= chance)")
         self.assertIsNone(sb.kappa_band(None))
+
+
+class JudgeCalibrationTests(unittest.TestCase):
+    """judge-alignment's calibration block: does the judge's score mean what it says?"""
+
+    # id -> (judge score, human passed). Every score sits in its own ECE bin.
+    SCORED = {"a": (0.9, True), "b": (0.8, True), "c": (0.7, False), "d": (0.6, True),
+              "e": (0.4, False), "f": (0.3, True), "g": (0.2, False), "h": (0.1, False)}
+
+    SWEEP = [
+        {"threshold": 0.1, "agreement": 0.5, "precision": 0.5, "recall": 1.0, "f1": 0.6667,
+         "confusion": {"tp": 4, "fp": 4, "fn": 0, "tn": 0}},
+        {"threshold": 0.2, "agreement": 0.625, "precision": 0.5714, "recall": 1.0, "f1": 0.7273,
+         "confusion": {"tp": 4, "fp": 3, "fn": 0, "tn": 1}},
+        {"threshold": 0.3, "agreement": 0.75, "precision": 0.6667, "recall": 1.0, "f1": 0.8,
+         "confusion": {"tp": 4, "fp": 2, "fn": 0, "tn": 2}},
+        {"threshold": 0.4, "agreement": 0.625, "precision": 0.6, "recall": 0.75, "f1": 0.6667,
+         "confusion": {"tp": 3, "fp": 2, "fn": 1, "tn": 2}},
+        {"threshold": 0.6, "agreement": 0.75, "precision": 0.75, "recall": 0.75, "f1": 0.75,
+         "confusion": {"tp": 3, "fp": 1, "fn": 1, "tn": 3}},
+        {"threshold": 0.7, "agreement": 0.625, "precision": 0.6667, "recall": 0.5, "f1": 0.5714,
+         "confusion": {"tp": 2, "fp": 1, "fn": 2, "tn": 3}},
+        {"threshold": 0.8, "agreement": 0.75, "precision": 1.0, "recall": 0.5, "f1": 0.6667,
+         "confusion": {"tp": 2, "fp": 0, "fn": 2, "tn": 4}},
+        {"threshold": 0.9, "agreement": 0.625, "precision": 1.0, "recall": 0.25, "f1": 0.4,
+         "confusion": {"tp": 1, "fp": 0, "fn": 3, "tn": 4}},
+    ]
+
+    @staticmethod
+    def _population(rows):
+        human = {key: {"passed": passed} for key, (_, passed) in rows.items()}
+        judge = {key: scored_judge_result(score) for key, (score, _) in rows.items()}
+        return human, judge
+
+    def test_scored_judge_gets_brier_ece_auroc_and_sweep(self):
+        report = sb.judge_alignment_report(*self._population(self.SCORED))
+        cal = report["calibration"]
+        self.assertEqual(cal["availability"], "complete")
+        self.assertIsNone(cal["reason"])
+        self.assertEqual(cal["n"], 8)
+        self.assertEqual(cal["excluded_judge_ids"], {})
+        self.assertEqual(cal["brier"], 0.175)
+        self.assertEqual(cal["ece"], 0.35)
+        self.assertEqual(cal["auroc"], 0.8125)   # 13 of 16 pass/fail pairs ranked correctly
+        self.assertEqual(cal["threshold_sweep"], self.SWEEP)
+        self.assertEqual(cal["best_f1"], self.SWEEP[2])
+        self.assertEqual(len(cal["reliability"]), 8)
+        self.assertEqual(cal["reliability"][2],
+                         {"lo": 0.3, "hi": 0.4, "n": 1, "mean_score": 0.3, "pass_rate": 1.0})
+        self.assertEqual(cal["observed"]["brier"], 0.175)
+        self.assertEqual(cal["decision_rules"], {"scored": {
+            "n": 8, "calibrated": True, "decides": "score >= threshold",
+            "knob": "threshold, or atLeast when the assertion sets it", "thresholds": [0.5]}})
+        self.assertEqual(cal["warnings"], [(
+            "only 8 scored matched labels (< 50); calibration metrics are unstable "
+            "\u2014 collect more human labels")])
+
+    def test_cli_emits_calibration_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            human, judge = self._population(self.SCORED)
+            (td / "labels.jsonl").write_text("".join(
+                json.dumps({"judge_task_id": key, **row}) + "\n" for key, row in human.items()))
+            (td / "judge.jsonl").write_text("".join(
+                json.dumps({"judge_task_id": key, **row}) + "\n" for key, row in judge.items()))
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "skill_benchmark.py"), "judge-alignment",
+                 "--labels", str(td / "labels.jsonl"), "--judge-results", str(td / "judge.jsonl"),
+                 "--min-labels", "8", "--out", str(td / "align.json")],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            cal = json.loads((td / "align.json").read_text())["calibration"]
+        self.assertEqual((cal["availability"], cal["brier"], cal["ece"], cal["auroc"]),
+                         ("complete", 0.175, 0.35, 0.8125))
+        self.assertEqual(cal["best_f1"]["threshold"], 0.3)
+        self.assertEqual(cal["warnings"], [])
+
+    def test_one_human_class_leaves_auroc_unavailable(self):
+        report = sb.judge_alignment_report(*self._population(
+            {"a": (0.9, True), "b": (0.6, True), "c": (0.3, True), "d": (0.2, True)}))
+        cal = report["calibration"]
+        self.assertEqual(cal["brier"], 0.325)
+        self.assertIsNone(cal["auroc"])
+        self.assertEqual(cal["best_f1"]["threshold"], 0.2)
+        self.assertIn("AUROC is unavailable: human labels are all pass "
+                      "(AUROC needs both classes)", cal["warnings"])
+
+        all_fail = sb.judge_alignment_report(*self._population(
+            {"a": (0.9, False), "b": (0.1, False)}))["calibration"]
+        self.assertEqual(all_fail["brier"], 0.41)
+        self.assertIsNone(all_fail["auroc"])
+        self.assertIsNone(all_fail["best_f1"])
+        self.assertIn("best-F1 threshold is unavailable: no human label is pass "
+                      "(F1 is 0 at every threshold)", all_fail["warnings"])
+
+    def test_identical_scores_collapse_to_one_threshold(self):
+        report = sb.judge_alignment_report(*self._population(
+            {"a": (0.5, True), "b": (0.5, True), "c": (0.5, False), "d": (0.5, False)}))
+        cal = report["calibration"]
+        self.assertEqual((cal["brier"], cal["ece"], cal["auroc"]), (0.25, 0.0, 0.5))
+        self.assertEqual(cal["threshold_sweep"], [
+            {"threshold": 0.5, "agreement": 0.5, "precision": 0.5, "recall": 1.0, "f1": 0.6667,
+             "confusion": {"tp": 2, "fp": 2, "fn": 0, "tn": 0}}])
+
+    def test_boolean_only_judge_is_not_applicable(self):
+        human = {"a": {"passed": True}, "b": {"passed": False}}
+        judge = {"a": judge_result(True), "b": judge_result(False)}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "not_applicable")
+        self.assertEqual(cal["reason"], "no matched verdict passes on score >= threshold: "
+                                        "a boolean verdict carries no score")
+        self.assertEqual((cal["n"], cal["brier"], cal["ece"], cal["auroc"], cal["observed"]),
+                         (0, None, None, None, None))
+
+    def test_mixed_population_calibrates_only_score_threshold_verdicts(self):
+        human = {"a": {"passed": True}, "b": {"passed": False}, "c": {"passed": True},
+                 "d": {"passed": False}, "e": {"passed": False}}
+        judge = {
+            "a": scored_judge_result(0.9),
+            "b": scored_judge_result(0.2),
+            "c": judge_result(True, verdict_kind="dimensions", score=0.75, threshold=0.5,
+                              dimension_scores={"clarity": 5, "depth": 3}),
+            "d": scored_judge_result(4.0, threshold=1.0),
+            "e": judge_result(False),
+        }
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "partial")
+        self.assertEqual(cal["reason"],
+                         "matched verdicts excluded from calibration: 3 of 5 (see excluded_judge_ids)")
+        self.assertEqual(cal["n"], 2)
+        self.assertEqual(cal["excluded_judge_ids"], {
+            "c": ("a graded-dimension verdict passes when its mean 1-5 grade, normalized to 0-1, "
+                  "reaches the dimension threshold; that score is a quality grade, not a pass probability"),
+            "d": "score 4 is outside [0, 1]; stored verdicts declare no maximum to rescale by",
+            "e": "a boolean verdict carries no score"})
+        self.assertIsNone(cal["brier"])
+        self.assertEqual(cal["observed"]["brier"], 0.025)
+        self.assertEqual(cal["observed"]["auroc"], 1.0)
+        self.assertEqual({kind: (rule["n"], rule["calibrated"], rule["thresholds"])
+                          for kind, rule in cal["decision_rules"].items()},
+                         {"scored": (3, True, [0.5, 1.0]), "dimensions": (1, False, None),
+                          "boolean": (1, False, None)})
+
+    def test_only_off_scale_scores_is_unavailable(self):
+        cal = sb.judge_alignment_report(
+            {"a": {"passed": True}, "b": {"passed": False}},
+            {"a": scored_judge_result(4.0, threshold=3.0), "b": judge_result(False)})["calibration"]
+        self.assertEqual(cal["availability"], "unavailable")
+        self.assertEqual(cal["reason"], (
+            "a boolean verdict carries no score (1); threshold 3 is outside [0, 1]; "
+            "stored verdicts declare no maximum to rescale by (1)"))
+        self.assertIsNone(cal["observed"])
+
+    def test_unavailable_reason_names_every_distinct_exclusion_cause(self):
+        # An off-scale threshold, a forged consensus, and a no-score consensus
+        # are three different reasons every matched row was excluded; the
+        # `unavailable` reason must name each, not one fixed sentence.
+        members = [dict(scored_judge_result(score), judge_task_id="t", judge_model=f"m{k}")
+                   for k, score in enumerate((0.9, 0.7, 0.2))]
+        merged = sb.merge_cross_judge_rows(members)
+        forged = sb.validated_result_row(dict(merged, passed=not merged["passed"]))
+        no_score = dict(sb.merge_cross_judge_rows(
+            [dict(scored_judge_result(score), judge_task_id="u", judge_model=f"m{k}")
+             for k, score in enumerate((0.9, 0.7, 0.2))]))
+        del no_score["score"]
+        no_score = sb.validated_result_row(no_score)
+        human = {"a": {"passed": True}, "t": {"passed": True}, "u": {"passed": True}}
+        judge = {"a": scored_judge_result(4.0, threshold=3.0), "t": forged, "u": no_score}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "unavailable")
+        self.assertIn("threshold 3 is outside [0, 1]", cal["reason"])
+        self.assertIn("recorded decision contradicts its members", cal["reason"])
+        self.assertIn("carries no top-level score to calibrate", cal["reason"])
+        self.assertNotEqual(cal["reason"], "no matched judge verdict carries a score in [0, 1]")
+
+    def test_incomplete_alignment_population_makes_calibration_partial(self):
+        human = {"a": {"passed": True}, "b": {"passed": False}, "c": {"passed": True}}
+        judge = {"a": scored_judge_result(1.0), "b": scored_judge_result(0.3)}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "partial")
+        self.assertEqual(cal["reason"], "unmatched human labels: 1")
+        self.assertIsNone(cal["ece"])
+        self.assertEqual(cal["observed"]["brier"], 0.045)
+        # 1.0 sits in the last bin, which is closed on the right
+        self.assertEqual(cal["observed"]["reliability"][-1],
+                         {"lo": 0.9, "hi": 1.0, "n": 1, "mean_score": 1.0, "pass_rate": 1.0})
+
+    def test_partial_reason_lists_every_cause(self):
+        human = {"a": {"passed": True}, "b": {"passed": False}, "c": {"passed": True},
+                 "x": {"passed": True}}
+        judge = {"a": scored_judge_result(0.9), "b": scored_judge_result(0.2),
+                 "c": judge_result(True), "y": scored_judge_result(0.4)}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "partial")
+        self.assertEqual(cal["reason"], (
+            "unmatched human labels: 1; unmatched judge verdicts: 1; "
+            "matched verdicts excluded from calibration: 1 of 3 (see excluded_judge_ids)"))
+
+    def test_partial_reason_counts_invalid_unmatched_label_once(self):
+        # "b" has no judge verdict AND an invalid human label; that is one gap
+        # ("invalid human labels: 1"), not also "unmatched human labels: 1".
+        human = {"a": {"passed": True}, "b": {"passed": "nope"}}
+        judge = {"a": scored_judge_result(0.9)}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "partial")
+        self.assertEqual(cal["reason"], "invalid human labels: 1")
+
+    @staticmethod
+    def _dynamic(met, total, minimum=3, **extra):
+        criteria = [{"name": f"c{k}", "met": k < met} for k in range(total)]
+        return judge_result(total >= minimum and met >= minimum, verdict_kind="dynamic",
+                            score=round(met / total, 4), minimum_criteria=minimum,
+                            criteria=criteria, **extra)
+
+    def test_dynamic_rubric_judge_is_not_applicable(self):
+        # 3 of 5 passes at minimum_criteria 3 while 2 of 3 fails: the higher
+        # met/total fails, which read as a score gave AUROC 0.0 on a perfect judge.
+        human = {"a": {"passed": True}, "b": {"passed": False}}
+        judge = {"a": self._dynamic(3, 5), "b": self._dynamic(2, 3)}
+        report = sb.judge_alignment_report(human, judge)
+        self.assertEqual(report["agreement"], 1.0)
+        cal = report["calibration"]
+        self.assertEqual(cal["availability"], "not_applicable")
+        self.assertEqual(cal["reason"], (
+            "no matched verdict passes on score >= threshold: a dynamic-rubric verdict passes "
+            "on met criteria >= minimum_criteria over a criteria count the judge drafts per run, "
+            "so its met/total score has no fixed pass threshold"))
+        self.assertEqual((cal["n"], cal["auroc"], cal["observed"]), (0, None, None))
+
+    def test_per_step_judge_is_calibrated_against_min_met_fraction(self):
+        human = {"a": {"passed": True}, "b": {"passed": False}, "c": {"passed": True}}
+        steps = {"trajectory_steps_sha256": "e" * 64}
+        judge = {"a": self._dynamic(2, 4, minimum=2, **steps),
+                 "b": self._dynamic(1, 3, minimum=2, **steps),
+                 "c": self._dynamic(3, 3, minimum=3, **steps)}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual((cal["availability"], cal["n"], cal["auroc"]), ("complete", 3, 1.0))
+        self.assertEqual(cal["decision_rules"], {"per_step": {
+            "n": 3, "calibrated": True, "decides": "met steps >= ceil(min_met_fraction x steps)",
+            "knob": "per_step.min_met_fraction", "thresholds": None}})
+
+    def test_graded_dimension_judge_is_not_applicable(self):
+        human = {"a": {"passed": True}, "b": {"passed": False}}
+        judge = {
+            "a": judge_result(True, verdict_kind="dimensions", score=0.75, threshold=0.75,
+                              dimension_scores={"clarity": 4, "depth": 4}),
+            "b": judge_result(False, verdict_kind="dimensions", score=0.5, threshold=0.75,
+                              dimension_scores={"clarity": 3, "depth": 3}),
+        }
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "not_applicable")
+        self.assertEqual(cal["reason"], (
+            "no matched verdict passes on score >= threshold: a graded-dimension verdict passes "
+            "when its mean 1-5 grade, normalized to 0-1, reaches the dimension threshold; "
+            "that score is a quality grade, not a pass probability"))
+        self.assertIsNone(cal["ece"])
+
+    @staticmethod
+    def _panel(task, scores, quorum=None):
+        members = [dict(scored_judge_result(score), judge_task_id=task, judge_model=f"m{k}")
+                   for k, score in enumerate(scores)]
+        return sb.merge_cross_judge_rows(members, quorum=quorum)
+
+    def test_quorum_consensus_is_not_applicable(self):
+        # quorum 1 of 3 passes on one member while the median member score is 0.2
+        panel = self._panel("p", [0.9, 0.2, 0.1], quorum=1)
+        self.assertEqual((panel["passed"], panel["score"]), (True, 0.2))
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            (td / "labels.jsonl").write_text(json.dumps({"judge_task_id": "p", "passed": True}) + "\n")
+            (td / "judge.jsonl").write_text(json.dumps(panel) + "\n")
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "skill_benchmark.py"), "judge-alignment",
+                 "--labels", str(td / "labels.jsonl"), "--judge-results", str(td / "judge.jsonl"),
+                 "--out", str(td / "align.json")],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            cal = json.loads((td / "align.json").read_text())["calibration"]
+        self.assertEqual(cal["availability"], "not_applicable")
+        self.assertEqual(cal["reason"], (
+            "no matched verdict passes on score >= threshold: a quorum consensus passes when "
+            "at least --quorum panel members pass, not on its median score"))
+
+    def test_majority_consensus_is_calibrated_at_the_members_threshold(self):
+        human = {"p": {"passed": True}, "q": {"passed": False}, "r": {"passed": True}}
+        repeats = sb.merge_repeated_judge_rows(
+            [dict(scored_judge_result(score), judge_task_id="r") for score in (0.9, 0.8, 0.1)])
+        judge = {"p": self._panel("p", [0.9, 0.6, 0.1]), "q": self._panel("q", [0.4, 0.2, 0.7]),
+                 "r": repeats}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual((cal["availability"], cal["n"], cal["auroc"]), ("complete", 3, 1.0))
+        self.assertEqual({kind: (rule["n"], rule["calibrated"], rule["thresholds"])
+                          for kind, rule in cal["decision_rules"].items()},
+                         {"majority_consensus": (3, True, [0.5])})
+
+    def test_off_scale_preset_threshold_is_not_calibrated(self):
+        # factuality's threshold (4) is a cut on its 1-5 rubric, not [0, 1]: a
+        # verdict scoring the worst grade (1) must not read as P(pass) = 1.0.
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "output.md"
+            output.write_text("candidate", encoding="utf-8")
+            assertion = sb.expand_judge_preset({"type": "factuality"})
+            task = judge_task(assertion=assertion, output_path=str(output))
+            row = sb.run_one_judge_task(
+                task, judge_cmd=file_judge_cmd(Path(td), {"score": 1, "passed": False}))
+        self.assertEqual((row["verdict_kind"], row["score"], row["threshold"], row["passed"]),
+                         ("scored", 1.0, 4.0, False))
+        jid = task["judge_task_id"]
+        cal = sb.judge_alignment_report({jid: {"passed": False}}, {jid: row})["calibration"]
+        self.assertEqual(cal["availability"], "unavailable")
+        self.assertEqual(cal["reason"], (
+            "threshold 4 is outside [0, 1]; stored verdicts declare no maximum to rescale by (1)"))
+        self.assertEqual(cal["excluded_judge_ids"], {
+            jid: "threshold 4 is outside [0, 1]; stored verdicts declare no maximum to rescale by"})
+
+    def test_consensus_missing_top_level_score_is_excluded_not_crashed(self):
+        members = [dict(scored_judge_result(score), judge_task_id="t", judge_model=f"m{k}")
+                   for k, score in enumerate((0.9, 0.7, 0.2))]
+        merged = sb.merge_cross_judge_rows(members)
+        raw = dict(merged)
+        del raw["score"]
+        row = sb.validated_result_row(raw)
+        self.assertIsNone(row.get("score"))
+        self.assertEqual(sb.judge_decision(row), ("majority_consensus", 0.5))
+        cal = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})["calibration"]
+        self.assertEqual(cal["excluded_judge_ids"],
+                         {"t": "a majority_consensus verdict carries no top-level score to calibrate"})
+
+    def test_majority_consensus_contradicting_top_level_passed_is_excluded(self):
+        members = [dict(scored_judge_result(score), judge_task_id="t", judge_model=f"m{k}")
+                   for k, score in enumerate((0.9, 0.7, 0.2))]
+        merged = sb.merge_cross_judge_rows(members)
+        self.assertTrue(merged["passed"])   # 2 of 3 members pass -> strict majority
+        forged = dict(merged, passed=False)   # tampered: contradicts its own members
+        row = sb.validated_result_row(forged)
+        self.assertEqual(sb.judge_decision(row), ("majority_consensus", 0.5))
+        cal = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})["calibration"]
+        self.assertEqual(cal["excluded_judge_ids"], {
+            "t": "recorded decision contradicts its members; verdict may be forged or from a foreign file"})
+
+    def test_majority_consensus_with_forged_member_is_excluded(self):
+        members = [dict(scored_judge_result(score), judge_task_id="t", judge_model=f"m{k}")
+                   for k, score in enumerate((0.9, 0.7, 0.2))]
+        merged = sb.merge_cross_judge_rows(members)
+        forged = dict(merged)
+        forged["judge_panel"] = [dict(forged["judge_panel"][0], passed=False),
+                                 *forged["judge_panel"][1:]]   # member's passed no longer matches its score
+        row = sb.validated_result_row(forged)
+        self.assertEqual(sb.judge_decision(row), ("majority_consensus", 0.5))
+        cal = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})["calibration"]
+        self.assertEqual(cal["excluded_judge_ids"], {
+            "t": "recorded decision contradicts its members; verdict may be forged or from a foreign file"})
+
+    def test_majority_consensus_score_mismatch_with_members_is_excluded(self):
+        # passed still agrees with the members' majority, but the top-level
+        # score is no longer their median (0.6) — the merge's own rule.
+        members = [dict(scored_judge_result(score), judge_task_id="t", judge_model=f"m{k}")
+                   for k, score in enumerate((0.9, 0.6, 0.1))]
+        merged = sb.merge_cross_judge_rows(members)
+        self.assertEqual((merged["passed"], merged["score"]), (True, 0.6))
+        tampered = dict(merged, score=0.99)
+        row = sb.validated_result_row(tampered)
+        self.assertEqual(sb.judge_decision(row), ("majority_consensus", 0.5))
+        cal = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})["calibration"]
+        self.assertEqual(cal["excluded_judge_ids"], {
+            "t": "recorded decision contradicts its members; verdict may be forged or from a foreign file"})
+
+    def test_majority_consensus_with_out_of_range_member_score_is_excluded(self):
+        members = [dict(scored_judge_result(1.5, threshold=1.0), judge_task_id="t", judge_model="m0"),
+                  dict(scored_judge_result(0.3, threshold=1.0), judge_task_id="t", judge_model="m1"),
+                  dict(scored_judge_result(0.2, threshold=1.0), judge_task_id="t", judge_model="m2")]
+        merged = sb.merge_cross_judge_rows(members)
+        row = sb.validated_result_row(dict(merged))
+        self.assertEqual(sb.judge_decision(row), ("majority_consensus", 1.0))
+        cal = sb.judge_alignment_report({"t": {"passed": False}}, {"t": row})["calibration"]
+        self.assertEqual(cal["excluded_judge_ids"], {
+            "t": "recorded decision contradicts its members; verdict may be forged or from a foreign file"})
+
+    def test_calibration_verifier_finds_no_false_exclusions_on_real_merges(self):
+        """Random real merges through merge_cross_judge_rows (panels of 1-7,
+        with and without quorum, and repeats) must never be excluded from
+        calibration when they are legitimate: thresholds 0, 1, 0.5, and
+        random, with member scores placed at the threshold, 0, and 1."""
+        import random
+        rng = random.Random(1234)
+        legitimate = 0
+        for trial in range(500):
+            thr = rng.choice([0.0, 1.0, 0.5, round(rng.random(), 4)])
+            panel_size = rng.choice([1, 2, 3, 4, 5, 6, 7])
+            edge_scores = [thr, 0.0, 1.0]
+            scores = [rng.choice(edge_scores + [round(rng.random(), 4)]) for _ in range(panel_size)]
+            quorum = rng.choice([None, 1, panel_size]) if panel_size > 1 else None
+            members = [dict(scored_judge_result(s, threshold=thr), judge_task_id=f"trial{trial}",
+                            judge_model=f"m{k}")
+                      for k, s in enumerate(scores)]
+            row = sb.merge_cross_judge_rows(members, quorum=quorum)
+            kind, _ = sb.judge_decision(row)
+            if kind != "majority_consensus":
+                continue
+            self.assertIsNone(sb.majority_consensus_contradiction(row),
+                              f"trial {trial}: thr={thr} scores={scores} quorum={quorum}")
+            legitimate += 1
+        self.assertGreater(legitimate, 0)
+
+    def test_consensus_that_is_not_median_at_threshold_is_not_applicable(self):
+        # 2 repeats at [0.4, 0.9] fail on a 1-1 vote while their median 0.65 clears 0.5.
+        even = sb.merge_repeated_judge_rows(
+            [dict(scored_judge_result(score), judge_task_id="e") for score in (0.4, 0.9)])
+        self.assertEqual((even["passed"], even["score"]), (False, 0.65))
+        nested = self._panel("n", [0.4, 0.9])
+        nested["judge_panel"] = [
+            dict(sb.merge_repeated_judge_rows(
+                [dict(scored_judge_result(score), judge_task_id="n") for score in scores]),
+                judge_model=model)
+            for model, scores in (("m0", (0.4, 0.4, 0.4)), ("m1", (0.9, 0.9, 0.9)))]
+        malformed = self._panel("m", [0.9, 0.6, 0.1])
+        del malformed["judge_panel"][0]["threshold"]
+        human = {"e": {"passed": False}, "n": {"passed": False}, "m": {"passed": True}}
+        cal = sb.judge_alignment_report(
+            human, {"e": even, "n": nested, "m": malformed})["calibration"]
+        self.assertEqual(cal["availability"], "not_applicable")
+        self.assertEqual(cal["reason"], (
+            "no matched verdict passes on score >= threshold: a consensus passes on a member "
+            "vote that equals median score >= threshold only over scored members sharing one "
+            "threshold, and for repeats only when their count is odd"))
+
+    def test_consensus_without_recorded_rule_is_not_applicable(self):
+        legacy = self._panel("q", [0.9, 0.6, 0.1])
+        del legacy["agreement"]["quorum"]
+        human = {"p": {"passed": True}, "q": {"passed": True}}
+        judge = {"p": judge_result(True, verdict_kind="consensus", score=0.2), "q": legacy}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "not_applicable")
+        self.assertEqual(cal["reason"], (
+            "no matched verdict passes on score >= threshold: a consensus verdict that does not "
+            "record its members and quorum cannot show whether it passed by majority or by --quorum"))
+
+    def test_best_f1_breaks_ties_on_exact_f1_not_rounded(self):
+        # threshold 0.9: F1 130/152 = 0.855263; threshold 0.1: F1 136/159 = 0.855346.
+        # Both round to 0.8553, and 0.9 has the higher agreement.
+        rows = {}
+        for k in range(91):
+            passed = k < 68
+            high = k < 65 or 68 <= k < 87
+            rows[f"t{k:02d}"] = (0.9 if high else 0.1, passed)
+        cal = sb.judge_alignment_report(*self._population(rows))["calibration"]
+        self.assertEqual(cal["best_f1"], {
+            "threshold": 0.1, "agreement": 0.7473, "precision": 0.7473, "recall": 1.0, "f1": 0.8553,
+            "confusion": {"tp": 68, "fp": 23, "fn": 0, "tn": 0}})
+
+    def test_no_overlap_is_unavailable(self):
+        cal = sb.judge_alignment_report(
+            {"x": {"passed": True}}, {"y": scored_judge_result(0.9)})["calibration"]
+        self.assertEqual(cal["availability"], "unavailable")
+        self.assertEqual(cal["reason"], "no complete matched labels to calibrate against")
+        self.assertIsNone(cal["brier"])
 
 
 class BlindJudgePromptTests(unittest.TestCase):
