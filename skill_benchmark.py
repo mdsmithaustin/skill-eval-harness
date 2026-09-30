@@ -6562,12 +6562,7 @@ def event_tool_key(event: dict[str, Any]) -> str:
     name=Bash/Read/Write/Edit/Skill; Codex's item type, or its mcp tool name;
     Pi's toolName; Gemini's tool_name; Vibe's function name) into the same
     `name` field before grading runs, so a named event's key is just that
-    name, casefolded. But the names themselves differ by provider: Claude and
-    Pi key file/skill steps as read/write/edit/skill, Codex keys a file edit
-    as file_change (not edit) and has no web_search key at all, Gemini keys
-    them as run_shell_command/read_file/write_file/activate_skill, and Vibe
-    only recognizes skill/read_file/grep (any other function name, including
-    "bash", fails to normalize and is dropped with a protocol error). A
+    name, casefolded. The names themselves differ by provider, so a
     manifest's `expected` list is written against one provider's key
     vocabulary, not a shared one — see the per-provider table in
     docs/authoring-evals.md. A nameless shell command normalizes to "bash"
