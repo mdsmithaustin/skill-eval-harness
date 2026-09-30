@@ -14242,9 +14242,10 @@ JUDGE_DECISION_RULES: dict[str, ScoreThresholdRule | OtherDecisionRule] = {
     "scored": ScoreThresholdRule(
         "score >= threshold", "threshold, or atLeast when the assertion sets it"),
     "per_step": ScoreThresholdRule(
-        "met steps / steps >= min_met_fraction", "per_step.min_met_fraction"),
+        "met steps >= ceil(min_met_fraction x steps)", "per_step.min_met_fraction"),
     "majority_consensus": ScoreThresholdRule(
-        "strict majority of scored members, which is median member score >= their threshold",
+        "strict majority of scored members sharing one threshold, which is "
+        "median member score >= that threshold",
         "the members' threshold, or atLeast when the assertion sets it"),
     "boolean": OtherDecisionRule(
         "the judge's own pass/fail call", "a boolean verdict carries no score"),
@@ -14262,8 +14263,8 @@ JUDGE_DECISION_RULES: dict[str, ScoreThresholdRule | OtherDecisionRule] = {
         "not on its median score"),
     "consensus_member_vote": OtherDecisionRule(
         "majority vote of members",
-        "a consensus passes on a majority vote of members that do not all pass on "
-        "score >= one shared threshold"),
+        "a consensus passes on a member vote that equals median score >= threshold only "
+        "over scored members sharing one threshold, and for repeats only when their count is odd"),
     "consensus_unrecorded": OtherDecisionRule(
         "majority or --quorum, not recorded",
         "a consensus verdict that does not record its members and quorum cannot show "
@@ -14291,11 +14292,15 @@ def judge_decision(row: Mapping[str, Any]) -> tuple[str, float | None]:
         return "consensus_unrecorded", None
     if is_panel and cast(Mapping[str, Any], agreement)["quorum"] is not None:
         return "quorum_consensus", None
-    member_decisions = {judge_decision(member) for member in members}
-    if len(member_decisions) == 1:
-        member_kind, threshold = member_decisions.pop()
-        if member_kind in ("scored", "majority_consensus"):
-            return "majority_consensus", threshold
+    thresholds = {member.get("threshold") for member in members
+                  if member.get("verdict_kind") == "scored"}
+    # A repeat merge has no median tie-break, so an even count can split 1-1
+    # and fail while its median clears the threshold.
+    if (len(thresholds) == 1 and (threshold := thresholds.pop()) is not None
+            and finite_real(threshold)
+            and all(member.get("verdict_kind") == "scored" for member in members)
+            and (is_panel or len(members) % 2 == 1)):
+        return "majority_consensus", float(threshold)
     return "consensus_member_vote", None
 
 

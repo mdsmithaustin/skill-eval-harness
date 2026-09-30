@@ -1973,7 +1973,7 @@ class JudgeCalibrationTests(unittest.TestCase):
         cal = sb.judge_alignment_report(human, judge)["calibration"]
         self.assertEqual((cal["availability"], cal["n"], cal["auroc"]), ("complete", 3, 1.0))
         self.assertEqual(cal["decision_rules"], {"per_step": {
-            "n": 3, "calibrated": True, "decides": "met steps / steps >= min_met_fraction",
+            "n": 3, "calibrated": True, "decides": "met steps >= ceil(min_met_fraction x steps)",
             "knob": "per_step.min_met_fraction", "thresholds": None}})
 
     def test_graded_dimension_judge_is_not_applicable(self):
