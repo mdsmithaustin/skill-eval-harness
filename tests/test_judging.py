@@ -2030,6 +2030,28 @@ class JudgeCalibrationTests(unittest.TestCase):
                           for kind, rule in cal["decision_rules"].items()},
                          {"majority_consensus": (3, True, [0.5])})
 
+    def test_consensus_that_is_not_median_at_threshold_is_not_applicable(self):
+        # 2 repeats at [0.4, 0.9] fail on a 1-1 vote while their median 0.65 clears 0.5.
+        even = sb.merge_repeated_judge_rows(
+            [dict(scored_judge_result(score), judge_task_id="e") for score in (0.4, 0.9)])
+        self.assertEqual((even["passed"], even["score"]), (False, 0.65))
+        nested = self._panel("n", [0.4, 0.9])
+        nested["judge_panel"] = [
+            dict(sb.merge_repeated_judge_rows(
+                [dict(scored_judge_result(score), judge_task_id="n") for score in scores]),
+                judge_model=model)
+            for model, scores in (("m0", (0.4, 0.4, 0.4)), ("m1", (0.9, 0.9, 0.9)))]
+        malformed = self._panel("m", [0.9, 0.6, 0.1])
+        del malformed["judge_panel"][0]["threshold"]
+        human = {"e": {"passed": False}, "n": {"passed": False}, "m": {"passed": True}}
+        cal = sb.judge_alignment_report(
+            human, {"e": even, "n": nested, "m": malformed})["calibration"]
+        self.assertEqual(cal["availability"], "not_applicable")
+        self.assertEqual(cal["reason"], (
+            "no matched verdict passes on score >= threshold: a consensus passes on a member "
+            "vote that equals median score >= threshold only over scored members sharing one "
+            "threshold, and for repeats only when their count is odd"))
+
     def test_consensus_without_recorded_rule_is_not_applicable(self):
         legacy = self._panel("q", [0.9, 0.6, 0.1])
         del legacy["agreement"]["quorum"]
