@@ -21,6 +21,7 @@ from helpers import (
     demo_manifest as base_manifest,
 )
 from helpers import (
+    file_judge_cmd,
     judge_result,
     judge_task,
     scored_judge_result,
@@ -1942,6 +1943,15 @@ class JudgeCalibrationTests(unittest.TestCase):
             "unmatched human labels: 1; unmatched judge verdicts: 1; "
             "matched verdicts excluded from calibration: 1 of 3 (see excluded_judge_ids)"))
 
+    def test_partial_reason_counts_invalid_unmatched_label_once(self):
+        # "b" has no judge verdict AND an invalid human label; that is one gap
+        # ("invalid human labels: 1"), not also "unmatched human labels: 1".
+        human = {"a": {"passed": True}, "b": {"passed": "nope"}}
+        judge = {"a": scored_judge_result(0.9)}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "partial")
+        self.assertEqual(cal["reason"], "invalid human labels: 1")
+
     @staticmethod
     def _dynamic(met, total, minimum=3, **extra):
         criteria = [{"name": f"c{k}", "met": k < met} for k in range(total)]
@@ -2029,6 +2039,63 @@ class JudgeCalibrationTests(unittest.TestCase):
         self.assertEqual({kind: (rule["n"], rule["calibrated"], rule["thresholds"])
                           for kind, rule in cal["decision_rules"].items()},
                          {"majority_consensus": (3, True, [0.5])})
+
+    def test_off_scale_preset_threshold_is_not_calibrated(self):
+        # factuality's threshold (4) is a cut on its 1-5 rubric, not [0, 1]: a
+        # verdict scoring the worst grade (1) must not read as P(pass) = 1.0.
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "output.md"
+            output.write_text("candidate", encoding="utf-8")
+            assertion = sb.expand_judge_preset({"type": "factuality"})
+            task = judge_task(assertion=assertion, output_path=str(output))
+            row = sb.run_one_judge_task(
+                task, judge_cmd=file_judge_cmd(Path(td), {"score": 1, "passed": False}))
+        self.assertEqual((row["verdict_kind"], row["score"], row["threshold"], row["passed"]),
+                         ("scored", 1.0, 4.0, False))
+        jid = task["judge_task_id"]
+        cal = sb.judge_alignment_report({jid: {"passed": False}}, {jid: row})["calibration"]
+        self.assertEqual(cal["availability"], "unavailable")
+        self.assertEqual(cal["reason"], "no matched judge verdict carries a score in [0, 1]")
+        self.assertEqual(cal["excluded_judge_ids"], {
+            jid: "threshold 4 is outside [0, 1]; stored verdicts declare no maximum to rescale by"})
+
+    def test_consensus_missing_top_level_score_is_excluded_not_crashed(self):
+        members = [dict(scored_judge_result(score), judge_task_id="t", judge_model=f"m{k}")
+                   for k, score in enumerate((0.9, 0.7, 0.2))]
+        merged = sb.merge_cross_judge_rows(members)
+        raw = dict(merged)
+        del raw["score"]
+        row = sb.validated_result_row(raw)
+        self.assertIsNone(row.get("score"))
+        self.assertEqual(sb.judge_decision(row), ("majority_consensus", 0.5))
+        cal = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})["calibration"]
+        self.assertEqual(cal["excluded_judge_ids"],
+                         {"t": "a majority_consensus verdict carries no top-level score to calibrate"})
+
+    def test_majority_consensus_contradicting_top_level_passed_is_excluded(self):
+        members = [dict(scored_judge_result(score), judge_task_id="t", judge_model=f"m{k}")
+                   for k, score in enumerate((0.9, 0.7, 0.2))]
+        merged = sb.merge_cross_judge_rows(members)
+        self.assertTrue(merged["passed"])   # 2 of 3 members pass -> strict majority
+        forged = dict(merged, passed=False)   # tampered: contradicts its own members
+        row = sb.validated_result_row(forged)
+        self.assertEqual(sb.judge_decision(row), ("majority_consensus", 0.5))
+        cal = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})["calibration"]
+        self.assertEqual(cal["excluded_judge_ids"], {
+            "t": "recorded decision contradicts its members; verdict may be forged or from a foreign file"})
+
+    def test_majority_consensus_with_forged_member_is_excluded(self):
+        members = [dict(scored_judge_result(score), judge_task_id="t", judge_model=f"m{k}")
+                   for k, score in enumerate((0.9, 0.7, 0.2))]
+        merged = sb.merge_cross_judge_rows(members)
+        forged = dict(merged)
+        forged["judge_panel"] = [dict(forged["judge_panel"][0], passed=False),
+                                 *forged["judge_panel"][1:]]   # member's passed no longer matches its score
+        row = sb.validated_result_row(forged)
+        self.assertEqual(sb.judge_decision(row), ("majority_consensus", 0.5))
+        cal = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})["calibration"]
+        self.assertEqual(cal["excluded_judge_ids"], {
+            "t": "recorded decision contradicts its members; verdict may be forged or from a foreign file"})
 
     def test_consensus_that_is_not_median_at_threshold_is_not_applicable(self):
         # 2 repeats at [0.4, 0.9] fail on a 1-1 vote while their median 0.65 clears 0.5.
