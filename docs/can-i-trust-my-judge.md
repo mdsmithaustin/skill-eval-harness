@@ -179,8 +179,9 @@ A `scored` or `majority_consensus` verdict is excluded the same way when its
 own `threshold` sits outside [0, 1]: that threshold is a cut on some other
 scale, so the row's score cannot be read as a pass probability even where the
 score itself happens to land in [0, 1]. This is not a hypothetical — the
-bundled `factuality` preset (`expand_judge_preset`; `judge --preset factuality`
-or `type: factuality`) expands to `threshold: 4` on its 1-5 anchored rubric,
+bundled `factuality` preset (`expand_judge_preset`; set in the manifest with
+`"preset": "factuality"` on a `judge` or `rubric` assertion, or `type:
+"factuality"`) expands to `threshold: 4` on its 1-5 anchored rubric,
 and that preset is the only one `JUDGE_PRESETS` ships today. A factuality
 verdict that grades the worst case (a raw score of 1) sits inside [0, 1] by
 coincidence, so without this check it would read as `P(pass) = 1.0` instead of
