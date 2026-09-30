@@ -7377,7 +7377,7 @@ def process_or_efficiency_assertion_result(
             passed = mode_ok and f1_ok
             evidence = (
                 f"mode={mode}; actual={actual}; expected={expected}; "
-                f"precision={precision:.2f}; recall={recall:.2f}; f1={f1:.4f}"
+                f"precision={precision:.4f}; recall={recall:.4f}; f1={f1:.4f}"
                 + (f"; min_f1={min_f1:.4f}" if min_f1 is not None else ""))
             return passed, evidence, f1
 

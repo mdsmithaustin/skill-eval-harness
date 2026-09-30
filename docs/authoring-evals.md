@@ -252,8 +252,8 @@ Mode naming follows jevals (`_evals.py`'s `TrajectoryMatch`) and LangChain agent
 trajectory, not the `expected` list.
 
 `strict` — the trajectory must match exactly, in order, with no extra or missing steps. This
-example's `expected` list is only true to how Claude keys these three calls (`bash` for a
-nameless shell command, `Read`, `Write` — casefolded before comparison):
+example's `expected` list is only true to how Claude keys these three calls (its `Bash`,
+`Read`, and `Write` tools, casefolded before comparison):
 
 ```json
 {"type": "tool_sequence", "mode": "strict", "expected": ["bash", "Read", "Write"]}
@@ -310,12 +310,13 @@ file, write a file):
 | Provider | run tests (shell) | read a file | write a file | edit a file | load a skill | notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude | `bash` | `read` | `write` | `edit` | `skill` | an MCP call keys as its full prefixed name, e.g. `mcp__srv__do` |
-| Pi | `bash` | `read` | `write` | `edit` | `skill` | same vocabulary as Claude |
-| Codex | `bash` | `bash` (a shell `cat`/`grep`, not a distinct read key) | `file_change` | `file_change` (no separate edit key) | — | an MCP call keys as its bare tool name (no `mcp__` prefix), e.g. `do`; `web_search` items are dropped entirely — they normalize outside `TRAJECTORY_STEP_TYPES` and never appear in `actual` |
-| Gemini | `run_shell_command` | `read_file` | `write_file` | — | `activate_skill` | |
+| Pi | `bash` | `read` | `write` | `edit` | `read` (Pi loads a skill by reading `SKILL.md`) | same as Claude except skill loads |
+| Codex | `bash` | `bash` (a shell `cat`/`grep`, not a distinct read key) | `file_change` | `file_change` (no separate edit key) | `bash` (Codex reads `SKILL.md` through a shell command) | an MCP call keys as its bare tool name (no `mcp__` prefix), e.g. `do`; `web_search` items are dropped entirely — they normalize outside `TRAJECTORY_STEP_TYPES` and never appear in `actual` |
+| Gemini | `run_shell_command` | `read_file` | `write_file` | `replace` | `activate_skill` | |
 | Vibe | — (`bash` is unsupported and dropped with a protocol error) | `read_file` | — | — | `skill` | only `skill`/`read_file`/`grep` normalize; any other function name fails |
 
-Write `expected` against the provider you are actually grading, and re-check this table (or
+A skill load keys by the tool that did it, so the same load can also appear as `read` when an
+agent reads `SKILL.md` directly instead of calling its skill tool. Write `expected` against the provider you are actually grading, and re-check this table (or
 re-run the normalization yourself) before assuming a key carries over to another provider.
 
 ## Pitfalls that cost us rounds

@@ -1423,8 +1423,8 @@ class ToolSequenceAssertionTests(unittest.TestCase):
         result = sb.assertion_result(
             {"type": "tool_sequence", "mode": "subset", "expected": ["Read", "Grep", "Write"]},
             "out", base / "output.md", run_base=base)
-        self.assertIn("precision=1.00", result["evidence"])
-        self.assertIn(f"recall={2 / 3:.2f}", result["evidence"])
+        self.assertIn("precision=1.0000", result["evidence"])
+        self.assertIn("recall=0.6667", result["evidence"])
 
 
 class ToolSequenceValidationTests(unittest.TestCase):

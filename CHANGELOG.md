@@ -17,9 +17,9 @@ All notable public changes are listed here. Release tags are the source of truth
   of non-blank strings — use `tool_count_le` with `max: 0` to assert "no tools ran" instead. A
   missing `events.json` fails it closed, never passing. `expected` is written against one
   provider's tool-name vocabulary, not a shared one (see `docs/authoring-evals.md`'s
-  per-provider key table: Claude/Pi use `bash`/`read`/`write`/`edit`/`skill`; Codex uses `bash`
+  per-provider key table: Claude uses `bash`/`read`/`write`/`edit`/`skill` and Pi the same except that it loads a skill by reading `SKILL.md` (key `read`); Codex uses `bash`
   for reads, `file_change` for writes and edits, bare MCP tool names, and drops `web_search`
-  entirely; Gemini uses `run_shell_command`/`read_file`/`write_file`/`activate_skill`; Vibe only
+  entirely; Gemini uses `run_shell_command`/`read_file`/`write_file`/`replace`/`activate_skill`; Vibe only
   normalizes `skill`/`read_file`/`grep`). Authors writing an eval that checks *the whole shape*
   of a trajectory, not just one ordered subsequence (`command_order`/`tool_call.order`) or one
   set relation (`tool_call.required_calls`/`call_set`), should use this new type instead of
