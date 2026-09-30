@@ -33,7 +33,7 @@ Pick the success goals the skill owns. The harness stores these per case in `suc
 | Goal | The question it answers | Typical graders |
 |---|---|---|
 | `outcome` | Did it produce the right result? | `contains*`, `regex`, `file_exists`, `json_field_equals`, `golden_output`, `similarity`, `structured_output`, `script` |
-| `process` | Did it work the right way? | `skill_invoked`, `command_ran`, `command_order`, `tool_call`, `tool_count_le` |
+| `process` | Did it work the right way? | `skill_invoked`, `command_ran`, `command_order`, `tool_call`, `tool_sequence`, `tool_count_le` |
 | `style` | Is it phrased and structured well? | `judge` / `rubric` / `factuality`, with anchored `graded_dimensions` |
 | `efficiency` | Did it stay within budget? | `total_tokens_le`, `elapsed_seconds_le`, `command_count_le` |
 
@@ -237,6 +237,87 @@ production incident:
 The path matters as much as the answer. A case can produce the right final text for the wrong
 reason, so grade the trajectory (`skill_invoked`, `command_order`) alongside the output, and treat
 a right answer reached the wrong way as a finding, not a pass.
+
+### `tool_sequence`: checking the trajectory shape
+
+`command_order` and `tool_call`'s `order` check that some calls happened in some sequence.
+`tool_sequence` checks the *whole* completed trajectory against a reference list, in one of
+four modes. Each call is keyed by its normalized, casefolded name (a nameless shell command
+is `bash`), but that key vocabulary is per-provider, not shared — an `expected` list written
+for one provider's tool names will not read the same way against another's. See the
+per-provider key table below before writing `expected`.
+
+Mode naming follows jevals (`_evals.py`'s `TrajectoryMatch`) and LangChain agentevals
+(`subset.py`/`superset.py`): the subject of `subset` and `superset` is always the *actual*
+trajectory, not the `expected` list.
+
+`strict` — the trajectory must match exactly, in order, with no extra or missing steps. This
+example's `expected` list is only true to how Claude keys these three calls (its `Bash`,
+`Read`, and `Write` tools, casefolded before comparison):
+
+```json
+{"type": "tool_sequence", "mode": "strict", "expected": ["bash", "Read", "Write"]}
+```
+
+`unordered` — same calls, same counts, any order:
+
+```json
+{"type": "tool_sequence", "mode": "unordered", "expected": ["Read", "Read", "Write"]}
+```
+
+`subset` — actual ⊆ expected: every completed call was on the list; the trajectory may have
+skipped some of the listed steps. An empty completed trajectory always satisfies `subset`,
+for any `expected` — the empty multiset is a subset of everything:
+
+```json
+{"type": "tool_sequence", "mode": "subset", "expected": ["Read", "Write", "Grep"]}
+```
+
+`superset` — actual ⊇ expected: every expected call ran (with its multiplicity); the
+trajectory may have run extra steps beyond it:
+
+```json
+{"type": "tool_sequence", "mode": "superset", "expected": ["Read", "Write"]}
+```
+
+Unlike jevals/agentevals, which compare plain sets, this repo keeps multiset (`Counter`)
+semantics throughout: a repeated call in `expected` still has to be covered with its
+multiplicity, and repeats in `actual` still count against `subset`/`superset` the same way.
+
+Every mode reports `precision`/`recall`/`f1` over the multiset overlap of `actual` and
+`expected`, visible in the assertion's evidence and as its `score`. Add `min_f1` when the
+mode alone is too forgiving — for example a `superset` case where you also want most of the
+trajectory's calls to be relevant, not just the required ones present amid noise:
+
+```json
+{"type": "tool_sequence", "mode": "superset", "expected": ["Read", "Write"], "min_f1": 0.6}
+```
+
+`expected` must be a non-empty list of non-blank strings; to assert that *no* tools ran, use
+`tool_count_le` with `max: 0` instead of an empty `tool_sequence`.
+
+A missing `events.json` fails this assertion closed (`unavailable`), never passing it by
+default the way an absent check would.
+
+#### Tool keys are provider-specific
+
+`event_tool_key` casefolds each provider's own normalized field into one string, but the
+vocabulary differs by provider — a manifest's `expected` list is written against one
+provider's tool names, not a shared one. Measured directly against each runner's
+normalization (`normalize_trace_records`), for the same three-step task (run tests, read a
+file, write a file):
+
+| Provider | run tests (shell) | read a file | write a file | edit a file | load a skill | notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude | `bash` | `read` | `write` | `edit` | `skill` | an MCP call keys as its full prefixed name, e.g. `mcp__srv__do` |
+| Pi | `bash` | `read` | `write` | `edit` | `read` (Pi loads a skill by reading `SKILL.md`) | same as Claude except skill loads |
+| Codex | `bash` | `bash` (a shell `cat`/`grep`, not a distinct read key) | `file_change` | `file_change` (no separate edit key) | `bash` (Codex reads `SKILL.md` through a shell command) | an MCP call keys as its bare tool name (no `mcp__` prefix), e.g. `do`; `web_search` items are dropped entirely — they normalize outside `TRAJECTORY_STEP_TYPES` and never appear in `actual` |
+| Gemini | `run_shell_command` | `read_file` | `write_file` | `replace` | `activate_skill` | |
+| Vibe | — (`bash` is unsupported and dropped with a protocol error) | `read_file` | — | — | `skill` | only `skill`/`read_file`/`grep` normalize; any other function name fails |
+
+A skill load keys by the tool that did it, so the same load can also appear as `read` when an
+agent reads `SKILL.md` directly instead of calling its skill tool. Write `expected` against the provider you are actually grading, and re-check this table (or
+re-run the normalization yourself) before assuming a key carries over to another provider.
 
 ## Pitfalls that cost us rounds
 

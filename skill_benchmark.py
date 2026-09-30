@@ -275,9 +275,22 @@ PROCESS_ASSERTIONS = {
     "command_not_ran",
     "command_order",
     "tool_call",
+    "tool_sequence",
     "tool_count_le",
     "no_repeated_command_loop",
 }
+# tool_sequence mode naming follows jevals (_evals.py's TrajectoryMatch) and
+# LangChain agentevals (subset.py/superset.py): the subject is the ACTUAL
+# trajectory, not the manifest's expected list. "subset" = actual ⊆ expected
+# (only calls on the list ran; some listed calls may have been skipped).
+# "superset" = actual ⊇ expected (every listed call ran; extra calls beyond
+# the list are allowed). Unlike jevals/agentevals, which compare plain sets,
+# this repo keeps multiset (Counter) semantics throughout, so a repeated call
+# still has to be covered with its multiplicity. One consequence worth
+# knowing: an empty actual trajectory trivially satisfies "subset" for any
+# `expected` (the empty multiset is a subset of everything), but it fails
+# "superset" unless `expected` is also empty.
+TOOL_SEQUENCE_MODES = {"strict", "unordered", "subset", "superset"}
 EFFICIENCY_ASSERTIONS = {
     "total_tokens_le",
     "elapsed_seconds_le",
@@ -313,6 +326,7 @@ ASSERTION_TYPE_FIELDS: dict[str, set[str]] = {
         "tool", "pattern", "expected_no_call", "required_calls", "call_set",
         "order", "min_count", "max_count",
     },
+    "tool_sequence": {"expected", "mode", "min_f1"},
     "tool_count_le": {"tool", "max", "value"},
     "no_repeated_command_loop": {"max_repeats", "max", "value"},
     "total_tokens_le": {"max", "value"},
@@ -1136,6 +1150,20 @@ def validate_case_assertion(cid: str, label: str, index: int, assertion: Any, pa
         if ("max_count" in assertion
                 and assertion["max_count"] < assertion.get("min_count", 1)):
             die(f"{where} tool_call max_count must be >= min_count")
+    if atype == "tool_sequence":
+        expected = assertion.get("expected")
+        if (not isinstance(expected, list) or not expected
+                or not all(isinstance(x, str) and x.strip() for x in expected)):
+            die(f"{where} tool_sequence expected must be a non-empty list of non-blank "
+                f"strings; assert no tools ran with tool_count_le and max: 0 instead")
+        mode = assertion.get("mode", "strict")
+        if mode not in TOOL_SEQUENCE_MODES:
+            die(f"{where} tool_sequence mode must be one of {sorted(TOOL_SEQUENCE_MODES)}")
+        if "min_f1" in assertion:
+            min_f1 = assertion["min_f1"]
+            if (isinstance(min_f1, bool) or not isinstance(min_f1, (int, float))
+                    or not math.isfinite(float(min_f1)) or not 0 <= float(min_f1) <= 1):
+                die(f"{where} tool_sequence min_f1 must be a number in [0, 1]")
     if atype in QUALITATIVE_ASSERTIONS:
         if "threshold" in assertion:
             threshold = assertion["threshold"]
@@ -6527,6 +6555,28 @@ def event_mentions_skill_file(event: dict[str, Any]) -> bool:
 TRAJECTORY_STEP_TYPES = {"command", "tool_call", "file_read", "file_write", "skill_load"}
 
 
+def event_tool_key(event: dict[str, Any]) -> str:
+    """One casefolded identity per trajectory step. NOT stable across providers.
+
+    normalize_trace_record already projects each provider's own field (Claude's
+    name=Bash/Read/Write/Edit/Skill; Codex's item type, or its mcp tool name;
+    Pi's toolName; Gemini's tool_name; Vibe's function name) into the same
+    `name` field before grading runs, so a named event's key is just that
+    name, casefolded. The names themselves differ by provider, so a
+    manifest's `expected` list is written against one provider's key
+    vocabulary, not a shared one — see the per-provider table in
+    docs/authoring-evals.md. A nameless shell command normalizes to "bash"
+    (matching the fallback the tool_call expected_no_call selector already
+    used); any other nameless typed event falls back to its own type.
+    """
+    name = event.get("name")
+    if name:
+        return str(name).casefold()
+    if event.get("type") == "command":
+        return "bash"
+    return str(event.get("type") or "unknown_tool").casefold()
+
+
 def trace_event_counts(events: list[dict[str, Any]]) -> dict[str, Any]:
     """Single owner of the completed-events-only counting rules. metrics.json
     (normalize_trace_records) and the report's trajectory diff both derive
@@ -7090,7 +7140,9 @@ def missing_evidence(name: str) -> dict[str, Any]:
     return {"passed": False, "evidence": f"missing {name} evidence"}
 
 
-def process_or_efficiency_assertion_result(assertion: dict[str, Any], run_base: Path | None, metadata: dict[str, Any]) -> tuple[bool | None, str]:
+def process_or_efficiency_assertion_result(
+    assertion: dict[str, Any], run_base: Path | None, metadata: dict[str, Any],
+) -> tuple[bool | None, str] | tuple[bool | None, str, float]:
     if run_base is None:
         return None, "missing run directory for trace assertion"
     atype = assertion.get("type")
@@ -7127,6 +7179,7 @@ def process_or_efficiency_assertion_result(assertion: dict[str, Any], run_base: 
         "command_not_ran": "commands",
         "command_order": "commands",
         "tool_call": "tool_calls",
+        "tool_sequence": "tool_calls",
         "tool_count_le": "tool_calls",
         "no_repeated_command_loop": "repeated_command_max",
         "total_tokens_le": "total_tokens",
@@ -7156,7 +7209,8 @@ def process_or_efficiency_assertion_result(assertion: dict[str, Any], run_base: 
             return None, f"missing skill invocation evidence ({event_error})"
         return invoked == expected, f"skill_invoked={invoked}; expected={expected}; evidence={evidence[:5]}"
 
-    if atype in {"command_ran", "command_not_ran", "command_order", "tool_call", "tool_count_le", "no_repeated_command_loop"}:
+    if atype in {"command_ran", "command_not_ran", "command_order", "tool_call", "tool_sequence",
+                 "tool_count_le", "no_repeated_command_loop"}:
         if events is None:
             return None, event_error or "missing events.json"
         commands = [command_text(e) for e in command_events(events)]
@@ -7192,13 +7246,7 @@ def process_or_efficiency_assertion_result(assertion: dict[str, Any], run_base: 
                 # observed invocation, including started/failed/in-progress calls,
                 # falsifies the negative claim. Completion remains required only for
                 # positive "the tool ran" assertions.
-                observed_names = [
-                    (str(e.get("name")).casefold() if e.get("name")
-                     else "bash" if e.get("type") == "command"
-                     else str(e.get("type") or "unknown_tool").casefold())
-                    for e in observed_calls
-                ]
-                observed_names = [name for name in observed_names if name]
+                observed_names = [name for name in (event_tool_key(e) for e in observed_calls) if name]
                 pat = assertion.get("pattern")
                 if pat:
                     offending = sorted({n for n in observed_names if regex_hit(str(pat), n, ci)})
@@ -7288,6 +7336,45 @@ def process_or_efficiency_assertion_result(assertion: dict[str, Any], run_base: 
             max_allowed = int(assertion.get("max_repeats", assertion.get("max", 1)))
             observed = int(metric_number(metrics, "repeated_command_max") or repeated_command_max(commands))
             return observed <= max_allowed, f"repeated_command_max={observed}; max={max_allowed}"
+        if atype == "tool_sequence":
+            # Sequence match against a reference trajectory (jevals TrajectoryMatch/
+            # ToolCallF1 semantics, adapted to this repo's multiset convention —
+            # call_set already treats repeats as significant, so unordered/subset/
+            # superset here use Counter multisets rather than plain sets, unlike
+            # jevals'/agentevals' plain-set comparison). The subject of "subset"
+            # and "superset" is always the ACTUAL trajectory, matching jevals and
+            # LangChain agentevals: subset means actual ⊆ expected, superset means
+            # actual ⊇ expected — see TOOL_SEQUENCE_MODES above for the full rule.
+            actual = [event_tool_key(e) for e in events
+                      if e.get("type") in TRAJECTORY_STEP_TYPES and event_is_completed(e)]
+            expected = [str(x).casefold() for x in assertion.get("expected", [])]
+            mode = str(assertion.get("mode", "strict"))
+            actual_counts = collections.Counter(actual)
+            expected_counts = collections.Counter(expected)
+            true_positives = sum((actual_counts & expected_counts).values())
+            precision = true_positives / len(actual) if actual else 0.0
+            recall = true_positives / len(expected) if expected else 0.0
+            f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+            if mode == "strict":
+                mode_ok = actual == expected
+            elif mode == "unordered":
+                mode_ok = actual_counts == expected_counts
+            elif mode == "subset":
+                # actual ⊆ expected: every completed call (with multiplicity) must
+                # be on the expected list; the trajectory may skip listed steps.
+                mode_ok = all(count <= expected_counts.get(key, 0) for key, count in actual_counts.items())
+            else:
+                # superset: actual ⊇ expected — every expected call (with
+                # multiplicity) ran; the trajectory may run extra steps beyond it.
+                mode_ok = all(count <= actual_counts.get(key, 0) for key, count in expected_counts.items())
+            min_f1 = assertion.get("min_f1")
+            f1_ok = min_f1 is None or f1 >= float(min_f1)
+            passed = mode_ok and f1_ok
+            evidence = (
+                f"mode={mode}; actual={actual}; expected={expected}; "
+                f"precision={precision:.4f}; recall={recall:.4f}; f1={f1:.4f}"
+                + (f"; min_f1={min_f1:.4f}" if min_f1 is not None else ""))
+            return passed, evidence, f1
 
     if atype == "total_tokens_le":
         value = metric_number(metrics, "total_tokens")
@@ -11648,7 +11735,10 @@ def assertion_result(assertion: dict[str, Any], text: str, output_path: Path, *,
     comparison: str | None = None
     normalization: dict[str, Any] | None = None
     if atype in PROCESS_ASSERTIONS | EFFICIENCY_ASSERTIONS:
-        passed, evidence = process_or_efficiency_assertion_result(assertion, run_base, {})
+        process_outcome = process_or_efficiency_assertion_result(assertion, run_base, {})
+        passed, evidence = process_outcome[0], process_outcome[1]
+        if len(process_outcome) == 3:
+            score = process_outcome[2]
     elif isinstance(parsed_text_assertion, LiteralTextAssertion):
         observation: MatchObservation = parsed_text_assertion.evaluate(text)
         passed = observation.passed

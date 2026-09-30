@@ -1259,6 +1259,231 @@ class ToolCallValidationTests(unittest.TestCase):
         self._validate({"type": "tool_call", "required_calls": ["Read(", "a.b"]})
 
 
+class ToolSequenceAssertionTests(unittest.TestCase):
+    """tool_sequence: strict/unordered/subset/superset over the completed
+    trajectory, with precision/recall/f1 reported regardless of mode."""
+
+    def _events(self, types_and_names, statuses=None):
+        tmp = tempfile.TemporaryDirectory(prefix="toolsequence-")
+        self.addCleanup(tmp.cleanup)
+        td = Path(tmp.name)
+        statuses = statuses or ["completed"] * len(types_and_names)
+        events = []
+        for (etype, name), status in zip(types_and_names, statuses):
+            event = {"type": etype, "status": status}
+            if name is not None:
+                event["name"] = name
+            events.append(event)
+        (td / "events.json").write_text(json.dumps(events), encoding="utf-8")
+        (td / "output.md").write_text("out", encoding="utf-8")
+        return td
+
+    def test_strict_exact_order_and_length(self):
+        base = self._events([("command", None), ("tool_call", "Read"), ("tool_call", "Write")])
+        ok = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "strict", "expected": ["bash", "Read", "Write"]},
+            "out", base / "output.md", run_base=base)
+        self.assertTrue(ok["passed"], ok["evidence"])
+        self.assertEqual(ok["score"], 1.0)
+        self.assertIn("precision=1.00", ok["evidence"])
+        self.assertIn("recall=1.00", ok["evidence"])
+        self.assertIn("f1=1.00", ok["evidence"])
+
+    def test_strict_rejects_order_swap(self):
+        base = self._events([("tool_call", "Read"), ("tool_call", "Write")])
+        swapped = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "strict", "expected": ["Write", "Read"]},
+            "out", base / "output.md", run_base=base)
+        self.assertFalse(swapped["passed"])
+        self.assertIn("mode=strict", swapped["evidence"])
+
+    def test_strict_rejects_extra_calls(self):
+        base = self._events([("tool_call", "Read"), ("tool_call", "Write"), ("tool_call", "Grep")])
+        result = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "strict", "expected": ["Read", "Write"]},
+            "out", base / "output.md", run_base=base)
+        self.assertFalse(result["passed"])
+
+    def test_unordered_same_multiset_ignores_order(self):
+        base = self._events([("tool_call", "Write"), ("tool_call", "Read"), ("tool_call", "Read")])
+        ok = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "unordered", "expected": ["Read", "Read", "Write"]},
+            "out", base / "output.md", run_base=base)
+        self.assertTrue(ok["passed"], ok["evidence"])
+        wrong_multiplicity = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "unordered", "expected": ["Read", "Write"]},
+            "out", base / "output.md", run_base=base)
+        self.assertFalse(wrong_multiplicity["passed"])   # repeats matter under unordered
+
+    def test_superset_every_expected_call_must_run_extras_allowed(self):
+        # superset: actual ⊇ expected — every expected call (with multiplicity)
+        # ran; the trajectory may run extra steps beyond it.
+        base = self._events([("tool_call", "Read"), ("tool_call", "Write"), ("tool_call", "Grep")])
+        ok = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "superset", "expected": ["Read", "Write"]},
+            "out", base / "output.md", run_base=base)
+        self.assertTrue(ok["passed"], ok["evidence"])
+        missing = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "superset", "expected": ["Read", "WebSearch"]},
+            "out", base / "output.md", run_base=base)
+        self.assertFalse(missing["passed"])
+
+    def test_subset_actual_must_not_exceed_expected(self):
+        # subset: actual ⊆ expected — every completed call was on the expected
+        # list; the trajectory may skip some of the listed steps.
+        base = self._events([("tool_call", "Read"), ("tool_call", "Write")])
+        ok = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "subset", "expected": ["Read", "Write", "Grep"]},
+            "out", base / "output.md", run_base=base)
+        self.assertTrue(ok["passed"], ok["evidence"])
+        extra = self._events([("tool_call", "Read"), ("tool_call", "Write"), ("tool_call", "Grep")])
+        overrun = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "subset", "expected": ["Read", "Write"]},
+            "out", extra / "output.md", run_base=extra)
+        self.assertFalse(overrun["passed"])
+
+    def test_empty_expected_strict_requires_empty_actual(self):
+        # expected=[] is rejected at manifest validation (ToolSequenceValidationTests
+        # below), but assertion_result itself is called directly here, bypassing
+        # that gate, to pin the runtime grading behavior on an already-built
+        # assertion dict.
+        empty = self._events([])
+        ok = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "strict", "expected": []},
+            "out", empty / "output.md", run_base=empty)
+        self.assertTrue(ok["passed"], ok["evidence"])
+        nonempty = self._events([("tool_call", "Read")])
+        bad = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "strict", "expected": []},
+            "out", nonempty / "output.md", run_base=nonempty)
+        self.assertFalse(bad["passed"])
+
+    def test_empty_actual_subset_always_passes(self):
+        # subset: an empty completed trajectory is a subset of any expected
+        # list — the empty multiset is a subset of everything.
+        empty = self._events([])
+        ok = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "subset", "expected": ["Read", "Write"]},
+            "out", empty / "output.md", run_base=empty)
+        self.assertTrue(ok["passed"], ok["evidence"])
+
+    def test_empty_actual_superset_fails_for_nonempty_expected(self):
+        # superset requires every expected call to have run, so an empty
+        # trajectory only satisfies it when expected is also empty.
+        empty = self._events([])
+        bad = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "superset", "expected": ["Read"]},
+            "out", empty / "output.md", run_base=empty)
+        self.assertFalse(bad["passed"])
+
+    def test_only_completed_events_count(self):
+        base = self._events(
+            [("tool_call", "Read"), ("tool_call", "Write")],
+            statuses=["completed", "in_progress"])
+        result = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "strict", "expected": ["Read"]},
+            "out", base / "output.md", run_base=base)
+        self.assertTrue(result["passed"], result["evidence"])   # Write never completed
+
+    def test_missing_trace_fails_closed_never_passes(self):
+        tmp = tempfile.TemporaryDirectory(prefix="toolsequence-missing-")
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        (base / "output.md").write_text("out", encoding="utf-8")
+        result = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "strict", "expected": ["Read"]},
+            "out", base / "output.md", run_base=base)
+        self.assertIsNone(result["passed"])
+
+    def test_min_f1_gates_partial_overlap(self):
+        base = self._events([("tool_call", "Read"), ("tool_call", "Grep")])
+        below = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "superset", "expected": ["Read"], "min_f1": 0.9},
+            "out", base / "output.md", run_base=base)
+        self.assertFalse(below["passed"])   # superset mode_ok (Read ran) but f1 (2/3) < 0.9
+        self.assertAlmostEqual(below["score"], 2 / 3)
+        above = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "superset", "expected": ["Read"], "min_f1": 0.5},
+            "out", base / "output.md", run_base=base)
+        self.assertTrue(above["passed"], above["evidence"])
+
+    def test_min_f1_boundary_equality_is_visible_at_four_decimals(self):
+        # f1 and min_f1 both equal 2/3 here; at 2 decimals both round to 0.67
+        # and a rounding coincidence would look identical to true equality.
+        base = self._events([("tool_call", "Read"), ("tool_call", "Grep")])
+        result = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "superset", "expected": ["Read"], "min_f1": 2 / 3},
+            "out", base / "output.md", run_base=base)
+        self.assertTrue(result["passed"], result["evidence"])
+        self.assertIn(f"f1={2 / 3:.4f}", result["evidence"])
+        self.assertIn(f"min_f1={2 / 3:.4f}", result["evidence"])
+
+    def test_precision_recall_reported_across_modes(self):
+        base = self._events([("tool_call", "Read"), ("tool_call", "Grep")])
+        result = sb.assertion_result(
+            {"type": "tool_sequence", "mode": "subset", "expected": ["Read", "Grep", "Write"]},
+            "out", base / "output.md", run_base=base)
+        self.assertIn("precision=1.0000", result["evidence"])
+        self.assertIn("recall=0.6667", result["evidence"])
+
+
+class ToolSequenceValidationTests(unittest.TestCase):
+    """tool_sequence manifest validation: unknown mode, empty expected shape,
+    and out-of-range min_f1 are rejected before grading ever runs."""
+
+    def _validate(self, assertion):
+        sb.validate_case_assertion("c1", "a", 0, assertion, Path("."))
+
+    def test_valid_shapes_pass(self):
+        self._validate({"type": "tool_sequence", "expected": ["Read", "Write"]})
+        self._validate({"type": "tool_sequence", "mode": "unordered", "expected": ["Read"]})
+        self._validate({"type": "tool_sequence", "mode": "subset", "expected": ["Read"]})
+        self._validate({"type": "tool_sequence", "mode": "superset", "expected": ["Read"], "min_f1": 0.5})
+
+    def test_rejects_unknown_mode(self):
+        with self.assertRaises(SystemExit):
+            self._validate({"type": "tool_sequence", "mode": "loose", "expected": ["Read"]})
+
+    def test_rejects_missing_expected(self):
+        with self.assertRaises(SystemExit):
+            self._validate({"type": "tool_sequence", "mode": "strict"})
+
+    def test_rejects_non_list_expected(self):
+        for bad in ("Read", 5, {"a": 1}):
+            with self.assertRaises(SystemExit):
+                self._validate({"type": "tool_sequence", "expected": bad})
+
+    def test_rejects_non_string_expected_items(self):
+        with self.assertRaises(SystemExit):
+            self._validate({"type": "tool_sequence", "expected": ["Read", 3]})
+
+    def test_rejects_empty_expected(self):
+        # Use tool_count_le with max: 0 to assert "no tools ran" instead.
+        with self.assertRaises(SystemExit):
+            self._validate({"type": "tool_sequence", "expected": []})
+
+    def test_rejects_blank_expected_items(self):
+        for bad in ([""], [" "], ["\t\n"]):
+            with self.assertRaises(SystemExit):
+                self._validate({"type": "tool_sequence", "expected": bad})
+
+    def test_rejects_min_f1_out_of_range(self):
+        for bad in (-0.1, 1.1, True):
+            with self.assertRaises(SystemExit):
+                self._validate({"type": "tool_sequence", "expected": ["Read"], "min_f1": bad})
+
+    def test_accepts_min_f1_bounds(self):
+        self._validate({"type": "tool_sequence", "expected": ["Read"], "min_f1": 0.0})
+        self._validate({"type": "tool_sequence", "expected": ["Read"], "min_f1": 1.0})
+
+    def test_rejects_atleast_on_tool_sequence(self):
+        # tool_sequence is a plain pass/fail process assertion (min_f1 is its
+        # own scored gate); atLeast is only valid on QUALITATIVE_ASSERTIONS
+        # plus similarity/script.
+        with self.assertRaises(SystemExit):
+            self._validate({"type": "tool_sequence", "expected": ["Read"], "atLeast": 0.5})
+
+
 class TriggerNotGradedIntoAnswerTests(unittest.TestCase):
     """The answer benchmark must not fold kind:'trigger' cases into its paired
     pass-rate: a trigger case is a discovery (autonomous-load) measurement, a
