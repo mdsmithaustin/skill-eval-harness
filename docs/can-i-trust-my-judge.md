@@ -158,11 +158,11 @@ judge kind, and calibrates only the kinds marked yes:
 |---|---|---|---|
 | `scored` (a plain judge with `threshold`, or with `atLeast`) | `score >= threshold` | yes | the assertion's `threshold`, or `atLeast` when set |
 | `per_step` | met steps `>= ceil(min_met_fraction x steps)`, which is met steps / steps `>= min_met_fraction` | yes | `per_step.min_met_fraction` |
-| `majority_consensus` (`--judge-panel` without `--quorum`, or an odd number of `--judge-runs` repeats, over plain scored members sharing one threshold) | a strict majority of members pass, which is the median member score `>=` their threshold | yes | the members' `threshold`, or `atLeast` |
+| `majority_consensus` (`--judge-panel` without `--quorum`, or an odd number of `--judge-runs` repeats, over plain scored members sharing one threshold) | a strict majority of members pass (a panel tie goes to the median), which is the median member score `>=` their threshold | yes | the members' `threshold`, or `atLeast` |
 | `dynamic_rubric` | met criteria `>= minimum_criteria`, over a criteria count the judge drafts per run | no | |
 | `dimensions` | the mean 1-5 grade, normalized to 0-1, reaches the dimension threshold | no | |
 | `quorum_consensus` | at least `--quorum` panel members pass | no | |
-| `consensus_member_vote` | a majority of members pass, but not as median `>=` threshold: members that are not all plain scored with one threshold, or an even number of repeats, which can split 1-1 and fail while the median clears the threshold | no | |
+| `consensus_member_vote` | a majority of members pass, but not as median `>=` threshold: members that are not all plain scored with one threshold, or an even number of repeats, which can split evenly and fail while the median clears the threshold | no | |
 | `consensus_unrecorded` | unknown: the row lacks its members, or is a panel row written before `agreement.quorum` was recorded | no | |
 | `boolean` | the judge's own pass/fail call, with no score | no | |
 

@@ -14244,7 +14244,7 @@ JUDGE_DECISION_RULES: dict[str, ScoreThresholdRule | OtherDecisionRule] = {
     "per_step": ScoreThresholdRule(
         "met steps >= ceil(min_met_fraction x steps)", "per_step.min_met_fraction"),
     "majority_consensus": ScoreThresholdRule(
-        "strict majority of scored members sharing one threshold, which is "
+        "strict majority of scored members sharing one threshold, or the median on a tie, which is "
         "median member score >= that threshold",
         "the members' threshold, or atLeast when the assertion sets it"),
     "boolean": OtherDecisionRule(
@@ -14294,7 +14294,7 @@ def judge_decision(row: Mapping[str, Any]) -> tuple[str, float | None]:
         return "quorum_consensus", None
     thresholds = {member.get("threshold") for member in members
                   if member.get("verdict_kind") == "scored"}
-    # A repeat merge has no median tie-break, so an even count can split 1-1
+    # A repeat merge has no median tie-break, so an even count can split evenly
     # and fail while its median clears the threshold.
     if (len(thresholds) == 1 and (threshold := thresholds.pop()) is not None
             and finite_real(threshold)
