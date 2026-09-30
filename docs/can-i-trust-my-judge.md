@@ -188,10 +188,12 @@ lenient complete brier 0.5 ece 0.5 auroc 0.5 best_f1 1.0 0.6667
 
 The rubber-stamp scores 1.0 on everything, so its score carries no ranking
 information (AUROC 0.5) and is off by half on average (ECE 0.5). The block's
-`availability` follows the report's rules: `complete` only when every matched
-verdict has a usable score, `partial` when some were excluded (headline
-metrics are `null` and `observed` holds the scored subset), and
-`not_applicable` with a `reason` for a judge that returns only pass/fail.
+`availability` follows the report's rules: `complete` only when the alignment
+population is complete and every matched verdict has a usable score; `partial`
+when either fails (headline metrics are `null` and `observed` holds the scored
+subset); `unavailable` when nothing matched or no matched score lies in 0-1;
+and `not_applicable` with a `reason` for a judge that returns only pass/fail.
+`excluded_judge_ids` shows at most 20 entries, like the report's other id lists.
 Undefined metrics are `null`, never a filler value, and the same `--min-labels`
 floor warns when too few scored labels back them.
 

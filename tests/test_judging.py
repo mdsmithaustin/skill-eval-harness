@@ -1900,6 +1900,26 @@ class JudgeCalibrationTests(unittest.TestCase):
         self.assertEqual(cal["observed"]["brier"], 0.0375)
         self.assertEqual(cal["observed"]["auroc"], 1.0)
 
+    def test_only_off_scale_scores_is_unavailable(self):
+        cal = sb.judge_alignment_report(
+            {"a": {"passed": True}, "b": {"passed": False}},
+            {"a": scored_judge_result(4.0, threshold=3.0), "b": judge_result(False)})["calibration"]
+        self.assertEqual(cal["availability"], "unavailable")
+        self.assertEqual(cal["reason"], "no matched judge verdict carries a score in [0, 1]")
+        self.assertIsNone(cal["observed"])
+
+    def test_incomplete_alignment_population_makes_calibration_partial(self):
+        human = {"a": {"passed": True}, "b": {"passed": False}, "c": {"passed": True}}
+        judge = {"a": scored_judge_result(1.0), "b": scored_judge_result(0.3)}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "partial")
+        self.assertEqual(cal["reason"], "alignment population is incomplete")
+        self.assertIsNone(cal["ece"])
+        self.assertEqual(cal["observed"]["brier"], 0.045)
+        # 1.0 sits in the last bin, which is closed on the right
+        self.assertEqual(cal["observed"]["reliability"][-1],
+                         {"lo": 0.9, "hi": 1.0, "n": 1, "mean_score": 1.0, "pass_rate": 1.0})
+
     def test_no_overlap_is_unavailable(self):
         cal = sb.judge_alignment_report(
             {"x": {"passed": True}}, {"y": scored_judge_result(0.9)})["calibration"]

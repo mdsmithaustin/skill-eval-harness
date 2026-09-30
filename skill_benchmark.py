@@ -14232,8 +14232,7 @@ def calibration_pairs(ids: list[str], human: dict[str, dict[str, Any]],
     excluded: dict[str, str] = {}
     for identifier in ids:
         raw = judge[identifier].get("score")
-        score = (float(raw) if raw is not None and finite_real(raw)
-                 and judge[identifier].get("verdict_kind") != "boolean" else None)
+        score = float(raw) if raw is not None and finite_real(raw) else None
         if score is None:
             excluded[identifier] = "verdict carries no score"
         elif not 0 <= score <= 1:
