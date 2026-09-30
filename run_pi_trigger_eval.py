@@ -141,8 +141,8 @@ def pi_trigger_protocol(
         "adapter": "pi",
         "model": model,
         "command": {"executable": executable,
-                    "argv_flags": pi_argv("<QUERY>", model)[:-1]},
-        "isolation_policy": "isolated PI_CODING_AGENT_DIR seeded without user skills",
+                    "argv_flags": pi_argv("<QUERY>", model, "<PI_CODING_AGENT_DIR>/skills")[:-1]},
+        "isolation_policy": "isolated PI_CODING_AGENT_DIR seeded without user skills; host skill discovery off, mounted skills loaded by path",
         "required_observations": {"config_isolated": True},
     }
 
@@ -168,12 +168,23 @@ def pi_invoke_result(run: dict[str, Any] | InvocationOutcome) -> dict[str, Any]:
     return pi_invocation_outcome(outcome).as_legacy_dict()
 
 
-def pi_argv(query: str, model: str | None = None) -> list[str]:
+def pi_context_isolation_args(skills_dir: str | Path) -> list[str]:
+    """Pi flags that keep host context out of a trigger run. Pi discovers
+    ~/.agents/skills and project .agents/skills on its own; --no-skills stops
+    that discovery and --skill still loads the mounted skills directory."""
+    return ["--no-context-files", "--no-prompt-templates", "--no-extensions",
+            "--no-skills", "--skill", str(skills_dir)]
+
+
+PI_RECORDED_CONTEXT_ISOLATION = pi_context_isolation_args("<mounted skills dir>")
+
+
+def pi_argv(query: str, model: str | None, skills_dir: str | Path) -> list[str]:
     """THE Pi CLI invocation for trigger evals — isolated JSON-stream mode with
     read-only tools. The trigger matrix's Pi adapter uses this same argv, so the
     two runners cannot drift apart on flags."""
     argv = [
-        "pi", "--no-session", "--mode", "json", "--no-context-files", "--no-prompt-templates", "--no-extensions",
+        "pi", "--no-session", "--mode", "json", *pi_context_isolation_args(skills_dir),
         "--thinking", "minimal", "--tools", "read,grep,find,ls", "-p", query,
     ]
     if model:
@@ -225,13 +236,13 @@ def observe_query(manifest_path: Path, query: str, should_trigger: bool, timeout
         env["PI_CODING_AGENT_DIR"] = str(config_dir)
         invocation = pi_invocation_outcome(
             invoke_argv_with_timeout(ProcessInvocationPlan.from_values(
-                pi_argv(query, model),
+                pi_argv(query, model, config_dir / "skills"),
                 input_text="",
                 cwd=config_dir,
                 timeout_s=timeout,
                 environment=env,
             ))
-        )
+        ).with_metadata(context_isolation=PI_RECORDED_CONTEXT_ISOLATION)
         stream = invocation.provider_payload
         if not isinstance(stream, PiStream):
             raise TypeError("Pi invocation did not retain its parsed provider stream")

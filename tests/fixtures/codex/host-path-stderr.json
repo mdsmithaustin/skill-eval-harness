@@ -1,0 +1,73 @@
+{
+ "codex_version": "codex-cli 0.156.1",
+ "cases": {
+  "special-home-file-url": {
+   "home": "home sp é#%\"q\\[]^|~?{}`<>';:!$&()*+,=@-tabdir",
+   "stderr": "Reading additional input from stdin...\n2026-09-29T21:28:49.539433Z ERROR codex_skills_extension::loader::host: failed to scan skill path file://@ROOT@/home%20sp%20%C3%A9%23%25%22q%5C[]^|~%3F%7B%7D%60%3C%3E';:!$&()*+,=@-tabdir/.agents/skills/tabhere: No such file or directory (os error 2)\n",
+   "host_path_spellings": [
+    "file://@ROOT@/home%20sp%20%C3%A9%23%25%22q%5C[]^|~%3F%7B%7D%60%3C%3E';:!$&()*+,=@-tabdir/.agents/skills/tabhere"
+   ]
+  },
+  "badfront": {
+   "home": "home-badfront",
+   "stderr": "Reading additional input from stdin...\n2026-09-29T21:28:43.535905Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-badfront/.agents/skills/bad \"q\" front/SKILL.md: missing field `description`\n2026-09-29T21:28:43.536274Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-badfront/.agents/skills/bad-front/SKILL.md: missing YAML frontmatter delimited by ---\n",
+   "host_path_spellings": [
+    "@ROOT@/home-badfront/.agents/skills/bad \"q\" front/SKILL.md",
+    "@ROOT@/home-badfront/.agents/skills/bad-front/SKILL.md"
+   ]
+  },
+  "badspecial": {
+   "home": "home-badspecial",
+   "stderr": "Reading additional input from stdin...\n2026-09-29T21:28:47.627774Z ERROR codex_skills_extension::loader::host: failed to scan skill path file://@ROOT@/home-badspecial/.agents/skills/newline: No such file or directory (os error 2)\n2026-09-29T21:28:47.627789Z ERROR codex_skills_extension::loader::host: failed to scan skill path file://@ROOT@/home-badspecial/.agents/skills/tabx: No such file or directory (os error 2)\n2026-09-29T21:28:47.628967Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-badspecial/.agents/skills/back\\slash/SKILL.md: missing YAML frontmatter delimited by ---\n2026-09-29T21:28:47.628972Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-badspecial/.agents/skills/café/SKILL.md: missing YAML frontmatter delimited by ---\n2026-09-29T21:28:47.628974Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-badspecial/.agents/skills/ctl\u0001/SKILL.md: missing YAML frontmatter delimited by ---\n2026-09-29T21:28:47.628976Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-badspecial/.agents/skills/pct%41/SKILL.md: missing YAML frontmatter delimited by ---\n2026-09-29T21:28:47.628977Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-badspecial/.agents/skills/q \"quote\"/SKILL.md: missing YAML frontmatter delimited by ---\n2026-09-29T21:28:47.628978Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-badspecial/.agents/skills/rocket-🚀/SKILL.md: missing YAML frontmatter delimited by ---\n2026-09-29T21:28:47.628980Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-badspecial/.agents/skills/sp ace/SKILL.md: missing YAML frontmatter delimited by ---\n",
+   "host_path_spellings": [
+    "file://@ROOT@/home-badspecial/.agents/skills/newline",
+    "file://@ROOT@/home-badspecial/.agents/skills/tabx",
+    "@ROOT@/home-badspecial/.agents/skills/back\\slash/SKILL.md",
+    "@ROOT@/home-badspecial/.agents/skills/café/SKILL.md",
+    "@ROOT@/home-badspecial/.agents/skills/ctl\u0001/SKILL.md",
+    "@ROOT@/home-badspecial/.agents/skills/pct%41/SKILL.md",
+    "@ROOT@/home-badspecial/.agents/skills/q \"quote\"/SKILL.md",
+    "@ROOT@/home-badspecial/.agents/skills/rocket-🚀/SKILL.md",
+    "@ROOT@/home-badspecial/.agents/skills/sp ace/SKILL.md"
+   ]
+  },
+  "forcefail": {
+   "home": "home-forcefail",
+   "stderr": "Error loading config.toml: invalid type: string \"[{path=\\\"@ROOT@/home-forcefail/.agents/skills/caf\\\\u00e9-secret/SKILL.md\\\",enabled=false},{path=\\\"@ROOT@/home-forcefail/.agents/skills/plain-ascii-secret/SKILL.md\\\",enabled=false},{path=\\\"@ROOT@/home-forcefail/.agents/skills/quote \\\\\\\"secret\\\\\\\"/SKILL.md\\\",enabled=false},{path=\\\"@ROOT@/home-forcefail/.agents/skills/rocket-\\\\ud83d\\\\ude80/SKILL.md\\\",enabled=false}]\", expected a sequence\nin `skills.config`\n\n",
+   "host_path_spellings": [
+    "@ROOT@/home-forcefail/.agents/skills/caf\\\\u00e9-secret/SKILL.md",
+    "@ROOT@/home-forcefail/.agents/skills/plain-ascii-secret/SKILL.md",
+    "@ROOT@/home-forcefail/.agents/skills/quote \\\\\\\"secret\\\\\\\"/SKILL.md",
+    "@ROOT@/home-forcefail/.agents/skills/rocket-\\\\ud83d\\\\ude80/SKILL.md"
+   ]
+  },
+  "symbad": {
+   "home": "home-symbad",
+   "stderr": "Reading additional input from stdin...\n2026-09-29T21:28:44.964323Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-symbad/elsewhere/symtarget/SKILL.md: missing YAML frontmatter delimited by ---\n",
+   "host_path_spellings": [
+    "@ROOT@/home-symbad/elsewhere/symtarget/SKILL.md"
+   ]
+  },
+  "symbadspecial": {
+   "home": "home-symbadspecial",
+   "stderr": "Reading additional input from stdin...\n2026-09-29T21:28:45.594173Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-symbadspecial/else where/sym \"q\" café-🚀/SKILL.md: missing YAML frontmatter delimited by ---\n",
+   "host_path_spellings": [
+    "@ROOT@/home-symbadspecial/else where/sym \"q\" café-🚀/SKILL.md"
+   ]
+  },
+  "symroot": {
+   "home": "home-symroot",
+   "stderr": "Reading additional input from stdin...\n2026-09-29T21:28:48.467937Z ERROR codex_core::session::session: failed to load skill @ROOT@/home-symroot/real skills/bad/SKILL.md: missing YAML frontmatter delimited by ---\n",
+   "host_path_spellings": [
+    "@ROOT@/home-symroot/real skills/bad/SKILL.md"
+   ]
+  },
+  "tabdir": {
+   "home": "home-tabdir",
+   "stderr": "Reading additional input from stdin...\n2026-09-29T21:28:46.401772Z ERROR codex_skills_extension::loader::host: failed to scan skill path file://@ROOT@/home-tabdir/.agents/skills/tabhere: No such file or directory (os error 2)\n",
+   "host_path_spellings": [
+    "file://@ROOT@/home-tabdir/.agents/skills/tabhere"
+   ]
+  }
+ }
+}

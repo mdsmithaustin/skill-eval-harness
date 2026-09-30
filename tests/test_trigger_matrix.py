@@ -29,6 +29,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from helpers import skill_markdown, stub_agent_cli
+
 import run_pi_trigger_eval as tr
 import run_trigger_matrix as tm
 import skill_benchmark as sb
@@ -952,6 +954,461 @@ class CodexRolloutDetectionTests(unittest.TestCase):
                 (root / "other").mkdir()
                 with mock.patch.dict(os.environ, {"CODEX_HOME": str(root / "other")}):
                     self.assertEqual(sb.locate_codex_rollout(self._events(), root / "isolated").status, "not_found")
+
+
+class TriggerContextIsolationTests(unittest.TestCase):
+    """A trigger run measures whether the agent loads the mounted skill, so the
+    agent must see that skill and nothing from the operator's host: no host
+    skills, bundled skills, host agents, instruction files, or MCP servers."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.root = Path(td.name)
+        self.tree = self.root / "tree"
+        (self.tree / "demo").mkdir(parents=True)
+        (self.tree / "demo" / "SKILL.md").write_text(skill_markdown(), encoding="utf-8")
+        self.home = self.root / "home"
+        self.host_skill = self.home / ".agents" / "skills" / "host-skill" / "SKILL.md"
+        self.host_skill.parent.mkdir(parents=True)
+        self.host_skill.write_text(skill_markdown("host-skill"), encoding="utf-8")
+        self.probe = self.root / "argv.json"
+        self.bindir = self.root / "bin"
+        self.bindir.mkdir()
+
+    def host_env(self, **extra):
+        return mock.patch.dict(os.environ, {"HOME": str(self.home), **extra})
+
+    def run_row(self, adapter):
+        return tm.run_cell_query(
+            adapter, self.tree, "review this diff", True, None, 30,
+            metadata={"skill_tree_hash": sb.skill_tree_hash(self.tree)})
+
+    def seen_argv(self):
+        return json.loads(self.probe.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def recorded_isolation(row):
+        return json.loads(json.dumps(row)).get("context_isolation")
+
+    def test_claude_trigger_run_keeps_project_skills_and_drops_host_context(self):
+        claude = stub_agent_cli(self.bindir / "claude", probe_path=self.probe,
+                                stdout_records=[{"type": "result", "subtype": "success"}])
+        with self.host_env(CLAUDE_CONFIG_DIR=str(self.root / "user-claude")):
+            row = self.run_row(tm.ClaudeAdapter(claude_bin=str(claude)))
+        expected = ["--setting-sources", "project", "--strict-mcp-config",
+                    "--settings", '{"disableBundledSkills":true}']
+        self.assertEqual(self.recorded_isolation(row), expected)
+        argv = self.seen_argv()
+        start = argv.index("--setting-sources")
+        self.assertEqual(argv[start:start + 5], expected)
+        self.assertNotIn("--safe-mode", argv)
+        self.assertNotIn("--disable-slash-commands", argv)
+
+    def test_codex_trigger_run_disables_host_and_bundled_skills_but_not_the_mount(self):
+        codex = stub_agent_cli(self.bindir / "codex", probe_path=self.probe,
+                               stdout_records=[{"type": "turn.completed"}])
+        with self.host_env(CODEX_HOME=str(self.root / "user-codex")):
+            row = self.run_row(tm.CodexAdapter(codex_cmd=f"{codex} exec --json"))
+        self.assertEqual(self.recorded_isolation(row), [
+            "-c", "skills.bundled.enabled=false",
+            "-c", "skills.config=<1 host skill(s) disabled>",
+            "--disable", "apps"])
+        argv = self.seen_argv()
+        self.assertIn(f'skills.config=[{{path="{self.host_skill}",enabled=false}}]', argv)
+        self.assertIn("skills.bundled.enabled=false", argv)
+        self.assertNotIn("skills.include_instructions=false", argv)
+
+    def test_pi_trigger_run_loads_only_the_mounted_skills_dir(self):
+        stub_agent_cli(self.bindir / "pi", probe_path=self.probe, stdout_records=[
+            {"type": "agent_end", "messages": [{"stopReason": "stop"}]}])
+        path = f"{self.bindir}{os.pathsep}{os.environ['PATH']}"
+        with self.host_env(PATH=path, PI_CODING_AGENT_DIR=str(self.root / "user-pi")):
+            row = self.run_row(tm.PiAdapter())
+        self.assertEqual(self.recorded_isolation(row), [
+            "--no-context-files", "--no-prompt-templates", "--no-extensions",
+            "--no-skills", "--skill", "<mounted skills dir>"])
+        argv = self.seen_argv()
+        self.assertIn("--no-skills", argv)
+        self.assertEqual(Path(argv[argv.index("--skill") + 1]).parts[-2:], (".pi-config", "skills"))
+
+    def test_pi_trigger_eval_row_records_the_same_isolation(self):
+        stub_agent_cli(self.bindir / "pi", probe_path=self.probe, stdout_records=[
+            {"type": "agent_end", "messages": [{"stopReason": "stop"}]}])
+        path = f"{self.bindir}{os.pathsep}{os.environ['PATH']}"
+        with self.host_env(PATH=path, PI_CODING_AGENT_DIR=str(self.root / "user-pi")):
+            row = tr.run_query(DEMO_MANIFEST, "ordinary chat", False, 30, None)
+        self.assertEqual(self.recorded_isolation(row), [
+            "--no-context-files", "--no-prompt-templates", "--no-extensions",
+            "--no-skills", "--skill", "<mounted skills dir>"])
+        argv = self.seen_argv()
+        self.assertEqual(Path(argv[argv.index("--skill") + 1]).name, "skills")
+
+
+@unittest.skipIf(sys.version_info < (3, 11), "tomllib is stdlib from Python 3.11")
+class CodexSkillConfigTomlEncodingTests(unittest.TestCase):
+    """The `-c skills.config=[...]` argv value must be a TOML value Codex can
+    parse. `json.dumps` escapes characters above U+FFFF as UTF-16 surrogate
+    pairs, which is a JSON string, not a TOML one: Codex reads the whole
+    value as an opaque string and dies with `Error loading config.toml:
+    invalid type: string ...`."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.home = Path(td.name)
+        (self.home / ".agents").mkdir()
+
+    def _skill(self, dirname: str, name: str) -> Path:
+        d = self.home / ".agents" / "skills" / dirname
+        d.mkdir(parents=True)
+        skill_md = d / "SKILL.md"
+        skill_md.write_text(skill_markdown(name), encoding="utf-8")
+        return skill_md
+
+    def _parsed_skills_config(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            args, _recorded = sb.codex_trigger_context_isolation_args()
+        cfg = next(a for a in args if a.startswith("skills.config="))
+        import tomllib
+        return cfg, tomllib.loads(cfg + "\n")["skills"]["config"]
+
+    def test_astral_and_bmp_unicode_directory_names_parse_as_toml(self):
+        emoji = self._skill("rocket-\U0001F680", "astral-emoji")
+        accent = self._skill("café", "bmp-accent")
+        cfg, entries = self._parsed_skills_config()
+        self.assertNotIn("\\u", cfg.lower().replace("http", ""))
+        paths = {e["path"] for e in entries}
+        self.assertEqual(paths, {str(emoji), str(accent)})
+        self.assertTrue(all(e["enabled"] is False for e in entries))
+
+    def test_quote_and_backslash_directory_names_parse_as_toml(self):
+        quoted = self._skill('my skill "q"', "quoted-space")
+        backslash = self._skill("back\\slash", "backslash-name")
+        _cfg, entries = self._parsed_skills_config()
+        paths = {e["path"] for e in entries}
+        self.assertEqual(paths, {str(quoted), str(backslash)})
+
+    def test_newline_in_directory_name_parses_as_toml_if_filesystem_allows(self):
+        try:
+            newline = self._skill("line\nbreak", "newline-name")
+        except OSError:
+            self.skipTest("filesystem rejects newline in a directory name")
+        _cfg, entries = self._parsed_skills_config()
+        self.assertEqual({e["path"] for e in entries}, {str(newline)})
+
+    def test_argv_carries_the_exact_paths_for_a_plain_and_a_control_char_free_mix(self):
+        plain = self._skill("host-a", "host-a")
+        cfg, entries = self._parsed_skills_config()
+        self.assertIn(str(plain), cfg)
+        self.assertEqual(len(entries), 1)
+
+
+class CodexConfigFailureStderrRedactionTests(unittest.TestCase):
+    """A Codex config-load failure must not let the operator's host skill
+    paths reach a saved row through stderr recorded verbatim."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.home = Path(td.name) / "home"
+        self.host_skill = self.home / ".agents" / "skills" / "very-secret-project-name" / "SKILL.md"
+        self.host_skill.parent.mkdir(parents=True)
+        self.host_skill.write_text(skill_markdown("very-secret-project-name"), encoding="utf-8")
+        self.workspace_root = Path(td.name) / "ws"
+        self.workspace_root.mkdir()
+
+    def _invoke_with_fake_config_error(self):
+        # Shaped like the real codex error: `serde`'s message quotes the
+        # whole offending argv value, which itself embeds every host path.
+        argv_value = f'[{{path="{self.host_skill}",enabled=false}}]'
+        fake_stderr = (
+            f'Error: invalid type: string "{argv_value}", expected a sequence\n'
+            f'in `skills.config`\n'
+        )
+
+        def fake_run(plan):
+            return {"stdout": "", "stderr": fake_stderr, "returncode": 1, "timed_out": False,
+                    "elapsed_ms": 5, "observation_complete": False}
+
+        with mock.patch.object(tm.CodexAdapter, "_run_argv", staticmethod(fake_run)), \
+             mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            workspace = self.workspace_root / "workspace"
+            workspace.mkdir()
+            return tm.CodexAdapter(codex_cmd="codex exec --json").invoke("q", None, workspace, 5)
+
+    def test_config_load_failure_stderr_does_not_carry_the_host_path(self):
+        result = self._invoke_with_fake_config_error()
+        self.assertNotIn(str(self.host_skill), result.stderr)
+        self.assertNotIn("very-secret-project-name", result.stderr)
+
+    def test_config_load_failure_stderr_keeps_the_error_shape(self):
+        result = self._invoke_with_fake_config_error()
+        self.assertIn("invalid type: string", result.stderr)
+        self.assertIn("skills.config", result.stderr)
+
+
+class CodexRealHostPathStderrRedactionTests(unittest.TestCase):
+    """Every spelling of a host skill path that real Codex puts in stderr must
+    be gone from the saved row, while the mounted skill path stays.
+
+    tests/fixtures/codex/host-path-stderr.json holds stderr from codex-cli
+    0.156.1 run through CodexAdapter.invoke against a local 400 sink, captured
+    before the adapter redacted anything. `@ROOT@` stands for the directory
+    that held each fake HOME; every other byte is verbatim. `forcefail` was
+    captured with the pre-TOML JSON encoder, so Codex echoed the whole
+    skills.config value back with its own escaping on top. The cases cover
+    the spellings Codex prints: the raw path, the realpath of a symlinked skill
+    or root, a `file://` URL of the containing directory (percent-encoded,
+    with tab and newline dropped), and the config-load echo."""
+
+    FIXTURE = CODEX_FIXTURES / "host-path-stderr.json"
+
+    def _host_tree(self, case: str, home: Path) -> None:
+        skills = home / ".agents" / "skills"
+        skills.mkdir(parents=True)
+
+        def skill(d: Path, text: str) -> None:
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "SKILL.md").write_text(text, encoding="utf-8")
+
+        no_front = "no frontmatter\n"
+        if case == "badfront":
+            skill(skills / "bad-front", no_front)
+            skill(skills / 'bad "q" front', "---\nname: [unclosed\n---\n")
+        elif case == "symbad":
+            skill(home / "elsewhere" / "symtarget", no_front)
+            (skills / "symlinked").symlink_to(home / "elsewhere" / "symtarget")
+        elif case == "symbadspecial":
+            target = home / "else where" / 'sym "q" café-\U0001F680'
+            skill(target, no_front)
+            (skills / "symlinked").symlink_to(target)
+        elif case in ("tabdir", "special-home-file-url"):
+            skill(skills / "tab\there", skill_markdown("tabbed"))
+        elif case == "badspecial":
+            for name in ['q "quote"', "back\\slash", "ctl\x01", "rocket-\U0001F680", "café",
+                         "sp ace", "pct%41", "new\nline", "tab\tx"]:
+                skill(skills / name, no_front)
+        elif case == "forcefail":
+            for name in ["plain-ascii-secret", 'quote "secret"', "rocket-\U0001F680", "café-secret"]:
+                skill(skills / name, skill_markdown("p"))
+        elif case == "symroot":
+            skills.rmdir()
+            skill(home / "real skills" / "bad", no_front)
+            skills.symlink_to(home / "real skills")
+        else:
+            raise AssertionError(case)
+
+    def _row(self, case: str, fixture: dict, root: Path) -> tuple[dict, Path]:
+        home = root / fixture["home"]
+        self._host_tree(case, home)
+        stderr = fixture["stderr"].replace("@ROOT@", str(root))
+        seen: dict = {}
+
+        def fake_run(plan):
+            mounted = next((Path(dict(plan.environment)["CODEX_HOME"]) / "skills").rglob("SKILL.md"))
+            seen["mounted"] = mounted
+            read = json.dumps({"type": "item.completed", "item": {
+                "id": "item_1", "type": "command_execution", "status": "completed",
+                "exit_code": 0, "command": f"cat {mounted}"}})
+            return {"stdout": read + "\n", "stderr": stderr, "returncode": 1, "timed_out": False,
+                    "elapsed_ms": 5, "observation_complete": False}
+
+        tree = root / "tree"
+        if not tree.exists():
+            (tree / "demo").mkdir(parents=True)
+            (tree / "demo" / "SKILL.md").write_text(skill_markdown("demo"), encoding="utf-8")
+        with mock.patch.object(tm.CodexAdapter, "_run_argv", staticmethod(fake_run)), \
+             mock.patch.dict(os.environ, {"HOME": str(home), "CODEX_HOME": str(root / "ambient-codex")}):
+            observation = tm.observe_cell_query(
+                tm.CodexAdapter(codex_cmd="codex exec --json"), tree, "q", False, None, 5,
+                trace_dir=root / "trace" / case, metadata={"skill_tree_hash": sb.skill_tree_hash(tree)})
+        # The row keeps only the last 1,000 characters of stderr; check the
+        # full redacted stderr too so an early line cannot hide a leak.
+        return {**observation.as_row(), "full_stderr": observation.invocation.stderr}, seen["mounted"]
+
+    def _saved_text(self, row: dict) -> str:
+        texts = [json.dumps(row, ensure_ascii=False)]
+        texts += [p.read_text(encoding="utf-8") for p in Path(row["trace_dir"]).rglob("*") if p.is_file()]
+        return "\n".join(texts)
+
+    def test_no_host_path_spelling_from_real_codex_stderr_reaches_the_saved_row(self):
+        cases = json.loads(self.FIXTURE.read_text(encoding="utf-8"))["cases"]
+        self.assertEqual(set(cases), {"badfront", "badspecial", "forcefail", "special-home-file-url",
+                                      "symbad", "symbadspecial", "symroot", "tabdir"})
+        for case, fixture in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
+                root = Path(td).resolve()
+                row, mounted = self._row(case, fixture, root)
+                saved = self._saved_text(row)
+                raw_saved = json.dumps(row)
+                for spelling in fixture["host_path_spellings"]:
+                    spelling = spelling.replace("@ROOT@", str(root))
+                    self.assertNotIn(spelling, row["full_stderr"])
+                    self.assertNotIn(spelling, saved)
+                    self.assertNotIn(json.dumps(spelling)[1:-1], raw_saved)
+                self.assertNotIn(str(root / fixture["home"] / ".agents"), saved)
+                self.assertIn("[REDACTED]", row["full_stderr"])
+                self.assertEqual(row["evidence"], [f"cat {mounted}"])
+                self.assertIn(str(mounted), (Path(row["trace_dir"]) / "trace.jsonl").read_text(encoding="utf-8"))
+
+    def test_redaction_keeps_the_codex_error_text_around_the_path(self):
+        cases = json.loads(self.FIXTURE.read_text(encoding="utf-8"))["cases"]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            row, _ = self._row("badfront", cases["badfront"], root)
+            tab_row, _ = self._row("tabdir", cases["tabdir"], root)
+        self.assertEqual(row["stderr"].splitlines()[1:], [
+            ("2026-09-29T21:28:43.535905Z ERROR codex_core::session::session: "
+             "failed to load skill [REDACTED]: missing field `description`"),
+            ("2026-09-29T21:28:43.536274Z ERROR codex_core::session::session: "
+             "failed to load skill [REDACTED]: missing YAML frontmatter delimited by ---"),
+        ])
+        self.assertEqual(tab_row["stderr"].splitlines()[1],
+                         "2026-09-29T21:28:46.401772Z ERROR codex_skills_extension::loader::host: "
+                         "failed to scan skill path [REDACTED]: No such file or directory (os error 2)")
+
+
+class CodexStderrCapCannotSplitAHostPathTests(unittest.TestCase):
+    """`invoke_argv_with_timeout` caps captured stderr before `CodexAdapter`
+    ever sees it, so a stderr longer than the cap used to be cut mid-path: the
+    redactor only recognizes a host path whole, so the surviving fragment (the
+    operator's home directory name, part of a project id) reached the saved
+    row unredacted. This reproduces that shape directly against a real
+    subprocess and the real cap, not a mocked stderr already under it."""
+
+    CAP = 4000
+
+    def _fake_codex_script(self, root: Path) -> Path:
+        script = root / "fake_codex.py"
+        script.write_text(
+            "import os, pathlib, sys\n"
+            "sys.stdin.read()\n"
+            "sys.stderr.write(pathlib.Path(os.environ['FAKE_CODEX_STDERR_FILE']).read_text(encoding='utf-8'))\n"
+            "sys.exit(1)\n",
+            encoding="utf-8",
+        )
+        return script
+
+    def _stderr_straddling_the_cap(self, skill_md: Path, home: Path) -> tuple[str, int, int]:
+        """A repeated 'failed to load skill' line, padded so one occurrence's
+        path crosses index `CAP` while the cut still lands inside the `home`
+        segment, before `.agents/skills` even starts. That is what the real
+        Codex repro looked like (the saved row's stderr ended mid-way through
+        the session directory name, short of `.agents/skills`): the
+        redactor's own root fallback needs `home/.agents/skills` present
+        *whole* to catch a span with no trailing delimiter, so a cut that
+        never reaches the root literal defeats it too."""
+        prefix = ("2026-09-29T21:40:49.748679Z ERROR codex_core::session::session: "
+                  "failed to load skill ")
+        suffix = ": missing YAML frontmatter delimited by ---\n"
+        path_text = str(skill_md)
+        home_text = str(home)
+        line = f"{prefix}{path_text}{suffix}"
+        for pad_len in range(len(line)):
+            for k in range(40):
+                path_start = pad_len + len(prefix) + k * len(line)
+                offset = self.CAP - path_start
+                if 20 <= offset < len(home_text):
+                    body = (" " * pad_len) + line * (k + 2)
+                    return body, path_start, offset
+        raise AssertionError("could not align a mid-home cut for this fixture")
+
+    def test_no_host_path_fragment_survives_a_stderr_cap_that_lands_mid_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            home = root / "home"
+            skill_dir = home / ".agents" / "skills" / "very-secret-codename-zulu"
+            skill_dir.mkdir(parents=True)
+            skill_md = skill_dir / "SKILL.md"
+            skill_md.write_text("no frontmatter\n", encoding="utf-8")
+
+            stderr_text, path_start, offset = self._stderr_straddling_the_cap(skill_md, home)
+            self.assertGreater(len(stderr_text), self.CAP)
+            self.assertLess(path_start, self.CAP)
+            # The cut falls inside `home`, short of `.agents/skills`: this is
+            # the exact prefix a hard character cut used to leave behind.
+            leaked_prefix = str(skill_md)[:offset]
+            self.assertNotIn(".agents", leaked_prefix)
+
+            stderr_file = root / "fake-stderr.txt"
+            stderr_file.write_text(stderr_text, encoding="utf-8")
+            fake_codex = self._fake_codex_script(root)
+            workspace = root / "workspace"
+            workspace.mkdir()
+
+            with mock.patch.dict(os.environ, {"HOME": str(home), "FAKE_CODEX_STDERR_FILE": str(stderr_file)}):
+                os.environ.pop("CODEX_HOME", None)
+                result = tm.CodexAdapter(codex_cmd=f"{sys.executable} {fake_codex}").invoke(
+                    "q", None, workspace, 10)
+
+        self.assertNotIn(leaked_prefix, result.stderr)
+        self.assertNotIn(str(home), result.stderr)
+        self.assertNotIn("very-secret-codename-zulu", result.stderr)
+        self.assertNotIn(str(skill_dir), result.stderr)
+
+
+class CodexConfigEchoLongerThanTheCapTests(unittest.TestCase):
+    """A rejected skills.config echoes every host path on one stderr line, so
+    with enough host skills that single line runs past the stderr cap. No cut
+    of that line may leave a host path fragment in the saved row.
+
+    tests/fixtures/codex/forcefail-bulk-stderr.json is real codex-cli 0.156.1
+    stderr for 60 host skills plus one astral-named one under the pre-TOML
+    encoder. The fake HOME's name is padded so the cap lands inside it."""
+
+    FIXTURE = CODEX_FIXTURES / "forcefail-bulk-stderr.json"
+    CAP = 4000
+
+    def _home_cut_by_the_cap(self, root: Path, template: str) -> tuple[Path, str]:
+        for pad in range(400):
+            home = root / ("operator-" + "x" * pad)
+            text = template.replace("@HOME@", str(home))
+            for start in (i for i in range(len(text)) if text.startswith(str(home), i)):
+                marker_end = start + len(str(root)) + len("/operator")
+                if marker_end < self.CAP - 20 and self.CAP < start + len(str(home)):
+                    return home, text
+        raise AssertionError("no padding puts the cap inside the home path")
+
+    def test_no_host_path_fragment_survives_a_single_line_config_echo_past_the_cap(self):
+        fixture = json.loads(self.FIXTURE.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            home, stderr_text = self._home_cut_by_the_cap(root, fixture["stderr"])
+            self.assertEqual(stderr_text.count("\n"), 3)
+            self.assertGreater(stderr_text.index("\n"), self.CAP)
+            for name in fixture["host_skill_dirs"]:
+                (home / ".agents" / "skills" / name).mkdir(parents=True)
+                (home / ".agents" / "skills" / name / "SKILL.md").write_text(skill_markdown("h"), encoding="utf-8")
+            stderr_file = root / "fake-stderr.txt"
+            stderr_file.write_text(stderr_text, encoding="utf-8")
+            fake_codex = root / "fake_codex.py"
+            fake_codex.write_text(
+                "import os, pathlib, sys\n"
+                "sys.stdin.read()\n"
+                "sys.stderr.write(pathlib.Path(os.environ['FAKE_CODEX_STDERR_FILE']).read_text(encoding='utf-8'))\n"
+                "sys.exit(1)\n",
+                encoding="utf-8")
+            tree = root / "tree"
+            (tree / "demo").mkdir(parents=True)
+            (tree / "demo" / "SKILL.md").write_text(skill_markdown("demo"), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"HOME": str(home), "FAKE_CODEX_STDERR_FILE": str(stderr_file)}):
+                os.environ.pop("CODEX_HOME", None)
+                observation = tm.observe_cell_query(
+                    tm.CodexAdapter(codex_cmd=f"{sys.executable} {fake_codex}"), tree, "q", False, None, 10,
+                    trace_dir=root / "trace", metadata={"skill_tree_hash": sb.skill_tree_hash(tree)})
+            row = observation.as_row()
+            invocation = observation.invocation
+            saved = "\n".join([json.dumps(row, ensure_ascii=False), json.dumps(row)]
+                              + [p.read_text(encoding="utf-8") for p in (root / "trace").rglob("*") if p.is_file()])
+
+        self.assertEqual(invocation.state, InvocationState.PROCESS_FAILED)
+        for label, text in {"stderr": invocation.stderr, "stdout": invocation.stdout,
+                            "provider_error": invocation.provider_error or "", "saved row": saved}.items():
+            with self.subTest(label):
+                self.assertEqual([m for m in ("operator-", "hmk", str(home)) if m in text], [])
+        self.assertTrue(invocation.stderr.startswith('Error loading config.toml: invalid type: string "[{path=\\"[REDACTED]\\",enabled=false},'))
+        self.assertLessEqual(len(invocation.stderr), self.CAP)
 
 
 class CodexAdapterTests(unittest.TestCase):

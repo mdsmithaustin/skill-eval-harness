@@ -6649,17 +6649,18 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
     env = None if plan.environment is None else dict(plan.environment)
     timeout = int(plan.timeout_s)
     input_text = plan.input_text
+    redact = plan.redact_output or (lambda text: text)
     def _wire_text(value: Any) -> tuple[str, bool]:
         if value is None:
             return "", True
         if isinstance(value, bytes):
             try:
-                return value.decode("utf-8", errors="strict"), True
+                return redact(value.decode("utf-8", errors="strict")), True
             except UnicodeDecodeError:
                 # Keep an artifact-safe representation, but carry the failed
                 # strict-decode bit separately so no parser can promote it.
-                return value.decode("utf-8", errors="backslashreplace"), False
-        return str(value), True
+                return redact(value.decode("utf-8", errors="backslashreplace")), False
+        return redact(str(value)), True
 
     def kill_process_group(pgid: int) -> dict[str, Any]:
         """Force-kill remaining members of the CLI's original POSIX process group.
@@ -6724,7 +6725,7 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
         )
     except (OSError, ValueError) as exc:
         return InvocationOutcome.spawn_failed(
-            stderr=f"{type(exc).__name__}: {exc}"[:4000],
+            stderr=redact(f"{type(exc).__name__}: {exc}")[:4000],
             elapsed_ms=int((time.time() - start) * 1000),
         )
     deadline = time.monotonic() + timeout
@@ -10876,6 +10877,16 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
 # skills Claude Code bundles, so a without_skill arm sees no skill at all.
 CLAUDE_CONTEXT_ISOLATION_ARGS = ("--safe-mode", "--disable-slash-commands")
 
+# Trigger runs must keep the mounted project skill, which both flags above
+# hide. Loading only the project setting source drops ~/.claude skills, agents,
+# CLAUDE.md, hooks, and settings env; --strict-mcp-config drops every MCP
+# server, claude.ai connectors included; disableBundledSkills drops the skills
+# Claude Code ships.
+CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS = (
+    "--setting-sources", "project", "--strict-mcp-config",
+    "--settings", '{"disableBundledSkills":true}',
+)
+
 
 def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str = "claude",
                       timeout: int = DEFAULT_RUNNER_TIMEOUT_S, extra_args: list[str] | None = None, cwd: str | Path | None = None,
@@ -11178,6 +11189,154 @@ def codex_structured_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
 # version-manager lookups. Both options are repeatable, so a user-supplied
 # --codex-cmd that already carries them stays valid.
 CODEX_CONTEXT_ISOLATION_ARGS = ("-c", "skills.include_instructions=false", "--disable", "apps")
+
+
+def _walk_codex_host_skills() -> tuple[Path, list[str], list[str]]:
+    """The host skill root, every `SKILL.md` under it (sorted), and every
+    directory walked.
+
+    Codex finds nested and symlinked skills, so follow links, but visit each
+    real directory once so a symlink cycle cannot hang the run."""
+    root = Path.home() / ".agents" / "skills"
+    host_skills: list[str] = []
+    directories: list[str] = []
+    walked: set[str] = set()
+    for directory, subdirs, files in os.walk(root, followlinks=True):
+        real = os.path.realpath(directory)
+        if real in walked:
+            subdirs.clear()
+            continue
+        walked.add(real)
+        directories.append(directory)
+        if "SKILL.md" in files:
+            host_skills.append(str(Path(directory) / "SKILL.md"))
+    host_skills.sort()
+    return root, host_skills, directories
+
+
+def codex_host_skill_paths() -> list[str]:
+    """Every `SKILL.md` under the operator's `~/.agents/skills`, sorted."""
+    return _walk_codex_host_skills()[1]
+
+
+# codex-cli 0.156.1 leaves these unescaped in a `file://` URL and drops tab,
+# newline, and carriage return; everything else outside [A-Za-z0-9_.-] is
+# percent-encoded as UTF-8.
+_CODEX_FILE_URL_SAFE = "/[]^|~';:!$&()*+,=@"
+_CODEX_URL_DROPPED = {ord("\t"): None, ord("\n"): None, ord("\r"): None}
+# A host path ends at the next character Codex puts after one: a quote
+# (optionally backslash-escaped), whitespace, `]`, or `,`. A `:` right before
+# it is Codex's message separator, not the path.
+_CODEX_PATH_TAIL = r'[^\s"\],]*?(?=:?\\*(?:[\s"\],]|$))'
+
+
+def _rust_debug_escape(text: str) -> str:
+    """`text` as Rust's `{:?}` prints it inside a quoted string, which is how a
+    Codex config error echoes a rejected `-c` value."""
+    escapes = {"\\": "\\\\", '"': '\\"', "\t": "\\t", "\n": "\\n", "\r": "\\r", "\0": "\\0"}
+    return "".join(escapes.get(ch) or (ch if ch.isprintable() else f"\\u{{{ord(ch):x}}}") for ch in text)
+
+
+def _codex_path_spellings(path: str) -> set[str]:
+    """Every way Codex has been seen to print `path`: raw, TOML- or
+    JSON-escaped, any of those again through Rust's `{:?}`, and as a
+    `file://` URL."""
+    encoded = {path, toml_basic_string(path)[1:-1], json.dumps(path)[1:-1],
+               json.dumps(path, ensure_ascii=False)[1:-1]}
+    url = "file://" + urllib.parse.quote(path.translate(_CODEX_URL_DROPPED), safe=_CODEX_FILE_URL_SAFE)
+    return encoded | {_rust_debug_escape(text) for text in encoded} | {url}
+
+
+@_dataclass(frozen=True)
+class CodexHostPathRedactor:
+    """Removes host skill paths from Codex output.
+
+    `roots` are the spellings of `~/.agents/skills` and its realpath: any span
+    starting with one is redacted up to the next path delimiter, which covers
+    paths Codex prints in a form nobody derived. `paths` are the spellings of
+    each walked directory, each `SKILL.md`, and their realpaths, which also
+    covers a path with a space or quote in it and a symlink target outside the
+    root. Both are sorted longest first so a whole path wins over its prefix."""
+
+    roots: tuple[str, ...]
+    paths: tuple[str, ...]
+
+    def __call__(self, text: str) -> str:
+        present = [s for s in self.paths if s in text]
+        if not present and not any(s in text for s in self.roots):
+            return text
+        prefixes = sorted([*present, *self.roots], key=len, reverse=True)
+        pattern = "(?:" + "|".join(map(re.escape, prefixes)) + ")" + _CODEX_PATH_TAIL
+        return re.sub(pattern, "[REDACTED]", text)
+
+
+def codex_host_path_redactor() -> CodexHostPathRedactor:
+    root, host_skills, directories = _walk_codex_host_skills()
+    roots = {str(root), os.path.realpath(root)}
+    paths: set[str] = set()
+    for path in {*host_skills, *directories}:
+        for spelled in {path, os.path.realpath(path)} - roots:
+            paths |= _codex_path_spellings(spelled)
+    root_spellings: set[str] = set().union(*(_codex_path_spellings(r) for r in roots))
+    return CodexHostPathRedactor(
+        roots=tuple(sorted(root_spellings, key=len, reverse=True)),
+        paths=tuple(sorted(paths - root_spellings, key=len, reverse=True)))
+
+
+def toml_basic_string(value: str) -> str:
+    """Encode `value` as a quoted TOML basic string.
+
+    `json.dumps` is the wrong encoder here: JSON represents a `str` as
+    UTF-16, so a character above U+FFFF (an emoji, for example) comes out as
+    an escaped surrogate pair (`\\ud83d\\ude80`), which is not a Unicode
+    scalar value and not legal TOML; Codex then reads the whole
+    `skills.config` value as an opaque string and dies with `Error loading
+    config.toml: invalid type: string ...`. TOML also never accepts `\\/`,
+    which JSON allows (though does not by default emit). This encoder escapes
+    only the quote, the backslash, and control characters (TOML requires
+    every control character other than tab escaped, including U+007F, which
+    JSON does not escape), and otherwise copies each character through
+    literally, astral code points included."""
+    out = ['"']
+    for ch in value:
+        code = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == '\\':
+            out.append('\\\\')
+        elif ch == '\b':
+            out.append('\\b')
+        elif ch == '\t':
+            out.append('\\t')
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\f':
+            out.append('\\f')
+        elif ch == '\r':
+            out.append('\\r')
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def codex_trigger_context_isolation_args() -> tuple[list[str], list[str]]:
+    """Codex flags for a trigger run, and the form a row records.
+
+    A trigger run must keep `$CODEX_HOME/skills` listed, so it cannot hide the
+    skill catalog. Codex has no switch for the ~/.agents/skills root alone, so
+    each host skill is disabled by path; the recorded form counts them instead
+    of listing the operator's skill paths."""
+    host_skills = codex_host_skill_paths()
+    entries = ",".join(f"{{path={toml_basic_string(path)},enabled=false}}" for path in host_skills)
+
+    def args(skills_config: str) -> list[str]:
+        return ["-c", "skills.bundled.enabled=false", "-c", skills_config, "--disable", "apps"]
+
+    return (args(f"skills.config=[{entries}]"),
+            args(f"skills.config=<{len(host_skills)} host skill(s) disabled>"))
 
 
 def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = "codex exec", timeout: int = DEFAULT_RUNNER_TIMEOUT_S,

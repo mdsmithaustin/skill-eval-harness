@@ -83,6 +83,7 @@ from agent_capabilities import (
     surface_option_values,
 )
 from run_pi_trigger_eval import (
+    PI_RECORDED_CONTEXT_ISOLATION,
     cases_from_manifest,
     eval_rows_from_args,
     load_manifest,
@@ -93,6 +94,7 @@ from run_pi_trigger_eval import (
     validate_trigger_rows,
 )
 from skill_benchmark import (
+    CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS,
     VALID_SPLITS,
     VIBE_DEFAULT_CMD,
     VIBE_READ_ONLY_TOOLS,
@@ -104,7 +106,9 @@ from skill_benchmark import (
     build_vibe_cli_argv,
     canonical_json_sha256,
     codex_env_for_home,
+    codex_host_path_redactor,
     codex_rollout_skill_loads,
+    codex_trigger_context_isolation_args,
     detect_trigger_detection,
     detect_trigger_records,
     frontmatter_value,
@@ -416,7 +420,7 @@ class ClaudeAdapter(AgentAdapter):
             "command": executable_identity(self.claude_bin),
             "max_turns": self.max_turns,
             "allowed_tools": ["Skill", "Read", "Glob", "Grep"],
-            "isolation_policy": "isolated config when portable auth exists; otherwise normal config",
+            "isolation_policy": "isolated config when portable auth exists; otherwise normal config; project setting source only, no MCP, no bundled skills",
             "required_observations": {"config_isolated": True},
         }
 
@@ -429,7 +433,8 @@ class ClaudeAdapter(AgentAdapter):
         config_dir = workspace / ".trigger-config"
         argv = [self.claude_bin, "-p", query, "--output-format", "stream-json", "--verbose",
                 "--max-turns", str(self.max_turns),
-                "--allowedTools", "Skill", "Read", "Glob", "Grep"]
+                "--allowedTools", "Skill", "Read", "Glob", "Grep",
+                *CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS]
         if model:
             argv += ["--model", model]
         env = os.environ.copy()
@@ -442,7 +447,10 @@ class ClaudeAdapter(AgentAdapter):
                 argv, input_text="", cwd=workspace, timeout_s=timeout,
                 environment=env))
         )
-        metadata: dict[str, Any] = {"config_isolated": config_isolated}
+        metadata: dict[str, Any] = {
+            "config_isolated": config_isolated,
+            "context_isolation": list(CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS),
+        }
         if not config_isolated:
             metadata["config_isolation_warning"] = (
                 "Claude OAuth/keychain auth was not portable; preserved the normal Claude config, "
@@ -523,7 +531,7 @@ class CodexAdapter(AgentAdapter):
         return {
             **super().protocol_parameters(),
             "command": executable_identity(self.codex_cmd),
-            "isolation_policy": "external ephemeral CODEX_HOME plus skills-only add-dir",
+            "isolation_policy": "external ephemeral CODEX_HOME plus skills-only add-dir; host and bundled skills disabled, apps off",
             "required_observations": {"codex_home_outside_workdir": True},
         }
 
@@ -533,15 +541,21 @@ class CodexAdapter(AgentAdapter):
         skills_dir = codex_home / "skills"
         if "--add-dir" not in argv:
             argv += ["--add-dir", str(skills_dir)]
+        isolation_args, recorded_isolation = codex_trigger_context_isolation_args()
+        argv += isolation_args
         if model:
             argv += ["--model", model]
         argv.append(query)
         env, meta = codex_env_for_home(codex_home)
+        # Codex names host skills in its own errors (a skill that fails to
+        # load, a directory it cannot scan, a rejected skills.config echoed
+        # back), so the subprocess owner strips those paths before it caps.
+        redact_host_paths = codex_host_path_redactor()
         try:
             result = validate_invoke_result(
                 self.name, self._run_argv(ProcessInvocationPlan.from_values(
                     argv, input_text="", cwd=workspace, timeout_s=timeout,
-                    environment=env))
+                    environment=env, redact_output=redact_host_paths))
             )
             rollout = locate_codex_rollout(result.stdout, codex_home)
         finally:
@@ -549,9 +563,19 @@ class CodexAdapter(AgentAdapter):
         if result.observation_complete:
             result = result.with_provider_error(
                 codex_stream_protocol_error(result.stdout))
+        # A runner injected through _run_argv may not honor redact_output.
+        result = result.with_wire_text(
+            stdout=redact_host_paths(result.stdout),
+            stderr=redact_host_paths(result.stderr),
+            provider_error=(
+                redact_host_paths(result.provider_error)
+                if result.provider_error is not None else None
+            ),
+        )
         return result.with_provider_payload(rollout).with_metadata(
             {k: v for k, v in meta.items() if k != "codex_home"},
             codex_home_outside_workdir=True,
+            context_isolation=recorded_isolation,
             **rollout.metadata(),
         )
 
@@ -588,7 +612,7 @@ class PiAdapter(AgentAdapter):
             "command": executable_identity("pi"),
             "tools": ["read", "grep", "find", "ls"],
             "thinking": "minimal",
-            "isolation_policy": "isolated PI_CODING_AGENT_DIR seeded without user skills",
+            "isolation_policy": "isolated PI_CODING_AGENT_DIR seeded without user skills; host skill discovery off, mounted skills loaded by path",
             "required_observations": {"config_isolated": True},
         }
 
@@ -598,9 +622,9 @@ class PiAdapter(AgentAdapter):
         return pi_invocation_outcome(validate_invoke_result(
             self.name,
             self._run_argv(ProcessInvocationPlan.from_values(
-                pi_argv(query, model), input_text="", cwd=workspace,
+                pi_argv(query, model, workspace / ".pi-config" / "skills"), input_text="", cwd=workspace,
                 timeout_s=timeout, environment=env)),
-        )).with_metadata(config_isolated=True)
+        )).with_metadata(config_isolated=True, context_isolation=PI_RECORDED_CONTEXT_ISOLATION)
 
 
 class VibeAdapter(AgentAdapter):

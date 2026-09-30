@@ -221,9 +221,9 @@ a manifest gets neither key. The claim does not feed `execution_valid`.
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:10776`), Claude (`run_claude:10955`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:10777`), Claude (`run_claude:10966`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:13582`, which hosts record/replay tool I/O via `ToolReplayStore`),
+subagent runner (`run_subagent:13741`, which hosts record/replay tool I/O via `ToolReplayStore`),
 Jetty (`JettyClient:4097` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
@@ -238,8 +238,10 @@ calls no model during default grading; it reads what the runner left behind. The
 `--allow-scripts` and `--embed-cmd` modes may invoke caller-supplied external oracle subprocesses.
 
 Before a native provider subprocess starts, `invocation_contracts.py` constructs one
-`ProcessInvocationPlan`: immutable argv, stdin, working directory, environment, and a positive
-`TimeoutSeconds`. `run_argv_capture` accepts only that plan and returns the closed
+`ProcessInvocationPlan`: immutable argv, stdin, working directory, environment, a positive
+`TimeoutSeconds`, and an optional `redact_output` function that the subprocess owner applies to the
+whole captured stdout and stderr before it caps stderr (the Codex trigger adapter uses it to strip
+host skill paths). `run_argv_capture` accepts only that plan and returns the closed
 `InvocationResult` lifecycle. The answer backend receives the smaller `InvocationRequest`, whose
 model and timeout are also precise values. Provider adapters can choose wire formats, but they
 cannot omit or disagree about process inputs after the plan boundary. The same module owns the

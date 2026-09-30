@@ -1397,6 +1397,20 @@ class RunnerOutcomeContractTests(unittest.TestCase):
                 except ProcessLookupError:
                     pass
 
+    def test_stderr_cap_keeps_the_first_4000_characters_of_a_long_final_error_line(self):
+        quota = json.dumps({"error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                                      "message": "Quota exceeded. " + "detail " * 800}})
+        stderr_text = "Loaded cached credentials.\n" + quota + "\n"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake_gemini = root / "fake_gemini.py"
+            fake_gemini.write_text(
+                f"import sys\nsys.stderr.write({stderr_text!r})\nsys.exit(1)\n", encoding="utf-8")
+            result = sb.run_argv_with_timeout(
+                [sys.executable, str(fake_gemini)], cwd=root, timeout=10)
+        self.assertGreater(len(quota), 5000)
+        self.assertEqual(result["stderr"], stderr_text[:4000])
+
     def test_run_agent_writes_failure_artifact_when_native_command_is_missing(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
