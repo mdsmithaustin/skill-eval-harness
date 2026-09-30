@@ -1917,8 +1917,32 @@ class JudgeCalibrationTests(unittest.TestCase):
             {"a": {"passed": True}, "b": {"passed": False}},
             {"a": scored_judge_result(4.0, threshold=3.0), "b": judge_result(False)})["calibration"]
         self.assertEqual(cal["availability"], "unavailable")
-        self.assertEqual(cal["reason"], "no matched judge verdict carries a score in [0, 1]")
+        self.assertEqual(cal["reason"], (
+            "a boolean verdict carries no score (1); threshold 3 is outside [0, 1]; "
+            "stored verdicts declare no maximum to rescale by (1)"))
         self.assertIsNone(cal["observed"])
+
+    def test_unavailable_reason_names_every_distinct_exclusion_cause(self):
+        # An off-scale threshold, a forged consensus, and a no-score consensus
+        # are three different reasons every matched row was excluded; the
+        # `unavailable` reason must name each, not one fixed sentence.
+        members = [dict(scored_judge_result(score), judge_task_id="t", judge_model=f"m{k}")
+                   for k, score in enumerate((0.9, 0.7, 0.2))]
+        merged = sb.merge_cross_judge_rows(members)
+        forged = sb.validated_result_row(dict(merged, passed=not merged["passed"]))
+        no_score = dict(sb.merge_cross_judge_rows(
+            [dict(scored_judge_result(score), judge_task_id="u", judge_model=f"m{k}")
+             for k, score in enumerate((0.9, 0.7, 0.2))]))
+        del no_score["score"]
+        no_score = sb.validated_result_row(no_score)
+        human = {"a": {"passed": True}, "t": {"passed": True}, "u": {"passed": True}}
+        judge = {"a": scored_judge_result(4.0, threshold=3.0), "t": forged, "u": no_score}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "unavailable")
+        self.assertIn("threshold 3 is outside [0, 1]", cal["reason"])
+        self.assertIn("recorded decision contradicts its members", cal["reason"])
+        self.assertIn("carries no top-level score to calibrate", cal["reason"])
+        self.assertNotEqual(cal["reason"], "no matched judge verdict carries a score in [0, 1]")
 
     def test_incomplete_alignment_population_makes_calibration_partial(self):
         human = {"a": {"passed": True}, "b": {"passed": False}, "c": {"passed": True}}
@@ -2055,7 +2079,8 @@ class JudgeCalibrationTests(unittest.TestCase):
         jid = task["judge_task_id"]
         cal = sb.judge_alignment_report({jid: {"passed": False}}, {jid: row})["calibration"]
         self.assertEqual(cal["availability"], "unavailable")
-        self.assertEqual(cal["reason"], "no matched judge verdict carries a score in [0, 1]")
+        self.assertEqual(cal["reason"], (
+            "threshold 4 is outside [0, 1]; stored verdicts declare no maximum to rescale by (1)"))
         self.assertEqual(cal["excluded_judge_ids"], {
             jid: "threshold 4 is outside [0, 1]; stored verdicts declare no maximum to rescale by"})
 
@@ -2096,6 +2121,57 @@ class JudgeCalibrationTests(unittest.TestCase):
         cal = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})["calibration"]
         self.assertEqual(cal["excluded_judge_ids"], {
             "t": "recorded decision contradicts its members; verdict may be forged or from a foreign file"})
+
+    def test_majority_consensus_score_mismatch_with_members_is_excluded(self):
+        # passed still agrees with the members' majority, but the top-level
+        # score is no longer their median (0.6) — the merge's own rule.
+        members = [dict(scored_judge_result(score), judge_task_id="t", judge_model=f"m{k}")
+                   for k, score in enumerate((0.9, 0.6, 0.1))]
+        merged = sb.merge_cross_judge_rows(members)
+        self.assertEqual((merged["passed"], merged["score"]), (True, 0.6))
+        tampered = dict(merged, score=0.99)
+        row = sb.validated_result_row(tampered)
+        self.assertEqual(sb.judge_decision(row), ("majority_consensus", 0.5))
+        cal = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})["calibration"]
+        self.assertEqual(cal["excluded_judge_ids"], {
+            "t": "recorded decision contradicts its members; verdict may be forged or from a foreign file"})
+
+    def test_majority_consensus_with_out_of_range_member_score_is_excluded(self):
+        members = [dict(scored_judge_result(1.5, threshold=1.0), judge_task_id="t", judge_model="m0"),
+                  dict(scored_judge_result(0.3, threshold=1.0), judge_task_id="t", judge_model="m1"),
+                  dict(scored_judge_result(0.2, threshold=1.0), judge_task_id="t", judge_model="m2")]
+        merged = sb.merge_cross_judge_rows(members)
+        row = sb.validated_result_row(dict(merged))
+        self.assertEqual(sb.judge_decision(row), ("majority_consensus", 1.0))
+        cal = sb.judge_alignment_report({"t": {"passed": False}}, {"t": row})["calibration"]
+        self.assertEqual(cal["excluded_judge_ids"], {
+            "t": "recorded decision contradicts its members; verdict may be forged or from a foreign file"})
+
+    def test_calibration_verifier_finds_no_false_exclusions_on_real_merges(self):
+        """Random real merges through merge_cross_judge_rows (panels of 1-7,
+        with and without quorum, and repeats) must never be excluded from
+        calibration when they are legitimate: thresholds 0, 1, 0.5, and
+        random, with member scores placed at the threshold, 0, and 1."""
+        import random
+        rng = random.Random(1234)
+        legitimate = 0
+        for trial in range(500):
+            thr = rng.choice([0.0, 1.0, 0.5, round(rng.random(), 4)])
+            panel_size = rng.choice([1, 2, 3, 4, 5, 6, 7])
+            edge_scores = [thr, 0.0, 1.0]
+            scores = [rng.choice(edge_scores + [round(rng.random(), 4)]) for _ in range(panel_size)]
+            quorum = rng.choice([None, 1, panel_size]) if panel_size > 1 else None
+            members = [dict(scored_judge_result(s, threshold=thr), judge_task_id=f"trial{trial}",
+                            judge_model=f"m{k}")
+                      for k, s in enumerate(scores)]
+            row = sb.merge_cross_judge_rows(members, quorum=quorum)
+            kind, _ = sb.judge_decision(row)
+            if kind != "majority_consensus":
+                continue
+            self.assertIsNone(sb.majority_consensus_contradiction(row),
+                              f"trial {trial}: thr={thr} scores={scores} quorum={quorum}")
+            legitimate += 1
+        self.assertGreater(legitimate, 0)
 
     def test_consensus_that_is_not_median_at_threshold_is_not_applicable(self):
         # 2 repeats at [0.4, 0.9] fail on a 1-1 vote while their median 0.65 clears 0.5.
