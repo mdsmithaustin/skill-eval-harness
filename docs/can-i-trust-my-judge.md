@@ -157,12 +157,12 @@ judge kind, and calibrates only the kinds marked yes:
 | `decision_rules` key | The harness passes it when | Calibrated | Knob that moves the cut point |
 |---|---|---|---|
 | `scored` (a plain judge with `threshold`, or with `atLeast`) | `score >= threshold` | yes | the assertion's `threshold`, or `atLeast` when set |
-| `per_step` | met steps / steps `>= min_met_fraction` | yes | `per_step.min_met_fraction` |
-| `majority_consensus` (`--judge-runs`, or `--judge-panel` without `--quorum`, over scored members) | a strict majority of members pass, which is the median member score `>=` their threshold | yes | the members' `threshold`, or `atLeast` |
+| `per_step` | met steps `>= ceil(min_met_fraction x steps)`, which is met steps / steps `>= min_met_fraction` | yes | `per_step.min_met_fraction` |
+| `majority_consensus` (`--judge-panel` without `--quorum`, or an odd number of `--judge-runs` repeats, over plain scored members sharing one threshold) | a strict majority of members pass, which is the median member score `>=` their threshold | yes | the members' `threshold`, or `atLeast` |
 | `dynamic_rubric` | met criteria `>= minimum_criteria`, over a criteria count the judge drafts per run | no | |
 | `dimensions` | the mean 1-5 grade, normalized to 0-1, reaches the dimension threshold | no | |
 | `quorum_consensus` | at least `--quorum` panel members pass | no | |
-| `consensus_member_vote` | a majority of members pass, and those members are not all `score >= threshold` judges | no | |
+| `consensus_member_vote` | a majority of members pass, but not as median `>=` threshold: members that are not all plain scored with one threshold, or an even number of repeats, which can split 1-1 and fail while the median clears the threshold | no | |
 | `consensus_unrecorded` | unknown: the row lacks its members, or is a panel row written before `agreement.quorum` was recorded | no | |
 | `boolean` | the judge's own pass/fail call, with no score | no | |
 
@@ -178,7 +178,9 @@ reason, and so is a calibrated kind's verdict whose score lies outside 0-1.
 Each `decision_rules` entry carries `n`, `calibrated`, `decides`, `knob`, and
 `thresholds`, the distinct thresholds the harness recorded on those rows. A
 per-step row does not record `min_met_fraction`, so its `thresholds` is `null`;
-read the fraction from the manifest.
+read the fraction from the manifest. Its stored score is met / steps rounded to
+4 places, so a fraction with more digits than that can land on the other side
+of a boundary score.
 
 - `brier`. Mean squared gap between the score and the human label (1 or 0).
   0 is perfect; a judge that always says 0.5 scores 0.25.
@@ -276,7 +278,7 @@ which judge produced which number is always recoverable.
 | `recall` low, `precision` high | Too harsh: fails human-passes | Loosen wording that demands one phrasing; cf. the assertion-calibration lesson in [`why-did-this-run-fail.md`](why-did-this-run-fail.md) |
 | `calibration.auroc` near 0.5 | The score does not rank human-passes above human-fails | Treat the score as noise; rely on the pass/fail call and its kappa, or rewrite the rubric's anchors |
 | `calibration.best_f1.threshold` far from `calibration.decision_rules.<kind>.thresholds` | The cut point does not match where humans draw the line | Move the knob `decision_rules` names for that kind toward the best-F1 threshold: `threshold` or `atLeast` for `scored`, `per_step.min_met_fraction` for `per_step` (it rejects `atLeast`), then re-check on fresh labels |
-| `calibration.availability` is `not_applicable` for a scored judge | The judge's pass is not `score >= threshold` (dynamic rubric, graded dimensions, `--quorum`) | Judge it on agreement and kappa; its `reason` names the rule |
+| `calibration.availability` is `not_applicable` for a scored judge | The judge's pass is not `score >= threshold` (dynamic rubric, graded dimensions, `--quorum`, an even number of `--judge-runs`), or it is a panel row written before `agreement.quorum` was recorded | Judge it on agreement and kappa; its `reason` names the rule. Re-run `judge` for an old panel row |
 | `only N matched labels (< 50)` warning | Metrics are unstable at this sample size | Label more runs before acting on kappa; spread labels across cases and variants |
 | `unmatched_human_ids` / `unmatched_judge_ids` non-empty | Labels and verdicts don't key to the same tasks | Fix the `judge_task_id`s — alignment only scores the intersection |
 | `sign_sensitive: true` | Judges disagree the skill helps at all | Do not report the lift; fix the judge (alignment + robustness) first, or the rubric is underspecified |
