@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,7 +21,9 @@ from helpers import (
     demo_manifest as base_manifest,
 )
 from helpers import (
+    judge_result,
     judge_task,
+    scored_judge_result,
     trace_event,
     write_run,
 )
@@ -1764,6 +1767,145 @@ class JudgeAlignmentTests(unittest.TestCase):
         self.assertEqual(sb.kappa_band(0.0), "poor (<= chance)")
         self.assertEqual(sb.kappa_band(-0.2), "poor (<= chance)")
         self.assertIsNone(sb.kappa_band(None))
+
+
+class JudgeCalibrationTests(unittest.TestCase):
+    """judge-alignment's calibration block: does the judge's score mean what it says?"""
+
+    # id -> (judge score, human passed). Every score sits in its own ECE bin.
+    SCORED = {"a": (0.9, True), "b": (0.8, True), "c": (0.7, False), "d": (0.6, True),
+              "e": (0.4, False), "f": (0.3, True), "g": (0.2, False), "h": (0.1, False)}
+
+    SWEEP = [
+        {"threshold": 0.1, "agreement": 0.5, "precision": 0.5, "recall": 1.0, "f1": 0.6667,
+         "confusion": {"tp": 4, "fp": 4, "fn": 0, "tn": 0}},
+        {"threshold": 0.2, "agreement": 0.625, "precision": 0.5714, "recall": 1.0, "f1": 0.7273,
+         "confusion": {"tp": 4, "fp": 3, "fn": 0, "tn": 1}},
+        {"threshold": 0.3, "agreement": 0.75, "precision": 0.6667, "recall": 1.0, "f1": 0.8,
+         "confusion": {"tp": 4, "fp": 2, "fn": 0, "tn": 2}},
+        {"threshold": 0.4, "agreement": 0.625, "precision": 0.6, "recall": 0.75, "f1": 0.6667,
+         "confusion": {"tp": 3, "fp": 2, "fn": 1, "tn": 2}},
+        {"threshold": 0.6, "agreement": 0.75, "precision": 0.75, "recall": 0.75, "f1": 0.75,
+         "confusion": {"tp": 3, "fp": 1, "fn": 1, "tn": 3}},
+        {"threshold": 0.7, "agreement": 0.625, "precision": 0.6667, "recall": 0.5, "f1": 0.5714,
+         "confusion": {"tp": 2, "fp": 1, "fn": 2, "tn": 3}},
+        {"threshold": 0.8, "agreement": 0.75, "precision": 1.0, "recall": 0.5, "f1": 0.6667,
+         "confusion": {"tp": 2, "fp": 0, "fn": 2, "tn": 4}},
+        {"threshold": 0.9, "agreement": 0.625, "precision": 1.0, "recall": 0.25, "f1": 0.4,
+         "confusion": {"tp": 1, "fp": 0, "fn": 3, "tn": 4}},
+    ]
+
+    @staticmethod
+    def _population(rows):
+        human = {key: {"passed": passed} for key, (_, passed) in rows.items()}
+        judge = {key: scored_judge_result(score) for key, (score, _) in rows.items()}
+        return human, judge
+
+    def test_scored_judge_gets_brier_ece_auroc_and_sweep(self):
+        report = sb.judge_alignment_report(*self._population(self.SCORED))
+        cal = report["calibration"]
+        self.assertEqual(cal["availability"], "complete")
+        self.assertIsNone(cal["reason"])
+        self.assertEqual(cal["n"], 8)
+        self.assertEqual(cal["excluded_judge_ids"], {})
+        self.assertEqual(cal["brier"], 0.175)
+        self.assertEqual(cal["ece"], 0.35)
+        self.assertEqual(cal["auroc"], 0.8125)   # 13 of 16 pass/fail pairs ranked correctly
+        self.assertEqual(cal["threshold_sweep"], self.SWEEP)
+        self.assertEqual(cal["best_f1"], self.SWEEP[2])
+        self.assertEqual(len(cal["reliability"]), 8)
+        self.assertEqual(cal["reliability"][2],
+                         {"lo": 0.3, "hi": 0.4, "n": 1, "mean_score": 0.3, "pass_rate": 1.0})
+        self.assertEqual(cal["observed"]["brier"], 0.175)
+        self.assertEqual(cal["warnings"], [(
+            "only 8 scored matched labels (< 50); calibration metrics are unstable "
+            "\u2014 collect more human labels")])
+
+    def test_cli_emits_calibration_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            human, judge = self._population(self.SCORED)
+            (td / "labels.jsonl").write_text("".join(
+                json.dumps({"judge_task_id": key, **row}) + "\n" for key, row in human.items()))
+            (td / "judge.jsonl").write_text("".join(
+                json.dumps({"judge_task_id": key, **row}) + "\n" for key, row in judge.items()))
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "skill_benchmark.py"), "judge-alignment",
+                 "--labels", str(td / "labels.jsonl"), "--judge-results", str(td / "judge.jsonl"),
+                 "--min-labels", "8", "--out", str(td / "align.json")],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            cal = json.loads((td / "align.json").read_text())["calibration"]
+        self.assertEqual((cal["availability"], cal["brier"], cal["ece"], cal["auroc"]),
+                         ("complete", 0.175, 0.35, 0.8125))
+        self.assertEqual(cal["best_f1"]["threshold"], 0.3)
+        self.assertEqual(cal["warnings"], [])
+
+    def test_one_human_class_leaves_auroc_unavailable(self):
+        report = sb.judge_alignment_report(*self._population(
+            {"a": (0.9, True), "b": (0.6, True), "c": (0.3, True), "d": (0.2, True)}))
+        cal = report["calibration"]
+        self.assertEqual(cal["brier"], 0.325)
+        self.assertIsNone(cal["auroc"])
+        self.assertEqual(cal["best_f1"]["threshold"], 0.2)
+        self.assertIn("AUROC is unavailable: human labels are all pass "
+                      "(AUROC needs both classes)", cal["warnings"])
+
+        all_fail = sb.judge_alignment_report(*self._population(
+            {"a": (0.9, False), "b": (0.1, False)}))["calibration"]
+        self.assertEqual(all_fail["brier"], 0.41)
+        self.assertIsNone(all_fail["auroc"])
+        self.assertIsNone(all_fail["best_f1"])
+        self.assertIn("best-F1 threshold is unavailable: no human label is pass "
+                      "(F1 is 0 at every threshold)", all_fail["warnings"])
+
+    def test_identical_scores_collapse_to_one_threshold(self):
+        report = sb.judge_alignment_report(*self._population(
+            {"a": (0.5, True), "b": (0.5, True), "c": (0.5, False), "d": (0.5, False)}))
+        cal = report["calibration"]
+        self.assertEqual((cal["brier"], cal["ece"], cal["auroc"]), (0.25, 0.0, 0.5))
+        self.assertEqual(cal["threshold_sweep"], [
+            {"threshold": 0.5, "agreement": 0.5, "precision": 0.5, "recall": 1.0, "f1": 0.6667,
+             "confusion": {"tp": 2, "fp": 2, "fn": 0, "tn": 0}}])
+
+    def test_boolean_only_judge_is_not_applicable(self):
+        human = {"a": {"passed": True}, "b": {"passed": False}}
+        judge = {"a": judge_result(True), "b": judge_result(False)}
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "not_applicable")
+        self.assertEqual(cal["reason"], "no matched judge verdict carries a score "
+                                        "(boolean-only judge); calibration needs scored verdicts")
+        self.assertEqual((cal["n"], cal["brier"], cal["ece"], cal["auroc"], cal["observed"]),
+                         (0, None, None, None, None))
+
+    def test_mixed_scales_use_only_normalized_scores(self):
+        human = {"a": {"passed": True}, "b": {"passed": False}, "c": {"passed": True},
+                 "d": {"passed": False}, "e": {"passed": False}}
+        judge = {
+            "a": scored_judge_result(0.9),
+            "b": scored_judge_result(0.2),
+            # a 1-5 rubric arrives already normalized: mean((5-1)/4, (3-1)/4) = 0.75
+            "c": judge_result(True, verdict_kind="dimensions", score=0.75, threshold=0.5,
+                              dimension_scores={"clarity": 5, "depth": 3}),
+            "d": scored_judge_result(4.0, threshold=3.0),
+            "e": judge_result(False),
+        }
+        cal = sb.judge_alignment_report(human, judge)["calibration"]
+        self.assertEqual(cal["availability"], "partial")
+        self.assertEqual(cal["n"], 3)
+        self.assertEqual(cal["excluded_judge_ids"], {
+            "d": "score 4 is outside [0, 1]; stored verdicts declare no maximum to rescale by",
+            "e": "verdict carries no score"})
+        self.assertIsNone(cal["brier"])
+        self.assertEqual(cal["observed"]["brier"], 0.0375)
+        self.assertEqual(cal["observed"]["auroc"], 1.0)
+
+    def test_no_overlap_is_unavailable(self):
+        cal = sb.judge_alignment_report(
+            {"x": {"passed": True}}, {"y": scored_judge_result(0.9)})["calibration"]
+        self.assertEqual(cal["availability"], "unavailable")
+        self.assertEqual(cal["reason"], "no complete matched labels to calibrate against")
+        self.assertIsNone(cal["brier"])
 
 
 class BlindJudgePromptTests(unittest.TestCase):

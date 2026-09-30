@@ -397,6 +397,24 @@ def judge_task(
     return task
 
 
+def judge_result(passed: bool, **verdict: Any) -> dict[str, Any]:
+    """One complete stored judge result row, as `judge --out` writes it and
+    judge-alignment accepts it. Pass verdict fields (verdict_kind, score,
+    threshold, dimension_scores) to make it scored; omit them for a boolean one."""
+    return {"passed": passed, "returncode": 0,
+            "judge_observation_complete": True,
+            "availability": "complete",
+            "judge_input_sha256": "sha256:" + "f" * 64,
+            "judge_prompt_sha256": "a" * 64,
+            "judge_evidence_mode": "text-only",
+            **verdict}
+
+
+def scored_judge_result(score: float, threshold: float = 0.5) -> dict[str, Any]:
+    return judge_result(score >= threshold, verdict_kind="scored",
+                        score=score, threshold=threshold)
+
+
 def file_judge_cmd(tmp: Path, verdict: dict[str, Any]) -> str:
     """A judge command that ignores its input and emits a fixed verdict —
     deterministic, offline, no model."""
