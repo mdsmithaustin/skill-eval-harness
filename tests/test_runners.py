@@ -31,6 +31,7 @@ from helpers import (
 )
 from helpers import (
     make_eval_repo,
+    skill_markdown,
     stub_claude,
 )
 from helpers import (
@@ -1057,31 +1058,75 @@ class RunnerOutcomeContractTests(unittest.TestCase):
                                             codex_cmd="codex exec --json", claude_bin=str(claude_bin), timeout=30))
             self.assertIn("token from claude", (claude_runs / run_dir / "output.md").read_text(encoding="utf-8"))
 
+    def _fake_codex(self, root: Path, probe: Path) -> str:
+        fake_codex = root / "fake_codex.py"
+        fake_codex.write_text(
+            "import json, pathlib, sys\n_ = sys.stdin.read()\n"
+            f"pathlib.Path({str(probe)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+            "pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('token')\n"
+            "print(json.dumps({'role': 'assistant', 'content': 'trace'}))\n"
+            "print('config echo:', *sys.argv[1:], file=sys.stderr)\n",
+            encoding="utf-8")
+        return f"{sys.executable} {fake_codex}"
+
+    def _host_skill(self, home: Path) -> Path:
+        skill_md = home / ".agents" / "skills" / "host-only" / "SKILL.md"
+        skill_md.parent.mkdir(parents=True)
+        skill_md.write_text(skill_markdown("host-only"), encoding="utf-8")
+        return skill_md
+
     def test_codex_answer_run_hides_host_skills_from_the_model(self):
         # An isolated CODEX_HOME alone still lists every skill under the
         # operator's ~/.agents/skills and the account's codex_apps MCP server.
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            host_skill = self._host_skill(root / "home")
             tasks, run_dir = self._one_with_skill_task(root)
             probe = root / "argv.json"
-            fake_codex = root / "fake_codex.py"
-            fake_codex.write_text(
-                "import json, pathlib, sys\n_ = sys.stdin.read()\n"
-                f"pathlib.Path({str(probe)!r}).write_text(json.dumps(sys.argv[1:]))\n"
-                "pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('token')\n"
-                "print(json.dumps({'role': 'assistant', 'content': 'trace'}))\n",
-                encoding="utf-8")
             runs = root / "agent-codex"
-            sb.run_agent(argparse.Namespace(agent="codex", tasks=str(tasks), runs=str(runs), model="gpt-mini",
-                                            codex_cmd=f"{sys.executable} {fake_codex}", claude_bin="claude", timeout=30))
+            with mock.patch.dict(os.environ, {"HOME": str(root / "home")}):
+                sb.run_agent(argparse.Namespace(agent="codex", tasks=str(tasks), runs=str(runs), model="gpt-mini",
+                                                codex_cmd=self._fake_codex(root, probe), claude_bin="claude", timeout=30))
             argv = json.loads(probe.read_text(encoding="utf-8"))
-            self.assertEqual(argv[:13], [
+            self.assertEqual(argv[:15], [
                 "--json", "--model", "gpt-mini", "--skip-git-repo-check", "--ephemeral",
                 "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only",
-                "-c", "skills.include_instructions=false", "--disable", "apps"])
+                "-c", "skills.bundled.enabled=false",
+                "-c", f'skills.config=[{{path="{host_skill}",enabled=false}}]',
+                "--disable", "apps"])
             env = json.loads((runs / run_dir / "environment.json").read_text(encoding="utf-8"))
-            self.assertEqual(env["context_isolation"],
-                             ["-c", "skills.include_instructions=false", "--disable", "apps"])
+            self.assertEqual(env["context_isolation"], [
+                "-c", "skills.bundled.enabled=false",
+                "-c", "skills.config=<1 host skill(s) disabled>",
+                "--disable", "apps"])
+            saved = {path.name: path.read_text(encoding="utf-8")
+                     for path in (runs / run_dir).rglob("*") if path.is_file()}
+            self.assertIn("config echo:", "".join(saved.values()))
+            self.assertEqual([name for name, text in saved.items() if str(host_skill) in text], [])
+
+    def test_codex_answer_run_in_a_workspace_that_mounts_skills_keeps_them_listed(self):
+        # skills.include_instructions=false drops the whole skill catalog,
+        # including skills under the workspace's own .agents/skills.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            host_skill = self._host_skill(root / "home")
+            ws = root / "ws"
+            (ws / ".agents" / "skills" / "mounted").mkdir(parents=True)
+            (ws / ".agents" / "skills" / "mounted" / "SKILL.md").write_text(
+                skill_markdown("mounted"), encoding="utf-8")
+            probe = root / "argv.json"
+            with mock.patch.dict(os.environ, {"HOME": str(root / "home")}):
+                result = sb.codex_cli_invoke("$mounted do it", codex_cmd=self._fake_codex(root, probe), cwd=ws)
+            argv = json.loads(probe.read_text(encoding="utf-8"))
+            self.assertEqual(argv[7:13], [
+                "-c", "skills.bundled.enabled=false",
+                "-c", f'skills.config=[{{path="{host_skill}",enabled=false}}]',
+                "--disable", "apps"])
+            self.assertNotIn("skills.include_instructions=false", argv)
+            self.assertEqual(result["environment"]["context_isolation"], [
+                "-c", "skills.bundled.enabled=false",
+                "-c", "skills.config=<1 host skill(s) disabled>",
+                "--disable", "apps"])
 
     def test_codex_cleanup_race_preserves_artifacts_and_next_task(self):
         with tempfile.TemporaryDirectory() as td:

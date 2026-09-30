@@ -455,21 +455,23 @@ class VerdictSchemaTests(unittest.TestCase):
             "answer": '{"passed":true}', "stderr": "", "returncode": 0,
             "cost_usd": 0.02, "usage": {"input_tokens": 2, "output_tokens": 1},
         }
-        claude_result = {
-            **base_result, "context_isolation": list(sb.CLAUDE_CONTEXT_ISOLATION_ARGS),
-        }
+        claude_isolation = ["--setting-sources", "project", "--strict-mcp-config",
+                            "--settings", '{"disableBundledSkills":true}']
+        claude_result = {**base_result, "context_isolation": claude_isolation}
         with mock.patch.object(sb, "claude_cli_invoke", return_value=claude_result):
             claude = sb.claude_judge_invoke(
                 "prompt", judge_model="sonnet", claude_bin="claude",
                 assertion_schema=assertion_schema, extra_args=None,
                 explore_hint=None)
         self.assertEqual(
-            claude.metadata.get("context_isolation"),
-            tuple(sb.CLAUDE_CONTEXT_ISOLATION_ARGS))
+            claude.metadata.get("context_isolation"), tuple(claude_isolation))
 
+        codex_isolation = ["-c", "skills.bundled.enabled=false",
+                           "-c", "skills.config=<1 host skill(s) disabled>",
+                           "--disable", "apps"]
         codex_result = {
             **base_result, "model": "codex/gpt-mini",
-            "environment": {"context_isolation": list(sb.CODEX_CONTEXT_ISOLATION_ARGS)},
+            "environment": {"context_isolation": codex_isolation},
         }
         with mock.patch.object(sb, "codex_cli_invoke", return_value=codex_result):
             codex = sb.codex_judge_invoke(
@@ -477,7 +479,7 @@ class VerdictSchemaTests(unittest.TestCase):
                 assertion_schema=assertion_schema, explore_hint=None)
         self.assertEqual(
             codex.metadata.get("environment", {}).get("context_isolation"),
-            tuple(sb.CODEX_CONTEXT_ISOLATION_ARGS))
+            tuple(codex_isolation))
 
     def test_shell_judge_uses_the_same_typed_boundary(self):
         invocation = jc.JudgeInvocation(
