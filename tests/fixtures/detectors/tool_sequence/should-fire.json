@@ -59,10 +59,10 @@
       }
     },
     {
-      "note": "subset mode fires when an expected call never ran",
+      "note": "superset mode fires when an expected call never ran",
       "assertion": {
         "type": "tool_sequence",
-        "mode": "subset",
+        "mode": "superset",
         "expected": ["Read", "WebSearch"]
       },
       "output": "done",
@@ -77,10 +77,10 @@
       }
     },
     {
-      "note": "superset mode fires when the trajectory ran a call outside the listed set",
+      "note": "subset mode fires when the trajectory ran a call outside the listed set",
       "assertion": {
         "type": "tool_sequence",
-        "mode": "superset",
+        "mode": "subset",
         "expected": ["Read"]
       },
       "output": "done",
@@ -99,7 +99,7 @@
       "note": "min_f1 fires when the mode is satisfied but overlap quality is too low",
       "assertion": {
         "type": "tool_sequence",
-        "mode": "subset",
+        "mode": "superset",
         "expected": ["Read"],
         "min_f1": 0.9
       },

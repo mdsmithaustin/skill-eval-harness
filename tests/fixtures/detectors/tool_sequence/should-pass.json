@@ -42,10 +42,10 @@
       }
     },
     {
-      "note": "subset mode: every expected call ran, extra steps allowed",
+      "note": "superset mode: every expected call ran, extra steps allowed",
       "assertion": {
         "type": "tool_sequence",
-        "mode": "subset",
+        "mode": "superset",
         "expected": ["Read", "Write"]
       },
       "output": "done",
@@ -62,10 +62,10 @@
       }
     },
     {
-      "note": "superset mode: actual trajectory skips a listed step, never exceeds it",
+      "note": "subset mode: actual trajectory skips a listed step, never exceeds it",
       "assertion": {
         "type": "tool_sequence",
-        "mode": "superset",
+        "mode": "subset",
         "expected": ["Read", "Write", "Grep"]
       },
       "output": "done",

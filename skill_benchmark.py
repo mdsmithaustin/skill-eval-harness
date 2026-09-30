@@ -279,9 +279,17 @@ PROCESS_ASSERTIONS = {
     "tool_count_le",
     "no_repeated_command_loop",
 }
-# tool_sequence: expected ⊆ actual (extras allowed) for "subset", actual ⊆
-# expected (nothing unlisted ran) for "superset" — named from the manifest
-# author's point of view, not the mathematical operand order.
+# tool_sequence mode naming follows jevals (_evals.py's TrajectoryMatch) and
+# LangChain agentevals (subset.py/superset.py): the subject is the ACTUAL
+# trajectory, not the manifest's expected list. "subset" = actual ⊆ expected
+# (only calls on the list ran; some listed calls may have been skipped).
+# "superset" = actual ⊇ expected (every listed call ran; extra calls beyond
+# the list are allowed). Unlike jevals/agentevals, which compare plain sets,
+# this repo keeps multiset (Counter) semantics throughout, so a repeated call
+# still has to be covered with its multiplicity. One consequence worth
+# knowing: an empty actual trajectory trivially satisfies "subset" for any
+# `expected` (the empty multiset is a subset of everything), but it fails
+# "superset" unless `expected` is also empty.
 TOOL_SEQUENCE_MODES = {"strict", "unordered", "subset", "superset"}
 EFFICIENCY_ASSERTIONS = {
     "total_tokens_le",
@@ -1144,9 +1152,10 @@ def validate_case_assertion(cid: str, label: str, index: int, assertion: Any, pa
             die(f"{where} tool_call max_count must be >= min_count")
     if atype == "tool_sequence":
         expected = assertion.get("expected")
-        if (not isinstance(expected, list)
-                or not all(isinstance(x, str) and x for x in expected)):
-            die(f"{where} tool_sequence expected must be a list of non-empty strings")
+        if (not isinstance(expected, list) or not expected
+                or not all(isinstance(x, str) and x.strip() for x in expected)):
+            die(f"{where} tool_sequence expected must be a non-empty list of non-blank "
+                f"strings; assert no tools ran with tool_count_le and max: 0 instead")
         mode = assertion.get("mode", "strict")
         if mode not in TOOL_SEQUENCE_MODES:
             die(f"{where} tool_sequence mode must be one of {sorted(TOOL_SEQUENCE_MODES)}")
@@ -6547,14 +6556,23 @@ TRAJECTORY_STEP_TYPES = {"command", "tool_call", "file_read", "file_write", "ski
 
 
 def event_tool_key(event: dict[str, Any]) -> str:
-    """One casefolded identity per trajectory step, stable across providers.
+    """One casefolded identity per trajectory step. NOT stable across providers.
 
-    normalize_trace_record already projects Claude (name=Bash/Read/Write/Skill),
-    Codex (tool/tool_name/toolName), and Pi (toolName) into the same `name`
-    field before grading runs, so a named event's key is just that name. A
-    nameless shell command normalizes to "bash" (matching the fallback the
-    tool_call expected_no_call selector already used); any other nameless
-    typed event falls back to its own type.
+    normalize_trace_record already projects each provider's own field (Claude's
+    name=Bash/Read/Write/Edit/Skill; Codex's item type, or its mcp tool name;
+    Pi's toolName; Gemini's tool_name; Vibe's function name) into the same
+    `name` field before grading runs, so a named event's key is just that
+    name, casefolded. But the names themselves differ by provider: Claude and
+    Pi key file/skill steps as read/write/edit/skill, Codex keys a file edit
+    as file_change (not edit) and has no web_search key at all, Gemini keys
+    them as run_shell_command/read_file/write_file/activate_skill, and Vibe
+    only recognizes skill/read_file/grep (any other function name, including
+    "bash", fails to normalize and is dropped with a protocol error). A
+    manifest's `expected` list is written against one provider's key
+    vocabulary, not a shared one — see the per-provider table in
+    docs/authoring-evals.md. A nameless shell command normalizes to "bash"
+    (matching the fallback the tool_call expected_no_call selector already
+    used); any other nameless typed event falls back to its own type.
     """
     name = event.get("name")
     if name:
@@ -7327,7 +7345,11 @@ def process_or_efficiency_assertion_result(
             # Sequence match against a reference trajectory (jevals TrajectoryMatch/
             # ToolCallF1 semantics, adapted to this repo's multiset convention —
             # call_set already treats repeats as significant, so unordered/subset/
-            # superset here use Counter multisets rather than plain sets).
+            # superset here use Counter multisets rather than plain sets, unlike
+            # jevals'/agentevals' plain-set comparison). The subject of "subset"
+            # and "superset" is always the ACTUAL trajectory, matching jevals and
+            # LangChain agentevals: subset means actual ⊆ expected, superset means
+            # actual ⊇ expected — see TOOL_SEQUENCE_MODES above for the full rule.
             actual = [event_tool_key(e) for e in events
                       if e.get("type") in TRAJECTORY_STEP_TYPES and event_is_completed(e)]
             expected = [str(x).casefold() for x in assertion.get("expected", [])]
@@ -7343,20 +7365,20 @@ def process_or_efficiency_assertion_result(
             elif mode == "unordered":
                 mode_ok = actual_counts == expected_counts
             elif mode == "subset":
-                # expected ⊆ actual: every expected call (with multiplicity) must
-                # appear; the trajectory may run extra steps beyond it.
-                mode_ok = all(count <= actual_counts.get(key, 0) for key, count in expected_counts.items())
-            else:
-                # superset: actual ⊆ expected — nothing ran that wasn't listed;
-                # the trajectory may skip some of the listed steps.
+                # actual ⊆ expected: every completed call (with multiplicity) must
+                # be on the expected list; the trajectory may skip listed steps.
                 mode_ok = all(count <= expected_counts.get(key, 0) for key, count in actual_counts.items())
+            else:
+                # superset: actual ⊇ expected — every expected call (with
+                # multiplicity) ran; the trajectory may run extra steps beyond it.
+                mode_ok = all(count <= actual_counts.get(key, 0) for key, count in expected_counts.items())
             min_f1 = assertion.get("min_f1")
             f1_ok = min_f1 is None or f1 >= float(min_f1)
             passed = mode_ok and f1_ok
             evidence = (
                 f"mode={mode}; actual={actual}; expected={expected}; "
-                f"precision={precision:.2f}; recall={recall:.2f}; f1={f1:.2f}"
-                + (f"; min_f1={min_f1:.2f}" if min_f1 is not None else ""))
+                f"precision={precision:.2f}; recall={recall:.2f}; f1={f1:.4f}"
+                + (f"; min_f1={min_f1:.4f}" if min_f1 is not None else ""))
             return passed, evidence, f1
 
     if atype == "total_tokens_le":
