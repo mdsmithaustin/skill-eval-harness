@@ -33,7 +33,7 @@ Pick the success goals the skill owns. The harness stores these per case in `suc
 | Goal | The question it answers | Typical graders |
 |---|---|---|
 | `outcome` | Did it produce the right result? | `contains*`, `regex`, `file_exists`, `json_field_equals`, `golden_output`, `similarity`, `structured_output`, `script` |
-| `process` | Did it work the right way? | `skill_invoked`, `command_ran`, `command_order`, `tool_call`, `tool_count_le` |
+| `process` | Did it work the right way? | `skill_invoked`, `command_ran`, `command_order`, `tool_call`, `tool_sequence`, `tool_count_le` |
 | `style` | Is it phrased and structured well? | `judge` / `rubric` / `factuality`, with anchored `graded_dimensions` |
 | `efficiency` | Did it stay within budget? | `total_tokens_le`, `elapsed_seconds_le`, `command_count_le` |
 
@@ -237,6 +237,50 @@ production incident:
 The path matters as much as the answer. A case can produce the right final text for the wrong
 reason, so grade the trajectory (`skill_invoked`, `command_order`) alongside the output, and treat
 a right answer reached the wrong way as a finding, not a pass.
+
+### `tool_sequence`: checking the trajectory shape
+
+`command_order` and `tool_call`'s `order` check that some calls happened in some sequence.
+`tool_sequence` checks the *whole* completed trajectory against a reference list, in one of
+four modes. Each call is keyed by its normalized, casefolded name (a nameless shell command
+is `bash`), so the same `expected` list reads the same whether the run was Claude, Codex, or
+Pi.
+
+`strict` — the trajectory must match exactly, in order, with no extra or missing steps:
+
+```json
+{"type": "tool_sequence", "mode": "strict", "expected": ["bash", "Read", "Write"]}
+```
+
+`unordered` — same calls, same counts, any order:
+
+```json
+{"type": "tool_sequence", "mode": "unordered", "expected": ["Read", "Read", "Write"]}
+```
+
+`subset` — every expected call ran (with its multiplicity); extra steps are fine:
+
+```json
+{"type": "tool_sequence", "mode": "subset", "expected": ["Read", "Write"]}
+```
+
+`superset` — nothing ran outside the expected list; some listed steps may be skipped:
+
+```json
+{"type": "tool_sequence", "mode": "superset", "expected": ["Read", "Write", "Grep"]}
+```
+
+Every mode reports `precision`/`recall`/`f1` over the multiset overlap of `actual` and
+`expected`, visible in the assertion's evidence and as its `score`. Add `min_f1` when the
+mode alone is too forgiving — for example a `subset` case where you also want most of the
+trajectory's calls to be relevant, not just the required ones present amid noise:
+
+```json
+{"type": "tool_sequence", "mode": "subset", "expected": ["Read", "Write"], "min_f1": 0.6}
+```
+
+A missing `events.json` fails this assertion closed (`unavailable`), never passing it by
+default the way an absent check would.
 
 ## Pitfalls that cost us rounds
 
