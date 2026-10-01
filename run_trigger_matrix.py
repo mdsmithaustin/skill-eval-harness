@@ -458,7 +458,7 @@ class ClaudeAdapter(AgentAdapter):
             "command": executable_identity(self.claude_bin),
             "max_turns": self.max_turns,
             "allowed_tools": ["Skill", "Read", "Glob", "Grep"],
-            "isolation_policy": "isolated config when portable auth exists; otherwise normal config; project setting source only, no MCP, no bundled skills",
+            "isolation_policy": "isolated config when portable auth exists; otherwise normal config; project setting source only, no MCP, no bundled skills, no auto memory",
             "required_observations": {"config_isolated": True},
         }
 

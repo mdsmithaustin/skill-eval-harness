@@ -28,6 +28,11 @@ def stream_text(records: list[dict]) -> str:
     return "\n".join(json.dumps(r) for r in records) + "\n"
 
 
+# Hides ~/.claude but keeps the workspace's .claude/skills and .claude/agents.
+CLAUDE_ISOLATION = ["--setting-sources", "project", "--strict-mcp-config",
+                    "--settings", '{"disableBundledSkills":true,"autoMemoryEnabled":false}']
+
+
 def _manifest(rp: Path, cases):
     # Shared builder: writes the demo skill AND the manifest.
     return make_eval_repo(rp.parent, skill_name="demo", cases=cases)
@@ -435,10 +440,32 @@ class RunClaudeAdapterTests(unittest.TestCase):
                                              claude_bin=str(stub), timeout=60))
             self.assertEqual(json.loads(probe.read_text())["argv"], [
                 "-p", "--output-format", "stream-json", "--verbose",
-                "--no-session-persistence", "--safe-mode", "--disable-slash-commands",
+                "--no-session-persistence", *CLAUDE_ISOLATION,
                 "--model", "claude-haiku-4-5-20251001"])
             env = json.loads((runs / rows[0]["run_dir"] / "environment.json").read_text())
-            self.assertEqual(env["context_isolation"], ["--safe-mode", "--disable-slash-commands"])
+            self.assertEqual(env["context_isolation"], CLAUDE_ISOLATION)
+
+    def test_answer_run_in_a_workspace_that_mounts_skills_keeps_them_loadable(self):
+        # --safe-mode and --disable-slash-commands also hide the workspace's own
+        # .claude/skills and .claude/agents, so a `/<skill>` prompt found nothing.
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            ws = td / "ws"
+            (ws / ".claude" / "skills" / "mounted").mkdir(parents=True)
+            (ws / ".claude" / "skills" / "mounted" / "SKILL.md").write_text(
+                "---\nname: mounted\ndescription: d\n---\nbody\n")
+            (ws / ".claude" / "agents").mkdir()
+            (ws / ".claude" / "agents" / "helper.md").write_text(
+                "---\nname: helper\ndescription: d\n---\nbody\n")
+            probe = td / "argv.json"
+            stub = _stub_claude_stream(td / "claude_stream_stub.py", probe_path=probe)
+            result = sb.claude_cli_invoke("/mounted do it", isolation=sb.ContextIsolation.WORKSPACE,
+                                          claude_bin=str(stub), cwd=ws,
+                                          output_format="stream-json")
+            self.assertEqual(json.loads(probe.read_text())["argv"], [
+                "-p", "--output-format", "stream-json", "--verbose",
+                "--no-session-persistence", *CLAUDE_ISOLATION])
+            self.assertEqual(result["context_isolation"], CLAUDE_ISOLATION)
 
 
 class ClaudeJudgeAndPanelTests(unittest.TestCase):
@@ -455,6 +482,8 @@ class ClaudeJudgeAndPanelTests(unittest.TestCase):
                     "prompt": "grade it"}
             sb.run_one_judge_task(task, None, judge_model="claude-haiku-4-5-20251001",
                                   claude_bin=str(stub))
+            # A judge never needs a project skill, so it sees no workspace
+            # skills, agents, or instruction files either.
             self.assertEqual(json.loads(probe.read_text())["argv"][:9], [
                 "-p", "--output-format", "json", "--no-session-persistence",
                 "--safe-mode", "--disable-slash-commands",

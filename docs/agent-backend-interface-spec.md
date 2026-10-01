@@ -60,7 +60,7 @@ The point of the adapter work is not only feature parity. The refactor should ma
 
 | Surface | Current Claude behavior |
 |---|---|
-| Answer runs | `skill-benchmark run-claude` runs prepared rows through `claude -p --output-format stream-json --verbose --no-session-persistence --safe-mode --disable-slash-commands`. |
+| Answer runs | `skill-benchmark run-claude` runs prepared rows through `claude -p --output-format stream-json --verbose --no-session-persistence --setting-sources project --strict-mcp-config --settings '{"disableBundledSkills":true,"autoMemoryEnabled":false}'`. |
 | Workspace isolation | Each row runs in a temp workspace with only prepared skill/input files mounted. |
 | Variants | Supports `with_skill`, `without_skill`, `old_skill`, and materialized `ablation:<id>` via prepared rows. |
 | Output contract | Writes `output.md`, `metadata.json`, normalized `events.json`/`metrics.json` where available. |

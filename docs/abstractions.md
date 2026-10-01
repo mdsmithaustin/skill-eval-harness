@@ -221,10 +221,10 @@ a manifest gets neither key. The claim does not feed `execution_valid`.
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:10866`), Claude (`run_claude:11055`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:10871`), Claude (`run_claude:11110`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:13834`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4127` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:13912`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:4128` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -241,7 +241,8 @@ Before a native provider subprocess starts, `invocation_contracts.py` constructs
 `ProcessInvocationPlan`: immutable argv, stdin, working directory, environment, a positive
 `TimeoutSeconds`, and an optional `redact_output` function that the subprocess owner applies to the
 whole captured stdout and stderr before it caps stderr (the Codex trigger adapter uses it to strip
-host skill paths). `run_argv_capture` accepts only that plan and returns the closed
+host skill paths). `redact_stdout=False` limits it to stderr, which Codex answer runs use because
+their stdout is the trace a `tool_sequence` assertion reads. `run_argv_capture` accepts only that plan and returns the closed
 `InvocationResult` lifecycle. The answer backend receives the smaller `InvocationRequest`, whose
 model and timeout are also precise values. Provider adapters can choose wire formats, but they
 cannot omit or disagree about process inputs after the plan boundary. The same module owns the
@@ -323,7 +324,7 @@ those pairs; missing/ineligible arms remain in `pairing` diagnostics and duplica
 `build_slice_summary` breaks results down
 by domain, difficulty, trigger type, and success goal. Case flags mark saturated, no-lift,
 flaky, and with-skill-failed cases. These flags, the leakage lint
-(`prompt_assertion_leakage_findings:854`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:855`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as

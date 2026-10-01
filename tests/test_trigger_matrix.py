@@ -1004,7 +1004,7 @@ class TriggerContextIsolationTests(unittest.TestCase):
         with self.host_env(CLAUDE_CONFIG_DIR=str(self.root / "user-claude")):
             row = self.run_row(tm.ClaudeAdapter(claude_bin=str(claude)))
         expected = ["--setting-sources", "project", "--strict-mcp-config",
-                    "--settings", '{"disableBundledSkills":true}']
+                    "--settings", '{"disableBundledSkills":true,"autoMemoryEnabled":false}']
         self.assertEqual(self.recorded_isolation(row), expected)
         argv = self.seen_argv()
         start = argv.index("--setting-sources")
