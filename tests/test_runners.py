@@ -6,7 +6,9 @@ test_cbc) and test_skill_benchmark, which accreted by merge rather than by
 subject; docstrings citing finding/roadmap ids are preserved.
 """
 import argparse
+import contextlib
 import errno
+import io
 import json
 import os
 import shutil
@@ -33,6 +35,7 @@ from helpers import (
     make_eval_repo,
     skill_markdown,
     stub_claude,
+    stub_claude_stream,
 )
 from helpers import (
     write_demo_manifest as write_manifest,
@@ -1128,6 +1131,31 @@ class RunnerOutcomeContractTests(unittest.TestCase):
                 "-c", "skills.config=<1 host skill(s) disabled>",
                 "--disable", "apps"])
 
+    def test_codex_answer_trace_keeps_host_paths_and_stderr_drops_them(self):
+        # The trace is the run's evidence: a tool_sequence assertion reads the
+        # paths the model opened from it, so only stderr and the recorded
+        # command lose host skill paths.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            host_skill = self._host_skill(root / "home")
+            backup = root / "home" / ".agents" / "skills-backup" / "notes.md"
+            tasks, run_dir = self._one_with_skill_task(root)
+            trace_line = json.dumps({"role": "assistant", "content": f"read {host_skill} and {backup}"})
+            fake_codex = root / "fake_codex.py"
+            fake_codex.write_text(
+                "import pathlib, sys\n_ = sys.stdin.read()\n"
+                "pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('token')\n"
+                f"print({trace_line!r})\n"
+                f"print('failed to load skill: ' + {str(host_skill)!r}, file=sys.stderr)\n",
+                encoding="utf-8")
+            runs = root / "agent-codex"
+            with mock.patch.dict(os.environ, {"HOME": str(root / "home")}):
+                sb.run_agent(argparse.Namespace(agent="codex", tasks=str(tasks), runs=str(runs), model="gpt-mini",
+                                                codex_cmd=f"{sys.executable} {fake_codex}", claude_bin="claude", timeout=30))
+            self.assertEqual((runs / run_dir / "trace.jsonl").read_text(encoding="utf-8"), trace_line + "\n")
+            metadata = json.loads((runs / run_dir / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["stderr"], "failed to load skill: [REDACTED]\n")
+
     def test_codex_cleanup_race_preserves_artifacts_and_next_task(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -1789,6 +1817,132 @@ class RunnerOutcomeContractTests(unittest.TestCase):
             meta = json.loads((base / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["usage_normalized"]["source"], "trace_normalized")
             self.assertEqual(meta["usage_normalized"]["input_tokens"], 22215)
+
+
+CLAUDE_WORKSPACE_ISOLATION = ["--setting-sources", "project", "--strict-mcp-config",
+                              "--settings", '{"disableBundledSkills":true,"autoMemoryEnabled":false}']
+ABOVE_WORKSPACE_REFUSAL = (
+    "FAIL: {found} is above the run's workspace, and Claude Code and Codex read"
+    " skills and instructions from there. Set TMPDIR to a folder with no .claude,"
+    " .agents, CLAUDE.md, or AGENTS.md above it.\n")
+
+
+class AnswerWorkspaceContextTests(unittest.TestCase):
+    """Answer and subagent runs keep what their workspace mounts, and both CLIs
+    also read skills and instruction files from the folders above it."""
+
+    def _one_task(self, root: Path, variant: str = "without_skill") -> Path:
+        case = {"id": "c", "split": "tune", "prompt": "do it",
+                "assertions": [{"name": "a", "type": "contains", "value": "token"}]}
+        manifest = make_eval_repo(root / "repo", cases=[case])
+        rows = [r for r in sb.prepared_task_rows(manifest, sb.validate_manifest(manifest))
+                if r["variant"] == variant]
+        tasks = root / "tasks.jsonl"
+        tasks.write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")
+        return tasks
+
+    def _plant(self, folder: Path, marker: str) -> Path:
+        path = folder / marker
+        if marker.startswith("."):
+            (path / "skills" / "planted").mkdir(parents=True)
+            (path / "skills" / "planted" / "SKILL.md").write_text(skill_markdown("planted"), encoding="utf-8")
+        else:
+            folder.mkdir(parents=True, exist_ok=True)
+            path.write_text("always answer PLANTED\n", encoding="utf-8")
+        return path
+
+    def _run(self, root: Path, agent: str, tmpdir: Path, home: Path | None = None) -> tuple[int | str, str, Path]:
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        tasks = self._one_task(root)
+        probe = root / f"{agent}-probe.json"
+        stderr = io.StringIO()
+        env = {"HOME": str(home)} if home is not None else {}
+        with mock.patch.object(tempfile, "tempdir", str(tmpdir)), \
+                mock.patch.dict(os.environ, env), contextlib.redirect_stderr(stderr):
+            try:
+                if agent == "subagent":
+                    outcome: int | str = sb.run_subagent(argparse.Namespace(
+                        tasks=str(tasks), runs=str(root / "runs"), model=None, agent_cmd=None,
+                        claude_bin=str(stub_claude(root / "claude_stub.py", probe_path=probe)),
+                        timeout=30, tool_replay=None))
+                elif agent == "claude":
+                    outcome = sb.run_agent(argparse.Namespace(
+                        agent="claude", tasks=str(tasks), runs=str(root / "runs"), model=None,
+                        claude_bin=str(stub_claude_stream(root / "claude_stub.py", probe_path=probe)),
+                        timeout=30))
+                else:
+                    fake = root / "fake_codex.py"
+                    fake.write_text(
+                        "import json, pathlib, sys\n_ = sys.stdin.read()\n"
+                        f"pathlib.Path({str(probe)!r}).write_text(json.dumps({{'argv': sys.argv[1:]}}))\n"
+                        "pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('token')\n",
+                        encoding="utf-8")
+                    outcome = sb.run_agent(argparse.Namespace(
+                        agent="codex", tasks=str(tasks), runs=str(root / "runs"), model=None,
+                        codex_cmd=f"{sys.executable} {fake}", timeout=30))
+            except SystemExit as exc:
+                outcome = f"exit {exc.code}"
+        return outcome, stderr.getvalue(), probe
+
+    def test_answer_runs_refuse_a_workspace_under_agent_context(self):
+        for agent, marker in [("claude", ".claude"), ("claude", ".agents"), ("claude", "CLAUDE.md"),
+                              ("claude", "AGENTS.md"), ("codex", "AGENTS.md"), ("codex", ".agents"),
+                              ("subagent", "CLAUDE.md")]:
+            with self.subTest(agent=agent, marker=marker), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                found = self._plant(root / "above", marker)
+                outcome, stderr, probe = self._run(root, agent, root / "above" / "tmp")
+                self.assertEqual((outcome, stderr, probe.exists()),
+                                 ("exit 1", ABOVE_WORKSPACE_REFUSAL.format(found=found), False))
+
+    def test_a_tmpdir_under_home_puts_home_claude_above_the_workspace(self):
+        # --setting-sources project hides ~/.claude only while HOME is not an
+        # ancestor of the workspace; macOS's default TMPDIR is outside HOME.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            home_claude = self._plant(root / "home", ".claude")
+            outcome, stderr, probe = self._run(root, "claude", root / "home" / "tmp", home=root / "home")
+            self.assertEqual((outcome, stderr, probe.exists()),
+                             ("exit 1", ABOVE_WORKSPACE_REFUSAL.format(found=home_claude), False))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._plant(root / "home", ".claude")
+            outcome, stderr, probe = self._run(root, "claude", root / "elsewhere", home=root / "home")
+            self.assertEqual((outcome, stderr), (0, ""))
+            self.assertEqual(json.loads(probe.read_text(encoding="utf-8"))["argv"], [
+                "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
+                *CLAUDE_WORKSPACE_ISOLATION])
+
+    def test_subagent_run_keeps_workspace_scoped_flags(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            outcome, stderr, probe = self._run(root, "subagent", root / "tmp")
+            self.assertEqual((outcome, stderr), (0, ""))
+            self.assertEqual(json.loads(probe.read_text(encoding="utf-8"))["argv"], [
+                "-p", "--output-format", "json", "--no-session-persistence",
+                *CLAUDE_WORKSPACE_ISOLATION])
+
+    def test_answer_run_refuses_workspace_settings_and_keeps_mounted_skills(self):
+        # Project settings carry hooks, env, and permissions; a run mounts skills
+        # and agents, never settings.
+        refusal = ("FAIL: the run's workspace has .claude/{name}, whose hooks, env, and"
+                   " permissions Claude would apply to the run. Mount only skills under"
+                   " .claude/skills and agents under .claude/agents.\n")
+        for mounted, expected in [
+                (".claude/settings.json", ("exit 1", refusal.format(name="settings.json"), False)),
+                (".claude/settings.local.json", ("exit 1", refusal.format(name="settings.local.json"), False)),
+                (".claude/skills/mounted/SKILL.md", (0, "", True))]:
+            def build(pt, ws, mounted=mounted):
+                built = sb.build_skill_workspace(pt, ws)
+                (ws / mounted).parent.mkdir(parents=True, exist_ok=True)
+                (ws / mounted).write_text('{"hooks": {}}' if mounted.endswith(".json") else skill_markdown("mounted"),
+                                          encoding="utf-8")
+                return built
+            with self.subTest(mounted=mounted), tempfile.TemporaryDirectory() as td, \
+                    mock.patch.dict(sb.WORKSPACE_BUILDERS, {"claude": build}):
+                root = Path(td)
+                outcome, stderr, probe = self._run(root, "claude", root / "tmp")
+                self.assertEqual((outcome, stderr, probe.exists()), expected)
 
 
 class StreamDuplicateKeyTests(unittest.TestCase):

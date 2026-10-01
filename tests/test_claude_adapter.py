@@ -481,9 +481,11 @@ class ClaudeJudgeAndPanelTests(unittest.TestCase):
                     "prompt": "grade it"}
             sb.run_one_judge_task(task, None, judge_model="claude-haiku-4-5-20251001",
                                   claude_bin=str(stub))
-            self.assertEqual(json.loads(probe.read_text())["argv"][:12], [
+            # A judge never needs a project skill, so it sees no workspace
+            # skills, agents, or instruction files either.
+            self.assertEqual(json.loads(probe.read_text())["argv"][:9], [
                 "-p", "--output-format", "json", "--no-session-persistence",
-                *CLAUDE_ISOLATION,
+                "--safe-mode", "--disable-slash-commands",
                 "--model", "claude-haiku-4-5-20251001", "--tools"])
 
     def test_native_claude_judge_stamps_model_and_cost(self):
