@@ -459,7 +459,8 @@ class RunClaudeAdapterTests(unittest.TestCase):
                 "---\nname: helper\ndescription: d\n---\nbody\n")
             probe = td / "argv.json"
             stub = _stub_claude_stream(td / "claude_stream_stub.py", probe_path=probe)
-            result = sb.claude_cli_invoke("/mounted do it", claude_bin=str(stub), cwd=ws,
+            result = sb.claude_cli_invoke("/mounted do it", isolation=sb.ContextIsolation.WORKSPACE,
+                                          claude_bin=str(stub), cwd=ws,
                                           output_format="stream-json")
             self.assertEqual(json.loads(probe.read_text())["argv"], [
                 "-p", "--output-format", "stream-json", "--verbose",

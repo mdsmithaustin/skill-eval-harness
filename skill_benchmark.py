@@ -45,6 +45,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass as _dataclass
 from decimal import ROUND_CEILING, Decimal
+from enum import Enum
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn, Protocol, cast
@@ -6701,8 +6702,10 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
     env = None if plan.environment is None else dict(plan.environment)
     timeout = int(plan.timeout_s)
     input_text = plan.input_text
-    redact = plan.redact_output or (lambda text: text)
-    def _wire_text(value: Any) -> tuple[str, bool]:
+    redact_stderr = plan.redact_output or (lambda text: text)
+    redact_stdout = redact_stderr if plan.redact_stdout else (lambda text: text)
+
+    def _wire_text(value: Any, redact: Callable[[str], str]) -> tuple[str, bool]:
         if value is None:
             return "", True
         if isinstance(value, bytes):
@@ -6777,7 +6780,7 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
         )
     except (OSError, ValueError) as exc:
         return InvocationOutcome.spawn_failed(
-            stderr=redact(f"{type(exc).__name__}: {exc}")[:4000],
+            stderr=redact_stderr(f"{type(exc).__name__}: {exc}")[:4000],
             elapsed_ms=int((time.time() - start) * 1000),
         )
     deadline = time.monotonic() + timeout
@@ -6809,8 +6812,8 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
             if leader_exited:
                 break
         else:
-            stdout, stdout_utf8_valid = _wire_text(out)
-            stderr, stderr_utf8_valid = _wire_text(err)
+            stdout, stdout_utf8_valid = _wire_text(out, redact_stdout)
+            stderr, stderr_utf8_valid = _wire_text(err, redact_stderr)
             stderr, returncode, _timed_out = stderr[:4000], proc.returncode, False
             communication_complete = True
             break
@@ -6851,9 +6854,9 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                 "capture pipes remained open; non-POSIX reader threads were abandoned"
             )
             group_cleanup = {**group_cleanup, "pipe_drain": pipe_action, "warning": pipe_warning}
-        stdout, stdout_utf8_valid = _wire_text(out or exc.stdout)
+        stdout, stdout_utf8_valid = _wire_text(out or exc.stdout, redact_stdout)
         stderr, stderr_utf8_valid = _wire_text(
-            err or exc.stderr or str(exc))
+            err or exc.stderr or str(exc), redact_stderr)
         stderr = stderr[:4000]
         returncode = proc.returncode if leader_exited and proc.returncode is not None else 124
     else:
@@ -10603,6 +10606,7 @@ class CodexBackend(AgentBackend):
     def invoke_answer(self, request: InvocationRequest, **options: Any) -> AnswerOutcome:
         result = codex_cli_invoke(
             request.prompt,
+            isolation=ContextIsolation.WORKSPACE,
             model=request.model,
             codex_cmd=str(options.get("codex_cmd") or CODEX_ANSWER_DEFAULT_CMD),
             timeout=request.timeout_s,
@@ -10646,7 +10650,8 @@ class ClaudeBackend(AgentBackend):
         # trace, so Claude answer runs carry the same tool-use trajectory
         # evidence the trigger matrix already observes — without it every
         # process assertion on a Claude run fails closed for missing evidence.
-        result = claude_cli_invoke(request.prompt, model=request.model, claude_bin=str(options.get("claude_bin") or "claude"),
+        result = claude_cli_invoke(request.prompt, isolation=ContextIsolation.WORKSPACE,
+                                   model=request.model, claude_bin=str(options.get("claude_bin") or "claude"),
                                    timeout=request.timeout_s, cwd=str(request.workspace), output_format="stream-json")
         usage, cost_usd = claude_result_usage(result)
         return RunnerOutcome(
@@ -10960,22 +10965,71 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     }
 
 
-# Answer, judge, and trigger runs all use these. Without them `claude -p`
+class ContextIsolation(Enum):
+    """What a Claude or Codex run may load besides its prompt.
+
+    SEALED loads no skills, agents, instruction files, hooks, or MCP servers,
+    from the host or the workspace; a judge never needs a project skill.
+    WORKSPACE hides the operator's host context but keeps the skills and agents
+    a run mounts in its own workspace, for answer and subagent runs."""
+
+    SEALED = "sealed"
+    WORKSPACE = "workspace"
+
+
+# Answer, subagent, and trigger runs use these. Without them `claude -p`
 # loads the operator's ~/.claude skills, agents, CLAUDE.md, hooks, plugins, and
 # MCP servers. Loading only the project setting source drops those and keeps
 # the skills and agents a run mounts under its workspace's .claude/;
 # --strict-mcp-config drops every MCP server, claude.ai connectors included;
 # disableBundledSkills drops the skills Claude Code ships; autoMemoryEnabled
 # false keeps the memory under ~/.claude/projects/<cwd> out of the prompt and
-# stops the run writing there. --safe-mode is not
-# used: it also hides the workspace's own skills and agents.
+# stops the run writing there.
 CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS = (
     "--setting-sources", "project", "--strict-mcp-config",
     "--settings", '{"disableBundledSkills":true,"autoMemoryEnabled":false}',
 )
 
+# --safe-mode keeps OAuth working (unlike --bare) and hides workspace skills
+# and agents too; --disable-slash-commands also drops the skills Claude Code
+# bundles.
+CLAUDE_ISOLATION_ARGS = {
+    ContextIsolation.SEALED: ("--safe-mode", "--disable-slash-commands"),
+    ContextIsolation.WORKSPACE: CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS,
+}
 
-def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str = "claude",
+# Claude Code reads CLAUDE.md, CLAUDE.local.md, and .claude/ from every folder
+# above its cwd; Codex reads AGENTS.md, AGENTS.override.md, and .agents/skills
+# up to the repository root. Compared casefolded, as macOS's default file
+# system matches them.
+AGENT_CONTEXT_NAMES = frozenset({
+    ".claude", ".agents", "claude.md", "claude.local.md", "agents.md", "agents.override.md"})
+
+
+def require_clean_workspace_context(workspace: Path) -> None:
+    """Refuse a WORKSPACE run that would load context its workspace did not mount.
+
+    A TMPDIR inside a repository that carries a skill, or under a HOME with
+    ~/.claude, would hand the without_skill arm that skill. A workspace's own
+    .claude/settings.json would run its hooks, env, and permissions."""
+    for folder in [*Path(os.path.abspath(workspace)).parents, *Path(os.path.realpath(workspace)).parents]:
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for name in names:
+            if name.casefold() in AGENT_CONTEXT_NAMES:
+                die(f"{folder / name} is above the run's workspace, and Claude Code and Codex read"
+                    " skills and instructions from there. Set TMPDIR to a folder with no .claude,"
+                    " .agents, CLAUDE.md, or AGENTS.md above it.")
+    for name in ("settings.json", "settings.local.json"):
+        if (Path(workspace) / ".claude" / name).exists():
+            die(f"the run's workspace has .claude/{name}, whose hooks, env, and permissions"
+                " Claude would apply to the run. Mount only skills under .claude/skills and"
+                " agents under .claude/agents.")
+
+
+def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | None = None, claude_bin: str = "claude",
                       timeout: int = DEFAULT_RUNNER_TIMEOUT_S, extra_args: list[str] | None = None, cwd: str | Path | None = None,
                       output_format: str = "json") -> dict[str, Any]:
     """Single owner for invoking Claude via `claude -p`.
@@ -10994,13 +11048,16 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
     if output_format == "stream-json":
         argv.append("--verbose")
     argv.append("--no-session-persistence")
-    argv += CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS
+    isolation_args = CLAUDE_ISOLATION_ARGS[isolation]
+    argv += isolation_args
     if model:
         argv += ["--model", model]
     if extra_args:
         argv += list(extra_args)
 
     def invoke(cwd_path: Path | str) -> InvocationResult:
+        if isolation is ContextIsolation.WORKSPACE:
+            require_clean_workspace_context(Path(cwd_path))
         return run_argv_capture(ProcessInvocationPlan.from_values(
             argv,
             input_text=prompt,
@@ -11018,7 +11075,7 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
         return {"answer": "", "cost_usd": None, "usage": {}, "parse_error": None,
                 "returncode": 124, "timed_out": True, "elapsed_ms": result.elapsed_ms,
                 "stderr": result.stderr, "raw_response": result.stdout, "command": command,
-                "context_isolation": list(CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS),
+                "context_isolation": list(isolation_args),
                 "invocation_state": result.invocation_state.value,
                 "trace_utf8_valid": result.stdout_utf8_valid}
     parsed = (
@@ -11045,7 +11102,7 @@ def claude_cli_invoke(prompt: str, *, model: str | None = None, claude_bin: str 
         # run's trace; in envelope mode they preserve the failure diagnostics.
         "raw_response": result.stdout,
         "command": command,
-        "context_isolation": list(CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS),
+        "context_isolation": list(isolation_args),
     })
     return parsed
 
@@ -11421,7 +11478,18 @@ def codex_trigger_context_isolation_args() -> tuple[list[str], list[str]]:
             args(f"skills.config=<{len(host_skills)} host skill(s) disabled>"))
 
 
-def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = "codex exec", timeout: int = DEFAULT_RUNNER_TIMEOUT_S,
+def codex_context_isolation_args(isolation: ContextIsolation) -> tuple[list[str], list[str]]:
+    """Codex flags for `isolation`, and the form a row records.
+
+    SEALED hides the whole skill catalog, which an isolated CODEX_HOME would
+    otherwise fill from ~/.agents/skills and Codex's bundled skills."""
+    if isolation is ContextIsolation.SEALED:
+        sealed = ["-c", "skills.include_instructions=false", "--disable", "apps"]
+        return sealed, list(sealed)
+    return codex_trigger_context_isolation_args()
+
+
+def codex_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | None = None, codex_cmd: str = "codex exec", timeout: int = DEFAULT_RUNNER_TIMEOUT_S,
                       output_schema: dict[str, Any] | None = None, cwd: str | Path | None = None,
                       sandbox: str = "read-only", json_events: bool = True) -> dict[str, Any]:
     """Native Codex invocation for judge-style calls.
@@ -11453,16 +11521,21 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
         argv.append("--ignore-rules")
     if sandbox and "--sandbox" not in argv:
         argv += ["--sandbox", sandbox]
-    isolation_args, recorded_isolation = codex_trigger_context_isolation_args()
+    isolation_args, recorded_isolation = codex_context_isolation_args(isolation)
     argv += isolation_args
-    # Codex echoes a rejected skills.config back, host paths included.
-    redact_host_paths = codex_host_path_redactor()
+    # Codex echoes a rejected skills.config back, host paths included. Its
+    # stdout is the run's trace, the evidence a tool_sequence assertion reads,
+    # so only stderr and the recorded command lose host paths.
+    redact_host_paths = (codex_host_path_redactor() if isolation is ContextIsolation.WORKSPACE
+                         else None)
     tmp = Path(tempfile.mkdtemp(prefix="codex-invoke-"))
     cleanup_meta: dict[str, Any]
     try:
         env, env_meta = codex_env_for_home(tmp / "codex-home")
         invoke_cwd = Path(cwd) if cwd is not None else tmp / "cwd"
         invoke_cwd.mkdir(parents=True, exist_ok=True)
+        if isolation is ContextIsolation.WORKSPACE:
+            require_clean_workspace_context(invoke_cwd)
         last_message = tmp / "last-message.json"
         if "--output-last-message" in argv:
             idx = argv.index("--output-last-message")
@@ -11485,6 +11558,7 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
             environment=env,
             timeout_s=timeout,
             redact_output=redact_host_paths,
+            redact_stdout=False,
         ))
         last_message_found = last_message.exists()
         last_message_utf8_valid = True
@@ -11510,6 +11584,8 @@ def codex_cli_invoke(prompt: str, *, model: str | None = None, codex_cmd: str = 
             }
     recorded = dict(zip(isolation_args, recorded_isolation))
     command = " ".join(shlex.quote(recorded.get(a, a)) for a in argv)
+    if redact_host_paths is not None:
+        command = redact_host_paths(command)
     usage: dict[str, Any] = {}
     cost_usd = None
     protocol_error: str | None = (
@@ -12503,13 +12579,17 @@ def sanitized_run_copy(run_base: Path, dest: Path) -> Path | None:
     are dropped entirely: copytree with the default symlinks=False DEREFERENCES a
     link, copying the target's CONTENT into `dest` under the link's (possibly
     innocent) name, which would smuggle an oracle past the name denylist — so a link
-    named 'notes.txt' -> grading.json must never be followed. Returns dest, or None
-    when run_base is absent (nothing to explore)."""
+    named 'notes.txt' -> grading.json must never be followed. Every
+    AGENT_CONTEXT_NAMES entry (CLAUDE.md, AGENTS.md, .claude/, .agents/, ...) is
+    dropped at any depth too: outputs/ holds whatever the candidate wrote, and
+    the judge's CLI could read instructions or skills from them. Returns dest,
+    or None when run_base is absent (nothing to explore)."""
     if not run_base or not run_base.exists():
         return None
 
     def ignore(dirpath: str, names: list[str]) -> list[str]:
-        dropped = [n for n in names if any(mk in n.lower() for mk in JUDGE_LEAK_MARKERS)]
+        dropped = [n for n in names if any(mk in n.lower() for mk in JUDGE_LEAK_MARKERS)
+                   or n.casefold() in AGENT_CONTEXT_NAMES]
         # A symlink can deref to an oracle under an innocent name (copytree follows it
         # by default), so never carry one into the copy.
         dropped += [n for n in names if n not in dropped and os.path.islink(os.path.join(dirpath, n))]
@@ -12528,8 +12608,8 @@ def claude_judge_invoke(prompt: str, *, judge_model: str | None, claude_bin: str
     if explore_hint is None:
         claude_extra_args += ["--tools", ""]
     claude_extra_args += ["--json-schema", json.dumps(assertion_schema, separators=(",", ":"))]
-    res = claude_cli_invoke(prompt, model=judge_model, claude_bin=claude_bin,
-                            extra_args=claude_extra_args, cwd=explore_hint)
+    res = claude_cli_invoke(prompt, isolation=ContextIsolation.SEALED, model=judge_model,
+                            claude_bin=claude_bin, extra_args=claude_extra_args, cwd=explore_hint)
     provider_error = res.get("provider_error")
     returncode = cast(int, res.get("returncode"))
     context_isolation = res.get("context_isolation")
@@ -12557,8 +12637,8 @@ def claude_judge_invoke(prompt: str, *, judge_model: str | None, claude_bin: str
 def codex_judge_invoke(prompt: str, *, judge_model: str | None, codex_cmd: str,
                        assertion_schema: dict[str, Any], explore_hint: str | None,
                        **_: Any) -> JudgeInvocation:
-    res = codex_cli_invoke(prompt, model=judge_model, codex_cmd=codex_cmd,
-                           output_schema=assertion_schema, cwd=explore_hint)
+    res = codex_cli_invoke(prompt, isolation=ContextIsolation.SEALED, model=judge_model,
+                           codex_cmd=codex_cmd, output_schema=assertion_schema, cwd=explore_hint)
     usage = res.get("usage") if isinstance(res.get("usage"), dict) else None
     returncode = cast(int, res.get("returncode"))
     provider_error = res.get("provider_error")
@@ -13846,8 +13926,8 @@ def run_subagent(args: argparse.Namespace) -> int:
             # The prompt lists skill/input paths relative to `workspace` (build_task_prompt),
             # so the CLI must run there too — an unset cwd falls back to an empty
             # claude-invoke-cwd- temp dir where those paths resolve to nothing.
-            result = claude_cli_invoke(prompt, model=model, claude_bin=claude_bin, timeout=timeout,
-                                       cwd=str(workspace))
+            result = claude_cli_invoke(prompt, isolation=ContextIsolation.WORKSPACE, model=model,
+                                       claude_bin=claude_bin, timeout=timeout, cwd=str(workspace))
             usage, cost_usd = claude_result_usage(result)
             # The subagent-response contract has no separate cost field (unlike
             # RunnerOutcome), so cost rides inside usage, same as every other

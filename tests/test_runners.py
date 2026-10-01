@@ -1119,7 +1119,8 @@ class RunnerOutcomeContractTests(unittest.TestCase):
                 skill_markdown("mounted"), encoding="utf-8")
             probe = root / "argv.json"
             with mock.patch.dict(os.environ, {"HOME": str(root / "home")}):
-                result = sb.codex_cli_invoke("$mounted do it", codex_cmd=self._fake_codex(root, probe), cwd=ws)
+                result = sb.codex_cli_invoke("$mounted do it", isolation=sb.ContextIsolation.WORKSPACE,
+                                             codex_cmd=self._fake_codex(root, probe), cwd=ws)
             argv = json.loads(probe.read_text(encoding="utf-8"))
             self.assertEqual(argv[7:13], [
                 "-c", "skills.bundled.enabled=false",
@@ -1226,7 +1227,7 @@ class RunnerOutcomeContractTests(unittest.TestCase):
             with mock.patch.object(sb.shutil, "rmtree", side_effect=fail_until_final_fallback), \
                  mock.patch.object(sb.time, "sleep", return_value=None):
                 result = sb.codex_cli_invoke(
-                    "prompt", codex_cmd=f"{sys.executable} {fake_codex}",
+                    "prompt", isolation=sb.ContextIsolation.WORKSPACE, codex_cmd=f"{sys.executable} {fake_codex}",
                     cwd=root / "workspace", timeout=30)
 
             self.assertEqual(result["answer"], "token")
@@ -1339,7 +1340,7 @@ class RunnerOutcomeContractTests(unittest.TestCase):
 
             with mock.patch.object(sb.tempfile, "mkdtemp", side_effect=record_codex_temp):
                 result = sb.codex_cli_invoke(
-                    "prompt", codex_cmd=f"{sys.executable} {fake_codex}",
+                    "prompt", isolation=sb.ContextIsolation.WORKSPACE, codex_cmd=f"{sys.executable} {fake_codex}",
                     cwd=root / "workspace", timeout=30)
 
             self.assertEqual(result["answer"], "token")
@@ -1371,7 +1372,7 @@ class RunnerOutcomeContractTests(unittest.TestCase):
                 encoding="utf-8")
 
             result = sb.codex_cli_invoke(
-                "prompt", codex_cmd=f"{sys.executable} {fake_codex}",
+                "prompt", isolation=sb.ContextIsolation.WORKSPACE, codex_cmd=f"{sys.executable} {fake_codex}",
                 cwd=root / "workspace", timeout=30)
 
             self.assertEqual(result["answer"], "token")
@@ -1395,7 +1396,7 @@ class RunnerOutcomeContractTests(unittest.TestCase):
                 encoding="utf-8")
             started = time.monotonic()
             result = sb.codex_cli_invoke(
-                "prompt", codex_cmd=f"{sys.executable} {fake_codex}",
+                "prompt", isolation=sb.ContextIsolation.WORKSPACE, codex_cmd=f"{sys.executable} {fake_codex}",
                 cwd=root / "workspace", timeout=2)
             elapsed = time.monotonic() - started
 
@@ -1423,7 +1424,7 @@ class RunnerOutcomeContractTests(unittest.TestCase):
                 encoding="utf-8")
             started = time.monotonic()
             result = sb.codex_cli_invoke(
-                "prompt", codex_cmd=f"{sys.executable} {fake_codex}",
+                "prompt", isolation=sb.ContextIsolation.WORKSPACE, codex_cmd=f"{sys.executable} {fake_codex}",
                 cwd=root / "workspace", timeout=2)
             elapsed = time.monotonic() - started
             child_pid = int(pid_file.read_text(encoding="utf-8"))

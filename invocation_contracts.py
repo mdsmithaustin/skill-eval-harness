@@ -159,6 +159,8 @@ class ProcessInvocationPlan:
     # Applied to the whole captured stdout and stderr before the owner caps
     # them, so a redacted span can never be cut in half first.
     redact_output: Callable[[str], str] | None = field(default=None, repr=False)
+    # False leaves stdout as captured when it is the run's evidence.
+    redact_stdout: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.argv, tuple):
@@ -193,6 +195,8 @@ class ProcessInvocationPlan:
             object.__setattr__(self, "environment", MappingProxyType(copied))
         if self.redact_output is not None and not callable(self.redact_output):
             raise TypeError("process redact_output must be callable or None")
+        if not isinstance(self.redact_stdout, bool):
+            raise TypeError("process redact_stdout must be boolean")
 
     @classmethod
     def from_values(
@@ -204,6 +208,7 @@ class ProcessInvocationPlan:
         timeout_s: int,
         environment: Mapping[str, str] | None = None,
         redact_output: Callable[[str], str] | None = None,
+        redact_stdout: bool = True,
     ) -> ProcessInvocationPlan:
         if isinstance(argv, (str, bytes)):
             raise TypeError("process argv must be a sequence of argument strings")
@@ -214,6 +219,7 @@ class ProcessInvocationPlan:
             timeout_s=TimeoutSeconds(timeout_s),
             environment=environment,
             redact_output=redact_output,
+            redact_stdout=redact_stdout,
         )
 
 
