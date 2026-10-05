@@ -63,7 +63,7 @@ def replay(root: Path, baseline: dict[str, bytes], executable: frozenset[str],
            patch: Path) -> dict[str, tuple[bytes, bool]]:
     git = shutil.which("git")
     if git is None:
-        raise unittest.SkipTest("git is not installed")
+        raise AssertionError("workspace replay tests require git")
     tree = root / "replay"
     tree.mkdir()
     write_tree(tree, baseline)

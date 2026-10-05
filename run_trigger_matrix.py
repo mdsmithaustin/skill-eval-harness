@@ -16,7 +16,8 @@ Five adapters ship:
               haiku / sonnet / opus aliases. The skill mounts as a project
               skill; loading is detected from the Skill tool-use event and,
               as a fallback, path evidence of the model reading the mounted
-              SKILL.md. It uses an isolated CLAUDE_CONFIG_DIR when auth can be
+              SKILL.md. It uses an isolated CLAUDE_CONFIG_DIR beside the
+              workspace when auth comes from the environment or can be
               copied, otherwise preserves the normal Claude config so
               OAuth/keychain logins still work.
 - `codex`   — Codex CLI (`codex exec --json` by default), with skills mounted
@@ -31,9 +32,9 @@ Five adapters ship:
 - `vibe`    — Mistral Vibe CLI (`vibe --prompt ...`), with skills mounted under
               workspace `.agents/skills` and `VIBE_HOME` isolated outside the
               model workdir. Native `skill` tool calls are primary evidence.
-- `pi`      — the Pi coding agent, same mount/detect approach as
-              run_pi_trigger_eval.py (which remains a compatibility wrapper
-              for the Pi-only entry point).
+- `pi`      — the Pi coding agent, with skills under an isolated
+              PI_CODING_AGENT_DIR. `skill-pi-trigger-eval` is this matrix
+              with the Pi adapter alone.
 - `stub`    — offline and deterministic: "triggers" iff the query shares
               enough words with the mounted description, and emits the same
               stream shape the detector reads. It exists so the whole matrix
@@ -49,9 +50,8 @@ An adapter whose detect() matches a mounted skill by name must also set
 skill_name_source, or exposed_skill_names() hands it no names and it can
 never trigger by name.
 
-Every number this emits is a RAW autonomous-trigger measurement (the same
-evidence class as run_pi_trigger_eval.py) — a rate to steer description edits,
-not a provenance-verified causal comparison.
+Every number this emits is a RAW autonomous-trigger measurement — a rate to
+steer description edits, not a provenance-verified causal comparison.
 """
 from __future__ import annotations
 
@@ -87,19 +87,11 @@ from agent_capabilities import (
     surface_implementations,
     surface_option_values,
 )
-from run_pi_trigger_eval import (
-    PI_RECORDED_CONTEXT_ISOLATION,
-    cases_from_manifest,
-    eval_rows_from_args,
-    load_manifest,
-    pi_argv,
-    pi_invocation_outcome,
-    seed_config_dir,
-    skill_name_from_manifest,
-    validate_trigger_rows,
-)
+from completion_contracts import StopClass, StopObservation, claude_result_stop
+from content_digests import file_sha256
 from skill_benchmark import (
     CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS,
+    CODEX_HOME_FILES,
     VALID_SPLITS,
     VIBE_DEFAULT_CMD,
     VIBE_READ_ONLY_TOOLS,
@@ -110,6 +102,8 @@ from skill_benchmark import (
     build_canonical_skill_tree,
     build_vibe_cli_argv,
     canonical_json_sha256,
+    canonical_trigger_query,
+    claude_terminal_result_index,
     codex_env_for_home,
     codex_host_path_redactor,
     codex_rollout_skill_loads,
@@ -117,9 +111,13 @@ from skill_benchmark import (
     detect_trigger_detection,
     detect_trigger_records,
     event_is_completed,
+    expected_trigger_polarity,
     frontmatter_value,
     invoke_argv_with_timeout,
+    is_trigger_case,
+    iter_cases,
     iter_json_objects,
+    load_manifest_source,
     locate_codex_rollout,
     materialize_trigger_ablation,
     mount_skill_tree,
@@ -155,6 +153,7 @@ from trigger_contracts import (
     TriggerEvidenceKind,
     TriggerExpectation,
     TriggerObservation,
+    TriggerQueryDefinition,
     TriggerRepetitionIdentity,
     parse_skill_constraints,
     validated_trigger_model,
@@ -168,17 +167,150 @@ from trigger_reporting import (
 
 STOPWORDS = {"this", "that", "with", "have", "what", "your", "from", "each", "then", "them", "were", "will", "would", "should", "could", "please", "give", "tell"}
 DEFAULT_CODEX_CMD = CODEX_TRIGGER_DEFAULT_CMD
+# Seconds one agent run gets. Part of the experimental protocol, so every
+# entry point (this CLI and skill-pi-trigger-eval) defaults to this one value.
+DEFAULT_TIMEOUT_S = 240
 CLAUDE_PORTABLE_AUTH_FILES = (".credentials.json",)
 SENSITIVE_WORKSPACE_FILES = (
-    ".trigger-config/.credentials.json",
     ".codex/auth.json",
     ".codex/config.toml",
-    ".pi-config/auth.json",
-    ".pi-config/settings.json",
-    ".pi-config/APPEND_SYSTEM.md",
     ".vibe-home/.env",
 )
-SENSITIVE_ENV_VARS = ("MISTRAL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CODEX_ACCESS_TOKEN")
+SENSITIVE_ENV_VARS = ("MISTRAL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CODEX_ACCESS_TOKEN",
+                      "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
+# Claude Code authenticates from these without any config file, so a fresh,
+# empty CLAUDE_CONFIG_DIR still logs in (PR #85 verified it on 2.1.281 behind
+# an ANTHROPIC_BASE_URL auth proxy). A wrong guess fails closed: the run
+# reports a provider failure and is an incomplete observation.
+CLAUDE_ENV_AUTH_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                        "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+# Environment-managed skill sources that would put an organisation's skills in
+# front of the model beside the one under test; dropped from isolated runs.
+CLAUDE_ENV_SKILL_SOURCES = ("CLAUDE_CODE_SYNC_SKILLS",)
+
+
+# Trigger rows: the manifest's trigger cases or an --eval-set file, validated
+# once for every agent.
+
+def load_manifest(path: Path) -> dict[str, Any]:
+    """The harness's manifest loader (JSON or YAML, dataset files resolved,
+    clean FAIL on bad input) — never a private json.loads fork that would make
+    YAML manifests or dataset_files work in `benchmark` but break here."""
+    return load_manifest_source(path)
+
+
+def skill_name_from_manifest(manifest: dict[str, Any]) -> str:
+    return str(manifest.get("skill_name") or "skill-under-test")
+
+
+def trigger_query_from_case(case: dict[str, Any]) -> str:
+    prompt = str(case.get("prompt") or case.get("scenario") or case.get("id"))
+    # Shared manifests often store trigger fixtures as a meta-classification prompt:
+    # "Trigger decision eval. User prompt: <real prompt>\n\nReturn exactly ...".
+    # Autonomous trigger testing must run the real user prompt, not the meta prompt,
+    # otherwise skill discovery is being tested on the wrong task.
+    match = re.search(r"User prompt:\s*(.*?)(?:\n\s*\n\s*Return exactly|$)", prompt, re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return prompt
+
+
+def cases_from_manifest(manifest: dict[str, Any], split: str | None) -> list[dict[str, Any]]:
+    out = []
+    # iter_cases (not raw manifest["cases"]) so dataset-templated trigger cases
+    # fan out here exactly as they do for validation, audit, and the benchmark.
+    for c in iter_cases(manifest, split):
+        if is_trigger_case(c):
+            prompt = trigger_query_from_case(c)
+            # Single shared resolver with the manifest audit (skill_benchmark), so the
+            # eval and the audit cannot disagree on a case's expected polarity.
+            should = expected_trigger_polarity(c) == "TRIGGER"
+            out.append({"query_id": str(c.get("id") or ""),
+                        "query": prompt, "should_trigger": should,
+                        **{key: c[key] for key in ("expected_skills", "forbidden_skills") if key in c}})
+    return out
+
+
+def validate_trigger_rows(rows: Any, source: str,
+                          declared_ids: frozenset[SkillId] = frozenset()) -> list[dict[str, Any]]:
+    """Validate the shared trigger-row JSON boundary.
+
+    `should_trigger` must already be a JSON boolean; using Python truthiness here
+    would turn strings like "false" into True and invert the measurement."""
+    if not isinstance(rows, list):
+        raise SystemExit(f"{source}: expected a list of trigger rows or an object with evals/queries")
+    out: list[dict[str, Any]] = []
+    seen: dict[str, TriggerQueryDefinition] = {}
+    seen_definitions: dict[str, tuple[str, bool, SkillTriggerConstraints | None]] = {}
+    for i, row in enumerate(rows, 1):
+        if not isinstance(row, dict) or not all(isinstance(key, str) for key in row):
+            raise SystemExit(f"{source}: row {i} must be an object with string keys")
+        row = {key: value for key, value in row.items() if isinstance(key, str)}
+        query = row.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise SystemExit(f"{source}: row {i} query must be a non-empty string")
+        should_trigger = row.get("should_trigger")
+        if not isinstance(should_trigger, bool):
+            raise SystemExit(f"{source}: row {i} should_trigger must be true or false")
+        if ("query_id" in row and "id" in row
+                and row.get("query_id") != row.get("id")):
+            raise SystemExit(
+                f"{source}: row {i} has conflicting query_id and id aliases")
+        try:
+            constraints = parse_skill_constraints(row, declared_ids)
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(f"{source}: row {i}: {exc}") from exc
+        query_id = row.get("query_id", row.get("id"))
+        if query_id is None or query_id == "":
+            definition = [query, should_trigger]
+            if constraints is not None:
+                definition.append(constraints.as_dict())
+            encoded = json.dumps(definition, ensure_ascii=False,
+                                 separators=(",", ":")).encode("utf-8")
+            query_id = "query-" + hashlib.sha256(encoded).hexdigest()
+        if not isinstance(query_id, str) or not query_id.strip():
+            raise SystemExit(f"{source}: row {i} query_id must be a non-empty string")
+        authored = (query, should_trigger, constraints)
+        if query_id in seen:
+            if seen[query_id] != authored:
+                raise SystemExit(
+                    f"{source}: duplicate query_id {query_id!r} identifies conflicting queries")
+            raise SystemExit(f"{source}: duplicate query_id {query_id!r}")
+        inference_query = canonical_trigger_query(query)
+        prior = seen_definitions.setdefault(
+            inference_query, (query_id, should_trigger, constraints))
+        if prior != (query_id, should_trigger, constraints):
+            raise SystemExit(
+                f"{source}: canonical query aliases alias the same query and must share one query ID, polarity, and scope; "
+                f"got {prior!r} and {(query_id, should_trigger, constraints)!r}")
+        seen[query_id] = authored
+        normalized = dict(row)
+        normalized.pop("id", None)
+        normalized["query_id"] = query_id
+        normalized["query"] = query
+        normalized["should_trigger"] = should_trigger
+        if constraints is not None:
+            normalized.update(constraints.as_dict())
+        out.append(normalized)
+    return out
+
+
+def eval_rows_from_args(args: Any, manifest_path: Path) -> list[dict[str, Any]]:
+    """Resolve the trigger rows for a runner invocation: an explicit --eval-set
+    file ({query, should_trigger} rows, bare list or under evals/queries), else
+    the manifest's kind:'trigger' cases. Shared with run_trigger_matrix."""
+    manifest = load_manifest(manifest_path)
+    declared_ids = frozenset(SkillId(value) for value in manifest.get("skill_paths", []))
+    if args.eval_set:
+        rows = strict_json_loads(Path(args.eval_set).read_text(encoding="utf-8"))
+        if isinstance(rows, dict):
+            aliases = [key for key in ("evals", "queries") if key in rows]
+            if len(aliases) != 1:
+                raise SystemExit(
+                    f"{args.eval_set}: expected exactly one of evals or queries")
+            rows = rows[aliases[0]]
+        return validate_trigger_rows(rows, str(args.eval_set), declared_ids)
+    return validate_trigger_rows(cases_from_manifest(manifest, args.split), str(manifest_path), declared_ids)
 
 
 class SkillNameSource(Enum):
@@ -226,12 +358,12 @@ def validate_attribution_names(
 ) -> None:
     if adapter.skill_name_source is None:
         return
-    names = {key: adapter.exposed_skill_names(mounted_skill_names([path]))[0]
+    names = {key: adapter.exposed_skill_names(mounted_skill_names([path]))
              for key, path in mounted.items()}
     for key in constraints.selected:
-        name = names[key]
-        if sum(value == name for value in names.values()) > 1:
-            raise ValueError(f"{adapter.name} cannot attribute duplicate exposed skill name {name!r} to {key!r}")
+        for name in names[key]:
+            if sum(name in value for value in names.values()) > 1:
+                raise ValueError(f"{adapter.name} cannot attribute duplicate exposed skill name {name!r} to {key!r}")
 
 
 def require_agent_capabilities(name: str) -> Any:
@@ -272,16 +404,29 @@ def codex_stream_protocol_error(stdout: str) -> str | None:
 
 
 def vibe_stream_protocol_error(stdout: str) -> str | None:
-    """Require a final assistant answer so empty event objects cannot certify absence."""
+    """Require a final assistant answer so empty event objects cannot certify
+    absence. The Vibe trace dialect owns that rule for each of Vibe's record
+    shapes, as it does for answer runs."""
     error = json_stream_protocol_error(stdout, "vibe")
     if error is not None:
         return error
     records, _ = parse_trace_jsonl_text(stdout, strict=False)
-    terminal_answer = (records[-1].get("role") == "assistant"
-                       and isinstance(records[-1].get("content"), str)
-                       and bool(records[-1]["content"].strip()))
-    if not terminal_answer:
+    if trace_dialect_for("vibe").protocol_error(records, None) is not None:
         return "Vibe JSON stream must end with one non-empty assistant response"
+    return None
+
+
+def claude_competing_skills(stdout: str, workspace: Path) -> list[str] | None:
+    """The skills Claude Code's init event offered the model, minus the ones
+    this run mounted; None when the stream carries no init skill list."""
+    mounted_dir = workspace / ".claude" / "skills"
+    mounted = {path.name for path in mounted_dir.iterdir() if path.is_dir()} if mounted_dir.is_dir() else set()
+    for event in iter_json_objects(stdout, strict=False):
+        if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init":
+            skills = event.get("skills")
+            if not isinstance(skills, list):
+                return None
+            return sorted({skill for skill in skills if isinstance(skill, str)} - mounted)
     return None
 
 
@@ -354,8 +499,10 @@ def _secret_values_from_files(paths: Iterable[Path]) -> list[str]:
     return secrets
 
 
-def workspace_secret_values(workspace: Path) -> list[str]:
-    secrets = _secret_values_from_files(workspace / rel for rel in SENSITIVE_WORKSPACE_FILES)
+def cell_secret_values(adapter: AgentAdapter, workspace: Path) -> list[str]:
+    """Secret values in the cell's credential files, read after the run and
+    before release(), so a token the agent refreshed during the run counts."""
+    secrets = _secret_values_from_files(adapter.secret_files(workspace))
     # Longest first handles whole-file redaction before nested token values.
     return sorted({s for s in secrets if s}, key=len, reverse=True)
 
@@ -364,7 +511,9 @@ def ambient_secret_values() -> list[str]:
     secrets = [value for name in SENSITIVE_ENV_VARS if len(value := os.environ.get(name, "")) >= 8]
     codex_source = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
     vibe_source = Path(os.environ.get("VIBE_HOME", str(Path.home() / ".vibe")))
-    secrets.extend(_secret_values_from_files((codex_source / "auth.json", codex_source / "config.toml", vibe_source / ".env")))
+    secrets.extend(_secret_values_from_files((
+        codex_source / "auth.json", codex_source / "config.toml", vibe_source / ".env",
+        pi_source_config_dir() / "auth.json")))
     return sorted({s for s in secrets if s}, key=len, reverse=True)
 
 
@@ -390,9 +539,32 @@ def redact_sensitive_value(value: Any, secrets: list[str]) -> Any:
     return value
 
 
+def redact_invocation(invocation: InvocationOutcome, secrets: list[str]) -> InvocationOutcome:
+    """The invocation's wire text and metadata with every secret removed."""
+    return invocation.with_wire_text(
+        stdout=redact_sensitive_text(invocation.stdout, secrets),
+        stderr=redact_sensitive_text(invocation.stderr, secrets),
+        provider_error=(redact_sensitive_text(invocation.provider_error, secrets)
+                        if invocation.provider_error is not None else None),
+    ).with_metadata(redact_sensitive_value(dict(invocation.metadata), secrets))
+
+
+def redact_detection(detection: TriggerDetection, secrets: list[str]) -> TriggerDetection:
+    return TriggerDetection(tuple(
+        TriggerEvidence(item.kind, redact_sensitive_text(item.text, secrets))
+        for item in detection.evidence
+    ))
+
+
 def safe_trace_segment(text: str, fallback: str) -> str:
+    """A path-safe directory name for text. When sanitising changed it, a short
+    digest of the raw text keeps distinct values apart (`vendor/model-a` and
+    `vendor:model-a` both sanitise to `vendor-model-a`)."""
     label = safe_trace_label(text, fallback).strip(".-")
-    return label if label and label not in {".", ".."} else fallback
+    label = label if label and label not in {".", ".."} else fallback
+    if label != text:
+        label += "-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+    return label
 
 
 class AgentAdapter:
@@ -430,6 +602,15 @@ class AgentAdapter:
     def invoke(self, query: str, model: str | None, workspace: Path, timeout: int) -> InvocationOutcome:
         raise NotImplementedError
 
+    def release(self, workspace: Path) -> None:
+        """Remove anything mount() created outside the workspace. Called once
+        the cell ends, including when mounting or invoking failed."""
+
+    def secret_files(self, workspace: Path) -> list[Path]:
+        """Files holding the credentials this cell's agent runs with. They are
+        scanned for redaction after invoke() and before release()."""
+        return [workspace / rel for rel in SENSITIVE_WORKSPACE_FILES]
+
     def detect(self, invocation: InvocationOutcome, skill_names: list[str], copied: list[Path]) -> TriggerDetection:
         if isinstance(invocation.provider_payload, PiStream):
             return detect_trigger_records(
@@ -448,11 +629,16 @@ class AgentAdapter:
             source = inspect.getsource(type(self))
         except (OSError, TypeError):
             source = f"{type(self).__module__}.{type(self).__qualname__}"
+        module = type(self).__module__
+        if module == __name__ == "__main__":
+            # The documented direct-script entry point (`python3 run_trigger_matrix.py`)
+            # runs these same classes; name them by their canonical module.
+            module = "run_trigger_matrix"
         return {
-            "adapter": f"{type(self).__module__}.{type(self).__qualname__}",
+            "adapter": f"{module}.{type(self).__qualname__}",
             "agent": self.name,
             "implementation_sha256": "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest(),
-            "producer_sha256": "sha256:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "producer_sha256": "sha256:" + file_sha256(Path(__file__)),
             "trace_dialect": self.name,
             "required_observations": {},
         }
@@ -467,13 +653,30 @@ class ClaudeAdapter(AgentAdapter):
     skill_name_source = SkillNameSource.MOUNT_FOLDER
     default_models: list[str | None] = ["haiku", "sonnet", "opus"]
 
+    def exposed_skill_names(self, mounted: list[MountedSkillName]) -> list[str]:
+        return list(dict.fromkeys(name for skill in mounted
+                                  for name in (skill.folder, skill.frontmatter)))
+
     def __init__(self, claude_bin: str = "claude", max_turns: int = 6) -> None:
         self.claude_bin = claude_bin
         self.max_turns = max_turns
 
+    @staticmethod
+    def _config_dir(workspace: Path) -> Path:
+        # Beside the workspace, not in it: Claude runs with Read and Glob, and
+        # this directory holds the copied OAuth credentials.
+        return workspace.parent / f"{workspace.name}-claude-config"
+
     def mount(self, tree_dir: Path, workspace: Path) -> list[Path]:
         # Project skills: Claude Code discovers <cwd>/.claude/skills on its own.
         return self._mount_tree(tree_dir, workspace / ".claude" / "skills")
+
+    def release(self, workspace: Path) -> None:
+        shutil.rmtree(self._config_dir(workspace), ignore_errors=True)
+
+    def secret_files(self, workspace: Path) -> list[Path]:
+        return [*super().secret_files(workspace),
+                *(self._config_dir(workspace) / name for name in CLAUDE_PORTABLE_AUTH_FILES)]
 
     def protocol_parameters(self) -> dict[str, Any]:
         return {
@@ -482,16 +685,18 @@ class ClaudeAdapter(AgentAdapter):
             "max_turns": self.max_turns,
             "allowed_tools": ["Skill", "Read", "Glob", "Grep"],
             "isolation_policy": "isolated config when portable auth exists; otherwise normal config; project setting source only, no MCP, no bundled skills, no auto memory",
-            "required_observations": {"config_isolated": True},
+            "required_observations": {"config_isolated": True, "claude_config_outside_workdir": True},
         }
 
     def invoke(self, query: str, model: str | None, workspace: Path, timeout: int) -> InvocationOutcome:
-        # Use a fresh config dir when auth is portable, so personal config does
-        # not bleed into the run. Claude Code's current OAuth/keychain login is
-        # not file-seedable; pointing CLAUDE_CONFIG_DIR at an empty directory
-        # turns a valid login into "not logged in", so preserve the normal CLI
-        # config path in that case.
-        config_dir = workspace / ".trigger-config"
+        # Use a fresh config dir when auth is portable (environment credentials,
+        # or a seedable credentials file), so personal config and synced
+        # organisation skills do not compete with the skill under test. Claude
+        # Code's OAuth/keychain login is not file-seedable; pointing
+        # CLAUDE_CONFIG_DIR at an empty directory turns a valid login into "not
+        # logged in", so preserve the normal CLI config path in that case and
+        # say so in the metadata.
+        config_dir = self._config_dir(workspace)
         argv = [self.claude_bin, "-p", query, "--output-format", "stream-json", "--verbose",
                 "--max-turns", str(self.max_turns),
                 "--allowedTools", "Skill", "Read", "Glob", "Grep",
@@ -500,18 +705,29 @@ class ClaudeAdapter(AgentAdapter):
             argv += ["--model", model]
         env = os.environ.copy()
         config_isolated = False
-        if os.environ.get("ANTHROPIC_API_KEY") or seed_claude_config_dir(config_dir):
+        # Seed first: a credentials file still helps when the environment only
+        # names an endpoint (ANTHROPIC_BASE_URL) or carries a second login.
+        seeded = seed_claude_config_dir(config_dir)
+        if seeded or any(os.environ.get(name) for name in CLAUDE_ENV_AUTH_VARS):
+            config_dir.mkdir(parents=True, exist_ok=True)
             env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+            for name in CLAUDE_ENV_SKILL_SOURCES:
+                env.pop(name, None)
             config_isolated = True
         result = validate_invoke_result(
             self.name, self._run_argv(ProcessInvocationPlan.from_values(
                 argv, input_text="", cwd=workspace, timeout_s=timeout,
                 environment=env))
         )
-        metadata: dict[str, Any] = {
-            "config_isolated": config_isolated,
-            "context_isolation": list(CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS),
-        }
+        # Either config dir is outside the workdir: the isolated one beside it,
+        # or the user's own.
+        metadata: dict[str, Any] = {"config_isolated": config_isolated,
+                                    "claude_config_outside_workdir": True,
+                                    "context_isolation": list(CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS)}
+        competing = claude_competing_skills(result.stdout, workspace)
+        if competing is not None:
+            # Evidence, not inference: every other skill the model was offered.
+            metadata["competing_skills"] = competing
         if not config_isolated:
             metadata["config_isolation_warning"] = (
                 "Claude OAuth/keychain auth was not portable; preserved the normal Claude config, "
@@ -521,33 +737,40 @@ class ClaudeAdapter(AgentAdapter):
         # Hitting --max-turns exits nonzero, but the model HAD its window to
         # load the skill. The only legal non-zero completion uses this explicit transition.
         if (result.state is InvocationState.PROCESS_FAILED
-                and self._result_subtype(result.stdout) == "error_max_turns"):
+                and self._terminal_stop(result.stdout).stop_class is StopClass.TURN_LIMIT):
             result = result.as_agent_window_complete()
         if result.observation_complete:
             error = json_stream_protocol_error(result.stdout, self.name)
-            records, _ = parse_trace_jsonl_text(result.stdout, strict=False)
-            terminal = next((record for record in reversed(records)
-                             if record.get("type") == "result"), None)
+            terminal = self._terminal_record(result.stdout)
             if error is None and terminal is None:
-                error = "Claude JSON stream has no terminal result event"
+                error = ("Claude JSON stream must contain exactly one terminal result event, "
+                         "with no session content after it")
             if error is None:
+                records, _ = parse_trace_jsonl_text(result.stdout, strict=False)
                 _, metrics = normalize_trace_records(records, source="claude")
                 protocol_errors = metrics.get("trace_protocol_errors")
                 if isinstance(protocol_errors, list) and protocol_errors:
                     error = f"Claude JSON stream protocol error: {protocol_errors[0]}"
             if (error is None and isinstance(terminal, dict)
                     and terminal.get("is_error") is True
-                    and terminal.get("subtype") != "error_max_turns"):
+                    and claude_result_stop(terminal).stop_class is not StopClass.TURN_LIMIT):
                 error = "Claude terminal result reports an error"
             result = result.with_provider_error(error)
         return result
 
     @staticmethod
-    def _result_subtype(stdout: str) -> str | None:
-        for event in iter_json_objects(stdout, strict=False):
-            if isinstance(event, dict) and event.get("type") == "result":
-                return event.get("subtype")
-        return None
+    def _terminal_record(stdout: str) -> dict[str, Any] | None:
+        # claude_terminal_result_index owns which record ends a Claude stream,
+        # for the answer parser, the trace dialect and this adapter alike.
+        records, _ = parse_trace_jsonl_text(stdout, strict=False)
+        index = claude_terminal_result_index(records)
+        return records[index] if index is not None else None
+
+    @classmethod
+    def _terminal_stop(cls, stdout: str) -> StopObservation:
+        # completion_contracts owns what a Claude result event means; the
+        # answer runner reads the same classification.
+        return claude_result_stop(cls._terminal_record(stdout))
 
     def detect(self, invocation: InvocationOutcome, skill_names: list[str], copied: list[Path]) -> TriggerDetection:
         # Primary evidence: the Skill tool invoked with a mounted skill's name.
@@ -589,6 +812,13 @@ class CodexAdapter(AgentAdapter):
         # invoke() grants the skills directory only via --add-dir.
         return self._mount_tree(tree_dir, self._codex_home(workspace) / "skills")
 
+    def release(self, workspace: Path) -> None:
+        shutil.rmtree(self._codex_home(workspace), ignore_errors=True)
+
+    def secret_files(self, workspace: Path) -> list[Path]:
+        home = self._codex_home(workspace)
+        return [*super().secret_files(workspace), *(home / name for name in CODEX_HOME_FILES)]
+
     def protocol_parameters(self) -> dict[str, Any]:
         return {
             **super().protocol_parameters(),
@@ -609,33 +839,26 @@ class CodexAdapter(AgentAdapter):
             argv += ["--model", model]
         argv.append(query)
         env, meta = codex_env_for_home(codex_home)
-        # Codex names host skills in its own errors (a skill that fails to
-        # load, a directory it cannot scan, a rejected skills.config echoed
-        # back), so the subprocess owner strips those paths before it caps.
+        # The home outlives the run until release(): Codex may have refreshed
+        # the token in auth.json, and redaction reads the refreshed value.
         redact_host_paths = codex_host_path_redactor()
-        try:
-            result = validate_invoke_result(
-                self.name, self._run_argv(ProcessInvocationPlan.from_values(
-                    argv, input_text="", cwd=workspace, timeout_s=timeout,
-                    environment=env, redact_output=redact_host_paths))
-            )
-            rollout = locate_codex_rollout(result.stdout, codex_home)
-        finally:
-            shutil.rmtree(codex_home, ignore_errors=True)
+        result = validate_invoke_result(
+            self.name, self._run_argv(ProcessInvocationPlan.from_values(
+                argv, input_text="", cwd=workspace, timeout_s=timeout,
+                environment=env, redact_output=redact_host_paths))
+        )
+        rollout = locate_codex_rollout(result.stdout, codex_home)
+        result = result.with_wire_text(
+            stdout=redact_host_paths(result.stdout), stderr=redact_host_paths(result.stderr),
+            provider_error=(redact_host_paths(result.provider_error) if result.provider_error is not None else None))
         if result.observation_complete:
             result = result.with_provider_error(
                 codex_stream_protocol_error(result.stdout))
-        # A runner injected through _run_argv may not honor redact_output.
-        result = result.with_wire_text(
-            stdout=redact_host_paths(result.stdout),
-            stderr=redact_host_paths(result.stderr),
-            provider_error=(
-                redact_host_paths(result.provider_error)
-                if result.provider_error is not None else None
-            ),
-        )
+        # Which files were seeded is a record, not an isolation control, so it
+        # is kept under a key that is not a (boolean) protocol observation.
         return result.with_provider_payload(rollout).with_metadata(
-            {k: v for k, v in meta.items() if k != "codex_home"},
+            {k: v for k, v in meta.items() if k not in {"codex_home", "codex_home_files_copied"}},
+            codex_home_files=list(meta.get("codex_home_files_copied") or ()),
             codex_home_outside_workdir=True,
             context_isolation=recorded_isolation,
             **rollout.metadata(),
@@ -655,18 +878,80 @@ class CodexAdapter(AgentAdapter):
         return super().detect(invocation, skill_names, copied)
 
 
+def pi_source_config_dir() -> Path:
+    """The user's own Pi config dir, the source of the auth a run copies."""
+    return Path(os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi" / "agent")))
+
+
+def seed_config_dir(config_dir: Path) -> None:
+    """Copy authentication only; ambient settings/system prompts are behavior."""
+    source = pi_source_config_dir()
+    for name in ["auth.json"]:
+        src = source / name
+        if src.exists() and src.is_file():
+            shutil.copy2(src, config_dir / name)
+
+
+def pi_invocation_outcome(run: InvocationOutcome) -> InvocationOutcome:
+    """Attach Pi's one parsed provider stream to its classified process state."""
+    if not isinstance(run, InvocationOutcome):
+        raise TypeError("Pi invocation requires InvocationOutcome")
+    stream = PiStream.parse(run.stdout)
+    if stream.terminal_error or (run.observation_complete and stream.protocol_error):
+        return run.with_provider_error(stream.failure_error, payload=stream)
+    return run.with_provider_payload(stream)
+
+
+def pi_context_isolation_args(skills_dir: str | Path) -> list[str]:
+    return ["--no-context-files", "--no-prompt-templates", "--no-extensions",
+            "--no-skills", "--skill", str(skills_dir)]
+
+
+PI_RECORDED_CONTEXT_ISOLATION = pi_context_isolation_args("<mounted skills dir>")
+
+
+def pi_argv(query: str, model: str | None = None, skills_dir: str | Path | None = None) -> list[str]:
+    """THE Pi CLI invocation for trigger evals — isolated JSON-stream mode with
+    read-only tools. The trigger matrix's Pi adapter uses this same argv, so the
+    two runners cannot drift apart on flags."""
+    argv = [
+        "pi", "--no-session", "--mode", "json", "--no-context-files", "--no-prompt-templates", "--no-extensions",
+        "--thinking", "minimal", "--tools", "read,grep,find,ls", "-p", query,
+    ]
+    if skills_dir is not None:
+        argv = ["pi", "--no-session", "--mode", "json", *pi_context_isolation_args(skills_dir),
+                "--thinking", "minimal", "--tools", "read,grep,find,ls", "-p", query]
+    if model:
+        argv[1:1] = ["--model", model]
+    return argv
+
+
 class PiAdapter(AgentAdapter):
-    """The Pi coding agent, mounted and detected exactly like
-    run_pi_trigger_eval.py (which stays as the compatibility entry point for
-    people already using `skill-pi-trigger-eval`)."""
+    """The Pi coding agent. Skills mount under an isolated PI_CODING_AGENT_DIR
+    seeded with auth only; `skill-pi-trigger-eval` runs this adapter alone.
+
+    Pi runs with read, grep, find and ls, so its home sits beside the workspace
+    rather than in it, as Codex's does: the copied auth is not readable from the
+    working directory, and the skill is reachable only through Pi's own skill
+    discovery, not by listing the working directory."""
 
     name = "pi"
 
+    @staticmethod
+    def _pi_home(workspace: Path) -> Path:
+        return workspace.parent / f"{workspace.name}-pi-home"
+
     def mount(self, tree_dir: Path, workspace: Path) -> list[Path]:
-        config_dir = workspace / ".pi-config"
+        config_dir = self._pi_home(workspace)
         config_dir.mkdir(parents=True, exist_ok=True)
-        seed_config_dir(config_dir)   # auth/settings, never the user's skills
+        seed_config_dir(config_dir)   # auth only, never the user's skills or settings
         return self._mount_tree(tree_dir, config_dir / "skills")
+
+    def release(self, workspace: Path) -> None:
+        shutil.rmtree(self._pi_home(workspace), ignore_errors=True)
+
+    def secret_files(self, workspace: Path) -> list[Path]:
+        return [*super().secret_files(workspace), self._pi_home(workspace) / "auth.json"]
 
     def protocol_parameters(self) -> dict[str, Any]:
         return {
@@ -675,18 +960,21 @@ class PiAdapter(AgentAdapter):
             "tools": ["read", "grep", "find", "ls"],
             "thinking": "minimal",
             "isolation_policy": "isolated PI_CODING_AGENT_DIR seeded without user skills; host skill discovery off, mounted skills loaded by path",
-            "required_observations": {"config_isolated": True},
+            "required_observations": {"config_isolated": True, "pi_home_outside_workdir": True},
         }
 
     def invoke(self, query: str, model: str | None, workspace: Path, timeout: int) -> InvocationOutcome:
         env = os.environ.copy()
-        env["PI_CODING_AGENT_DIR"] = str(workspace / ".pi-config")
-        return pi_invocation_outcome(validate_invoke_result(
+        env["PI_CODING_AGENT_DIR"] = str(self._pi_home(workspace))
+        # The home outlives the run until release(): Pi may have refreshed the
+        # OAuth token in auth.json, and redaction reads the refreshed value.
+        result = validate_invoke_result(
             self.name,
             self._run_argv(ProcessInvocationPlan.from_values(
-                pi_argv(query, model, workspace / ".pi-config" / "skills"), input_text="", cwd=workspace,
-                timeout_s=timeout, environment=env)),
-        )).with_metadata(config_isolated=True, context_isolation=PI_RECORDED_CONTEXT_ISOLATION)
+                pi_argv(query, model, self._pi_home(workspace) / "skills"), input_text="", cwd=workspace,
+                timeout_s=timeout, environment=env)))
+        return pi_invocation_outcome(result).with_metadata(
+            config_isolated=True, pi_home_outside_workdir=True, context_isolation=PI_RECORDED_CONTEXT_ISOLATION)
 
 
 class VibeAdapter(AgentAdapter):
@@ -698,6 +986,10 @@ class VibeAdapter(AgentAdapter):
     # Vibe 2.25.8 keys its skill map, and so its `skill` tool, by frontmatter name.
     skill_name_source = SkillNameSource.FRONTMATTER
     default_models: list[str | None] = [None]
+
+    def exposed_skill_names(self, mounted: list[MountedSkillName]) -> list[str]:
+        return list(dict.fromkeys(name for skill in mounted
+                                  for name in (skill.folder, skill.frontmatter)))
 
     def __init__(self, vibe_cmd: str = VIBE_DEFAULT_CMD, max_turns: int = 6) -> None:
         self.vibe_cmd = vibe_cmd
@@ -806,11 +1098,7 @@ def executable_identity(command: str) -> dict[str, Any]:
     if resolved:
         path = Path(resolved)
         if path.is_file():
-            digest = hashlib.sha256()
-            with path.open("rb") as fh:
-                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            payload["executable_sha256"] = "sha256:" + digest.hexdigest()
+            payload["executable_sha256"] = "sha256:" + file_sha256(path)
     argument_files: dict[str, str] = {}
     for argument in argv[1:]:
         candidate = Path(argument).expanduser()
@@ -819,8 +1107,7 @@ def executable_identity(command: str) -> dict[str, Any]:
         if not candidate.is_file():
             continue
         resolved_argument = candidate.resolve()
-        argument_files[str(resolved_argument)] = (
-            "sha256:" + hashlib.sha256(resolved_argument.read_bytes()).hexdigest())
+        argument_files[str(resolved_argument)] = "sha256:" + file_sha256(resolved_argument)
     if argument_files:
         payload["argument_files"] = argument_files
     interpreter = Path(executable).name.casefold()
@@ -879,19 +1166,7 @@ def adapter_instance(
         "max_turns": max_turns,
         **dict(backend_options or {}),
     }
-    binding = binding_for(name, "trigger")
-    adapter_cls = ADAPTERS[name]
-    registered_cls = binding.implementation.resolve()
-    # Preserve the established replacement seam: tests and integrations may
-    # substitute a zero-argument adapter. Provider CLI options describe only
-    # the implementation registered by the backend row.
-    options = binding.option_values(values) if adapter_cls is registered_cls else {}
-    return adapter_cls(**options)
-
-
-def matrix_capabilities() -> dict[str, Any]:
-    """Capability rows for exactly the agents accepted by this command."""
-    return {name: require_agent_capabilities(name) for name in sorted(ADAPTERS)}
+    return ADAPTERS[name](**binding_for(name, "trigger").option_values(values))
 
 
 def trigger_tree_for_manifest(repo_root: Path, manifest: dict[str, Any], work_dir: Path, ablation: str | None) -> tuple[Path, str, dict[str, Any] | None]:
@@ -932,16 +1207,6 @@ def matrix_failure_observation(
     )
 
 
-def matrix_failure_row(agent: str, model: str | None, query: str, should_trigger: bool,
-                       exc: BaseException, metadata: dict[str, Any] | None = None,
-                       identity: TriggerRepetitionIdentity | None = None,
-                       constraints: SkillTriggerConstraints | None = None) -> dict[str, Any]:
-    """Compatibility wire adapter; matrix aggregation retains the typed value."""
-    return matrix_failure_observation(
-        agent, model, query, should_trigger, exc, metadata, identity, constraints,
-    ).as_row()
-
-
 def observe_cell_query(
     adapter: AgentAdapter,
     tree_dir: Path,
@@ -959,37 +1224,41 @@ def observe_cell_query(
     secrets: list[str] = []
     with tempfile.TemporaryDirectory(prefix=f"trigger-{adapter.name}-") as td:
         workspace = Path(td)
-        copied = adapter.mount(tree_dir, workspace)
-        mounted_roots = [path.parent if path.name == "SKILL.md" else path for path in copied]
-        mounted_parents = {root.parent.resolve() for root in mounted_roots}
-        if not mounted_roots or len(mounted_parents) != 1:
-            raise ValueError(f"{adapter.name} mount did not expose one complete skill tree")
-        mounted_hash = skill_tree_hash(next(iter(mounted_parents)))
-        expected_hash = str((metadata or {}).get("skill_tree_hash") or "")
-        if mounted_hash != expected_hash:
-            raise ValueError(
-                f"{adapter.name} mounted skill tree hash {mounted_hash} does not match {expected_hash}")
-        mounted: dict[SkillId, Path] = {}
-        selected_names: dict[SkillId, list[str]] = {}
-        if constraints is not None:
-            if root_keys is None:
-                raise ValueError("scoped attribution requires declared root keys")
-            mounted = mounted_skills_by_id(root_keys, copied)
-            validate_attribution_names(adapter, constraints, mounted)
-            selected_names = {key: adapter.exposed_skill_names(mounted_skill_names([mounted[key]]))
-                              for key in constraints.selected}
-        names = adapter.exposed_skill_names(mounted_skill_names(copied))
-        invocation = validate_invoke_result(adapter.name, adapter.invoke(query, model, workspace, timeout))
-        secrets = workspace_secret_values(workspace) + ambient_secret_values()
-        attribution: TriggerAttribution = LegacyAttribution()
-        if constraints is not None:
-            attribution = SkillAttribution(constraints, {
-                key: adapter.detect(invocation, selected_names[key], [mounted[key]])
-                for key in constraints.selected
-            })
-            detection = attribution.detection
-        else:
-            detection = adapter.detect(invocation, names, copied)
+        try:
+            copied = adapter.mount(tree_dir, workspace)
+            mounted_roots = [path.parent if path.name == "SKILL.md" else path for path in copied]
+            mounted_parents = {root.parent.resolve() for root in mounted_roots}
+            if not mounted_roots or len(mounted_parents) != 1:
+                raise ValueError(f"{adapter.name} mount did not expose one complete skill tree")
+            mounted_hash = skill_tree_hash(next(iter(mounted_parents)))
+            expected_hash = str((metadata or {}).get("skill_tree_hash") or "")
+            if mounted_hash != expected_hash:
+                raise ValueError(
+                    f"{adapter.name} mounted skill tree hash {mounted_hash} does not match {expected_hash}")
+            mounted: dict[SkillId, Path] = {}
+            selected_names: dict[SkillId, list[str]] = {}
+            if constraints is not None:
+                if root_keys is None:
+                    raise ValueError("scoped attribution requires declared root keys")
+                mounted = mounted_skills_by_id(root_keys, copied)
+                validate_attribution_names(adapter, constraints, mounted)
+                selected_names = {key: adapter.exposed_skill_names(mounted_skill_names([mounted[key]]))
+                                  for key in constraints.selected}
+            names = adapter.exposed_skill_names(mounted_skill_names(copied))
+            invocation = validate_invoke_result(adapter.name, adapter.invoke(query, model, workspace, timeout))
+            secrets = cell_secret_values(adapter, workspace) + ambient_secret_values()
+            attribution: TriggerAttribution = LegacyAttribution()
+            if constraints is not None:
+                attribution = SkillAttribution(constraints, {
+                    key: adapter.detect(invocation, selected_names[key], [mounted[key]])
+                    for key in constraints.selected
+                })
+                detection = attribution.detection
+            else:
+                detection = adapter.detect(invocation, names, copied)
+
+        finally:
+            adapter.release(workspace)
 
     redacted_stdout = redact_sensitive_text(invocation.stdout, secrets)
     redacted_stderr = redact_sensitive_text(invocation.stderr, secrets)
@@ -1068,6 +1337,9 @@ def observe_cell_query(
             "population": "trigger",
             "provider": adapter.name,
             "model": model,
+            "query": row["query"],
+            "should_trigger": row["should_trigger"],
+            "pass": row["pass"],
             "returncode": row["returncode"],
             "timed_out": row["timed_out"],
             "observation_complete": row["observation_complete"],
@@ -1080,15 +1352,21 @@ def observe_cell_query(
             **dict(redacted_invocation.metadata),
             **observation_metadata,
         }
-        if redacted_provider_error is not None:
-            trace_metadata["provider_error"] = redacted_provider_error
+        if redacted_invocation.provider_error is not None:
+            trace_metadata["provider_error"] = redacted_invocation.provider_error
         try:
-            # Reparse only the sanitized artifact boundary; detection and telemetry
-            # above share the single provider payload retained by the invocation.
-            artifact_pi_stream = PiStream.parse(redacted_stdout) if adapter.name == "pi" else None
+            # Detection and telemetry above share the one provider payload the
+            # invocation retained; the artifact reparses only a stream that
+            # redaction changed.
+            artifact_pi_stream = None
+            if isinstance(invocation.provider_payload, PiStream):
+                artifact_pi_stream = (
+                    invocation.provider_payload
+                    if redacted_invocation.stdout == invocation.stdout
+                    else PiStream.parse(redacted_invocation.stdout))
             write_trace_artifacts(
                 trace_dir,
-                redacted_stdout,
+                redacted_invocation.stdout,
                 source=adapter.name,
                 metadata=trace_metadata,
                 extra_metrics={
@@ -1106,19 +1384,6 @@ def observe_cell_query(
             trace_error = f"{type(exc).__name__}: {exc}"
             observation = observation.with_metadata({"trace_error": trace_error})
     return observation
-
-
-def run_cell_query(adapter: AgentAdapter, tree_dir: Path, query: str, should_trigger: bool,
-                   model: str | None, timeout: int, trace_dir: Path | None = None,
-                   metadata: dict[str, Any] | None = None,
-                   identity: TriggerRepetitionIdentity | None = None,
-                   constraints: SkillTriggerConstraints | None = None,
-                   root_keys: Mapping[SkillId, str] | None = None) -> dict[str, Any]:
-    """Compatibility wire adapter for callers that need one persisted row."""
-    return observe_cell_query(
-        adapter, tree_dir, query, should_trigger, model, timeout, trace_dir,
-        metadata, identity, constraints, root_keys,
-    ).as_row()
 
 
 def summarize_matrix(observations: list[TriggerObservation]) -> list[dict[str, Any]]:
@@ -1205,9 +1470,14 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
                 if constraints is not None:
                     validate_attribution_names(adapter, constraints, {
                         key: tree_dir / root_key for key, root_key in root_keys.items()})
-        protocol = trigger_protocol(
-            adapters, models, runs_per_query=runs_per_query,
-            timeout=timeout, workers=workers)
+        try:
+            protocol = trigger_protocol(
+                adapters, models, runs_per_query=runs_per_query,
+                timeout=timeout, workers=workers)
+        except ValueError as exc:
+            # A model or command the protocol cannot record unambiguously
+            # (an empty --model, an unfingerprintable wrapper) is a usage error.
+            raise SystemExit(str(exc)) from exc
         protocol_sha256 = canonical_json_sha256(protocol)
         manifest_identity = trigger_manifest_identity(manifest)
         trace_root = None
@@ -1268,8 +1538,8 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
     return {
         "skill_name": skill_name_from_manifest(manifest),
         "generated_at": int(time.time()),
-        # Same caveat as run_pi_trigger_eval.py: single-arm raw measurements —
-        # rates that steer description edits, not confirmed causal effects.
+        # Single-arm raw measurements: rates that steer description edits,
+        # not confirmed causal effects.
         # Pair a baseline report with an --ablation report through
         # `skill-benchmark trigger-compare` to reach a causal evidence class.
         "evidence_class": TRIGGER_MEASUREMENT_EVIDENCE_CLASS,
@@ -1291,14 +1561,14 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
 def build_arg_parser() -> argparse.ArgumentParser:
     """The runner's CLI surface, buildable without parsing (shared-constant
     guards in the tests introspect it, e.g. --split choices == VALID_SPLITS)."""
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False)
     ap.add_argument("manifest")
     ap.add_argument("--eval-set", help="JSON file with {query, should_trigger} rows; defaults to the manifest's kind:'trigger' cases")
     ap.add_argument("--split", choices=sorted(VALID_SPLITS))
     ap.add_argument("--agent", action="append", choices=sorted(ADAPTERS), help="agent adapter, repeatable (default: claude)")
     ap.add_argument("--model", action="append", help="model for every selected agent, repeatable (default: the adapter's own list; claude = haiku, sonnet, opus)")
     ap.add_argument("--runs-per-query", type=int, default=3, help="repetitions per (agent, model, query); a trigger RATE needs repetition (default 3)")
-    ap.add_argument("--timeout", type=int, default=240)
+    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--max-turns", type=int, default=6, help="claude/vibe adapters: turns the model gets to load the skill (its observation window)")
     ap.add_argument("--trace-runs", help="optional directory for per-run trace.jsonl/events.json/metrics.json artifacts for every selected agent")

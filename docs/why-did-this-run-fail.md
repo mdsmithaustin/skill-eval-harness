@@ -48,22 +48,21 @@ python3 $H prepare evals/shared-benchmark.json --split tune \
   --out "$S/tasks.jsonl"
 python3 $H run-codex --tasks "$S/tasks.jsonl" --runs "$S/runs" \
   --codex-cmd "python3 $(pwd)/stub_runner.py"
-
-# the c-review case also carries a judge assertion (actionable-review); skipping
-# this step leaves grading "partial" and error-analysis reports nothing to cluster
-python3 $H judge evals/shared-benchmark.json --runs "$S/runs" \
-  --variant with_skill --variant without_skill \
-  --variant ablation:no-severity --variant ablation:no-checklist \
-  --judge-cmd "python3 $(pwd)/stub_judge.py" --out "$S/judge-results.jsonl"
-python3 $H benchmark evals/shared-benchmark.json --runs "$S/runs" \
-  --variant with_skill --variant without_skill \
-  --variant ablation:no-severity --variant ablation:no-checklist \
-  --judge-results "$S/judge-results.jsonl" --out "$S/bench.json"
+V="--variant with_skill --variant without_skill \
+   --variant ablation:no-severity --variant ablation:no-checklist"
+python3 $H judge evals/shared-benchmark.json --runs "$S/runs" $V \
+  --judge-cmd "python3 $(pwd)/stub_judge.py" --out "$S/judge.jsonl"
+python3 $H benchmark evals/shared-benchmark.json --runs "$S/runs" $V \
+  --judge-results "$S/judge.jsonl" --out "$S/bench.json"
 
 python3 $H error-analysis --benchmark "$S/bench.json"
 ```
 
-Representative output (offline stub, six matched runs per arm so materialized ablations can clear the paired sign-flip gate), trimmed to the summary, taxonomy, and selected review-queue rows:
+The `judge` step grades `c-review`'s `actionable-review` assertion with the demo's
+offline stub judge. Skip it and the benchmark is partial, and `error-analysis` over a
+partial report returns an empty taxonomy.
+
+Real output (2026-10-02, offline stub, six matched runs per arm so materialized ablations can clear the paired sign-flip gate), trimmed to the summary, taxonomy, and two of the 30 review-queue rows, with each row's `run_base` path dropped:
 
 ```json
 "summary": {
@@ -91,6 +90,8 @@ Representative output (offline stub, six matched runs per arm so materialized ab
   {
     "case_id": "c-review",
     "variant": "without_skill",
+    "model": null,
+    "run_number": 1,
     "category": "text:severity-label",
     "objective_pass_rate": 0.0,
     "combined_pass_rate": 0.0,
@@ -105,8 +106,11 @@ Representative output (offline stub, six matched runs per arm so materialized ab
   {
     "case_id": "c-review",
     "variant": "ablation:no-checklist",
+    "model": null,
+    "run_number": 1,
     "category": "text:cite-checklist",
     "objective_pass_rate": 0.5,
+    "combined_pass_rate": 0.6666666666666666,
     "first_failure": {
       "name": "cite-checklist",
       "type": "contains_any",
@@ -144,33 +148,55 @@ Looks fine to me; no concerns.
 ```
 
 No severity label anywhere — the assertion is right, the text really lacks it. Now check
-*how* the run ended before you read anything into that, via `metadata.json`:
+*how* the run ended before you read anything into that, via `metadata.json` (real output from
+the same offline stub run, re-run 2026-09-30, trimmed to the fields below):
 
 ```json
 {
+  "stop_class": "unavailable",
+  "stop_reason": null,
+  "stop_source": "codex runner exposes no stop signal",
+  "served_model_check": "unavailable",
+  "effort": { "requested": null, "applied_by": "backend_default" },
   "provider": "codex",
   "returncode": 0,
   "timed_out": false,
-  "elapsed_ms": 18,
-  "usage_normalized": {
-    "input_tokens": 0,
-    "output_tokens": 0,
-    "total_tokens": 0,
-    "source": "trace_normalized"
-  },
+  "elapsed_ms": 47,
+  "usage_normalized": { "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "source": "trace_normalized" },
   "cost_normalized": { "source": "missing" },
   "skill_invoked": false,
   "trace_source": "codex"
 }
 ```
 
-`returncode: 0`, `timed_out: false` — the run completed cleanly and produced real text.
-This is a genuine quality miss, not a crash or an empty output. `usage_normalized` reads
-real zeros sourced from the trace (`source: "trace_normalized"`). The deterministic stub
-runner reports `"usage": {"input_tokens": 0, "output_tokens": 0}` on `turn.completed`, so
-these zeros are values the stub reported, not a missing measurement. `cost_normalized` is the one that is actually absent
-(`source: "missing"`). The stub never claimed a dollar cost at all, so there is nothing
-to normalize into even a `0`.
+Read `stop_class` first, because a clean exit code does not prove the answer finished:
+
+- `truncated` or `turn_limit`: the model was cut off by an output or turn limit. The
+  run is excluded from scoring ([execution validity](vocabulary.md#run-artifacts)), and its
+  result row carries `unscorable_reason` (`stopped:truncated` or `stopped:turn_limit`).
+  An unscorable run makes the benchmark `partial` (`incomplete_reasons:
+  ["unscorable_answer_attempts"]`), so `error-analysis` withholds its headline: `taxonomy`
+  and `review_queue` are empty, and the run is filed under `execution-error`, not under an
+  assertion, only in `observed.taxonomy` and `observed.review_queue`.
+- `refused`: the model declined. The run is still graded, so its zero is a refusal
+  rather than a capability miss, and the benchmark's `run_endings` block counts it.
+- `unavailable`: the runner exposes no stop signal. Codex, Vibe, Jetty, and an
+  `--agent-cmd` subagent that reports no `stop_class` record this, and so does this stub;
+  `stop_source` says why. Read the tail of `output.md`; an
+  answer that ends mid-sentence was probably cut off.
+
+Then check `served_model_check`: a `mismatch` means a different model answered than
+the one requested, and that run is excluded too (`unscorable_reason:
+served_model_mismatch`). A `mixed` run reported the requested model and another one; it
+stays graded, and `run_endings.served_model_mixed` counts it so you can decide whether to
+trust it.
+
+Here the stop is `unavailable`, `returncode` is 0, `timed_out` is false, and
+`output.md` ends on a complete sentence, so the run finished and produced real text.
+This is a genuine quality miss, not a crash, a cut-off, or an empty output. (The zero
+token counts and `cost_normalized.source: "missing"` are the offline-stub telemetry
+markers: the stub's trace reports zero usage and no dollar cost, and the ledger
+records the cost as *missing* rather than a misleading `0`.)
 
 **Layer 3 — the failure class.** Map it to the four classes. `without_skill` is the
 baseline arm; by construction it cannot read the skill files, so it never had the
@@ -224,7 +250,8 @@ not a skill edit.
 
 **A run with no output or a timeout — not a quality failure at all.** If a queue row's
 category is `missing-output` or `execution-error`, stop and read `metadata.json` before
-counting it against the skill. Timeouts are encoded the same way everywhere the harness
+counting it against the skill. Such a run leaves the benchmark partial, so look for the row
+under `observed.review_queue`; the headline queue is empty. Timeouts are encoded the same way everywhere the harness
 spawns a process: `timed_out: true` plus `returncode: 124` (the shell's timeout code). Per
 `LESSONS_LEARNED.md`'s 2026-06-09 *"Missing outputs are not failed/no-lift cases"*, a
 missing output is **not measured** — it is excluded from lift and saturation, not scored
@@ -238,8 +265,9 @@ as a quality miss. A timed-out run cost money but proves nothing about quality.
 | Queue row anchored on a `first_failure`, downstream failures absent | An upstream miss cascades; the queue points at the seam | Fix the first break; re-run before chasing anything downstream |
 | `evidence: "none matched: [...]"` and `output.md` is clearly wrong | Objective assertion, model genuinely missed it | The eval is right — fix the skill (or accept the baseline) |
 | `evidence: "none matched: [...]"` but `output.md` is clearly *right* | Assertion too narrow, failing equivalent good behavior | The eval is wrong — broaden the assertion (the calibration lesson) |
-| Category `missing-output` / `execution-error`, or `metadata.json` shows `timed_out: true` / `returncode: 124` | Not measured, ≠ measured-and-failed | Check termination first; re-run; keep it out of the pass-rate denominator |
+| Category `missing-output` / `execution-error`, or `metadata.json` shows `timed_out: true` / `returncode: 124`, `stop_class` `truncated` / `turn_limit`, or `served_model_check: mismatch` | Not measured, ≠ measured-and-failed | Check termination first; re-run; keep it out of the pass-rate denominator |
 | `without_skill` (or an ablation) row failing its cited assertion, `returncode: 0` | Baseline / materialized regression working as designed | No action — this is the lift the skill buys, made visible |
+| The same case and arm pass on some repeats and fail on others (`reliability.by_case_variant` shows high `pass_at_k`, low `pass_hat_k`) | Run-to-run variance, not a failure mode | Don't diagnose the single red run; read the case's rate across repeats, and add repeats before acting |
 
 The viewer is the same three layers, rendered. `render-viewer --benchmark "$S/bench.json"
 --runs "$S/runs" --out "$S/review.html"` writes a static HTML review over the run dir —

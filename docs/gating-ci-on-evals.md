@@ -28,18 +28,19 @@ whole loop, runnable with no key:
 cd examples/demo-skill
 HARNESS=../../skill_benchmark.py
 
-# (assumes /tmp/demo-runs exists from the demo README's prepare + run-codex + judge
-#  steps — c-review carries a judge assertion, so skipping judge leaves grading
-#  "partial" and `report` below prints "incomplete experiment evidence" instead)
+# (assumes /tmp/demo-runs and /tmp/demo-judge.jsonl exist from the demo README's
+# prepare, run-codex and judge steps)
 python3 $HARNESS benchmark evals/shared-benchmark.json --runs /tmp/demo-runs \
   --variant with_skill --variant without_skill \
-  --judge-results /tmp/demo-judge-results.jsonl --out /tmp/demo-benchmark.json
+  --judge-results /tmp/demo-judge.jsonl --out /tmp/demo-benchmark.json
 
 python3 $HARNESS report --benchmark /tmp/demo-benchmark.json --format github \
   --fail-on-failures
 ```
 
-Real output (2026-09-29, Python 3.12, the demo README's 6-run walkthrough):
+The demo's `c-review` case has a judge assertion, so the benchmark needs the judge
+verdicts; without `--judge-results` the report reads "Experiment status: incomplete" and
+withholds the lift. Real output (2026-09-30, Python 3.11, six runs per arm):
 
 ```text
 # Skill eval — demo-reviewer
@@ -54,25 +55,19 @@ Real output (2026-09-29, Python 3.12, the demo README's 6-run walkthrough):
 
 `--format github` writes a job-summary table (and annotations) straight into a GitHub
 Actions run. `--format junit` writes the same result as JUnit XML, one `<testcase>` per
-case/variant/run, which a CI JUnit viewer can render (trimmed to the
-first two runs of each case/variant; the demo's 6 runs each produce `run-1` .. `run-6`):
+case/variant/run. Configure the CI reader carefully because JUnit includes expected control failures. The same run,
+reformatted and trimmed to `run-1` of each arm:
 
 ```text
 <testsuite name="skill-eval:demo-reviewer" tests="24" failures="12" errors="0" ...>
-  <testcase classname="demo-reviewer.c-review.default-model" name="default-model/with_skill/run-1" />
-  <testcase classname="demo-reviewer.c-review.default-model" name="default-model/with_skill/run-2" />
-  <testcase classname="demo-reviewer.c-review.default-model" name="default-model/without_skill/run-1">
+  <testcase classname="demo-reviewer.c-review.default-model" name="default-model/with_skill/run-1" ... />
+  <testcase classname="demo-reviewer.c-review.default-model" name="default-model/without_skill/run-1" ...>
     <failure message="3 failing check(s)">severity-label: none matched: ['Blocking', 'Minor', 'Clean']
 cite-checklist: none matched: ['file and line']
 actionable-review: no justification for the finding, or the concrete gap (the missing test) is never named</failure>
   </testcase>
-  <testcase classname="demo-reviewer.c-review.default-model" name="default-model/without_skill/run-2">
-    <failure message="3 failing check(s)">severity-label: none matched: ['Blocking', 'Minor', 'Clean']
-cite-checklist: none matched: ['file and line']
-actionable-review: no justification for the finding, or the concrete gap (the missing test) is never named</failure>
-  </testcase>
-  <testcase classname="demo-reviewer.c-adversarial.default-model" name="default-model/with_skill/run-1" />
-  <testcase classname="demo-reviewer.c-adversarial.default-model" name="default-model/without_skill/run-1">
+  <testcase classname="demo-reviewer.c-adversarial.default-model" name="default-model/with_skill/run-1" ... />
+  <testcase classname="demo-reviewer.c-adversarial.default-model" name="default-model/without_skill/run-1" ...>
     <failure message="1 failing check(s)">severity-label: none matched: ['Blocking', 'Minor', 'Clean']</failure>
   </testcase>
 </testsuite>
@@ -113,6 +108,14 @@ The gate reads saved evidence only. It does not reopen artifacts or verify their
 current contents. It applies no lift, rate, or statistical significance threshold.
 Without `--fail-on-failures`, `report` retains its render-only exit behavior.
 
+## Check statistical evidence separately
+
+Before trusting a lift, read `paired_summary.interval` to see whether its 95% interval
+excludes zero. `paired_summary.noise_check.verdict` says whether the eval can resolve
+the lift you care about. Pass `benchmark --min-lift` to set that size.
+Neither field changes the `report` exit code. A CI policy that requires statistical
+significance or a minimum lift must inspect those JSON fields separately.
+
 ## The second gate: is the manifest strong enough?
 
 A benchmark can be green because the manifest can't fail. `audit-manifest` scores that,
@@ -123,41 +126,52 @@ python3 $HARNESS audit-manifest evals/shared-benchmark.json --fail-on-blockers
 echo "exit=$?"
 ```
 
-Real output (2026-07-05) — the demo is a *ready* manifest, so it passes:
+Real output (2026-09-30) — the demo is a *ready* manifest, so it passes:
 
 ```text
 exit=0
 ```
 
-with a readiness block reporting:
+with a readiness block reporting (trimmed):
 
 ```json
 "readiness": {
   "ablations": { "total": 3, "materialized": 3, "instruction_simulated": 0 },
   "leak_saturated_cases": [],
-  "blockers": []
+  "blockers": [],
+  "blocker_findings": []
 }
 ```
 
-`--fail-on-blockers` keys on `readiness.blockers` — the structural problems that make a
-green meaningless: no adversarial cases (nothing tests whether the skill holds under
-pressure), a leak-saturated case (an assertion the base model passes from the prompt
-alone), an ablation that is only *instruction-simulated* and so can never confirm a
-causal regression, or — once run data is supplied — a base-saturated case. The demo has
-none, so it gates clean.
+`--fail-on-blockers` keys on the readiness blockers, the structural problems that make a
+green meaningless. They are typed findings, and which kinds block (including the
+`benchmark-incomplete` blocker for a partial `--runs` benchmark) is the **Readiness**
+entry in [`vocabulary.md`](vocabulary.md#report-signals). The demo has none, so it gates
+clean.
 
-Note the distinction the exit code draws: `audit-manifest` *also* emitted eight
+Note the distinction the exit code draws: `audit-manifest` *also* emitted nine
 `findings` at `recommended`/`required` severity on this same run (missing domain tags,
 missing difficulty tags, …). Those are advice, not blockers — `--fail-on-blockers`
 deliberately does **not** fail on them, so your CI fails on "this suite can't be trusted"
 without nagging on "this suite could be richer." Add `--strict-judge` to also fail when
 the declared judge model is the model under test.
 
+When you do want a finding to fail the build, name it. `--fail-on` takes finding kinds,
+severities (`required`, `recommended`) or preset names (`blockers`, `strict-judge`,
+`contamination`, `judge-robustness`), comma-separated and repeatable, and exits 1 when a
+matching finding fires. `--fail-on floor-eval,underpowered-eval` fails a suite whose runs
+show a case failing in both arms or noise too wide to resolve the lift; `--fail-on
+required` fails on every required finding. An unknown token is an error, not a gate that
+never fires, and when `--runs` points at an incomplete benchmark the gate fails closed.
+The accepted kinds and each one's default severity are listed in
+[`commands.md`](commands.md#finding-kinds).
+
 ## A workflow that ties it together
 
 The recipe for a skill repo's `.github/workflows/`:
 
 ```yaml
+# Fail if experiment evidence is incomplete or selected checks fail.
 - name: Grade skill eval
   run: |
     skill-benchmark judge evals/shared-benchmark.json \
@@ -183,13 +197,25 @@ blow its budget — the operational half of the same gate.
 
 ## Reading a failing gate, symptom by symptom
 
-- **`report` shows lift dropped vs. the last run** → a real regression, or a flaky
-  sample. The `benchmark.json` `significance` block (a sign-flip permutation test on the
-  paired scores) tells you which. Gate on *confirmed* regressions, not on a one-run dip;
-  an ablation cohort needs ≥6 exact repetition pairs to clear its two-sided sign-flip gate.
+- **Lift dropped vs. the last run** → a real regression, or a noisy sample, and the
+  `benchmark.json` `significance` block cannot tell you which: it tests this run's
+  lift against zero, not against the last run's lift. To compare two versions of the
+  skill, run the old one as an `old_skill` arm in the same run (`old_skill_paths` in
+  the manifest, `prepare --include-old-skill`), so both versions answer the same cases
+  under the same conditions. Grade with all three arms (`--variant with_skill --variant
+  without_skill --variant old_skill`; `--variant` replaces the defaults rather than adding to
+  them) and the report's `paired_edit_summary` pairs the versions case by case, with
+  the same significance test, interval, and noise check as the lift. To test a
+  named component, read `ablation_regressions`, which compares each ablation arm with
+  `with_skill` and confirms an expected regression only when a named assertion flips.
+  Gate on *confirmed* regressions, not on a one-run dip; an ablation cohort needs at
+  least 6 matched repetition pairs to clear its sign-flip gate (see **Inference unit** in
+  [`vocabulary.md`](vocabulary.md#report-signals)).
 - **`audit-manifest --fail-on-blockers` exits non-zero** → read the `blockers` list. A
   `leak-saturated` blocker means an assertion passes from the prompt alone; a
-  no-adversarial blocker means nothing tests the skill under pressure. Fix the
+  no-adversarial blocker means nothing tests the skill under pressure; a
+  `benchmark-incomplete` blocker means the runs behind `--runs` were not fully graded
+  (for a suite with judge assertions, pass `--judge-results`). Fix the
   manifest, not the threshold. (Missing hidden splits surface as a `required`
   *finding*, not a blocker — advice the exit code deliberately does not fail on.)
 - **JUnit shows `errors` > 0** → experiment evidence is incomplete. Inspect answer
@@ -218,8 +244,10 @@ blow its budget — the operational half of the same gate.
 
 ## Where this stops
 
-This journey gets a PR to fail on a regression or an untrustworthy manifest. It does not
-decide *whether the regression is worth blocking on* — a confirmed drop on a
+This journey gets a PR to fail on an untrustworthy manifest and to report lift and case
+flags on every run. Failing a PR on a regression takes a check of your own on
+`benchmark.json`, because `report --fail-on` is not merged. Whichever check you use does
+not decide *whether the regression is worth blocking on* — a confirmed drop on a
 regression-guard case is a hard stop, but a soft-severity dip may be acceptable. That
 judgment lives in the severity tiers you set on each assertion
 ([authoring-evals.md](authoring-evals.md)); this gate only enforces the tiers you

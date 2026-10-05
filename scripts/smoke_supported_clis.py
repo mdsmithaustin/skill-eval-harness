@@ -33,7 +33,6 @@ from trace_contracts import event_is_completed
 from trigger_contracts import CompleteTriggerResult, TriggerObservation
 
 DEFAULT_MODELS = {name: target.resolved_model(os.environ) for name, target in SMOKE_TARGETS.items()}
-ANSWER_AGENTS = tuple(name for name, target in SMOKE_TARGETS.items() if target.population == "answer")
 SMOKE_TRIGGER_EXPECTATIONS = (
     ("Review this code change and label the severity of each finding.", True),
     ("What is the capital of France?", False),
@@ -280,7 +279,7 @@ def assess_trigger_report(path: Path, report: dict[str, Any], agent: str = "pi")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--out-dir", required=True, help="persistent directory for tasks, run artifacts, reports, and smoke.json; never cleaned by this command")
     parser.add_argument("--live", action="store_true", help="required acknowledgement before any model CLI is invoked")
     parser.add_argument("--permission-edit", action="store_true", help="Codex-only workspace-write check using the edited-file fixture; requires --live --agents codex")

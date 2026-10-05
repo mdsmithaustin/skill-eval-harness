@@ -20,10 +20,6 @@ from json_contracts import (
 )
 
 
-def _gemini_json_loads(text: str) -> Any:
-    return stream_json_loads(text)
-
-
 def _nonempty_string(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be a non-empty string")
@@ -254,7 +250,7 @@ class GeminiStream:
             if not line.strip():
                 continue
             try:
-                value = _gemini_json_loads(line)
+                value = stream_json_loads(line)
             except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
                 return cls.invalid(
                     f"malformed JSONL at line {line_number}: {exc}",
@@ -560,7 +556,7 @@ class GeminiJsonResponse:
         if not isinstance(raw_text, str):
             raise TypeError("Gemini JSON output must be text")
         try:
-            value = _gemini_json_loads(raw_text)
+            value = stream_json_loads(raw_text)
         except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
             return cls(protocol_error=f"malformed Gemini JSON: {exc}")
         if not isinstance(value, Mapping):

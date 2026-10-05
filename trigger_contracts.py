@@ -21,6 +21,7 @@ from json_contracts import (
     strict_json_equal,
     validate_json_text,
 )
+from observation_contracts import ABSENT_SOURCES, COST_SOURCES, USAGE_SOURCES
 
 
 class CompletionEvidence(str, Enum):
@@ -117,11 +118,7 @@ class InvocationOutcome:
     @property
     def process_observation_complete(self) -> bool:
         """Whether a provider process was spawned and reached an exit."""
-        return self.state in {
-            InvocationState.COMPLETE,
-            InvocationState.PROCESS_FAILED,
-            InvocationState.PROVIDER_FAILED,
-        }
+        return self.state.reached_exit
 
     @classmethod
     def from_process(cls, *, stdout: str, stderr: str, returncode: int,
@@ -561,9 +558,9 @@ def _usage_block(block: Mapping[str, Any]) -> Mapping[str, Any]:
     if not isinstance(block, Mapping):
         raise TypeError("usage telemetry must be a mapping")
     source = block.get("source")
-    if source not in _USAGE_SOURCES:
+    if source not in USAGE_SOURCES:
         raise ValueError(f"usage telemetry has invalid source {source!r}")
-    if source in {"missing", "not_applicable"}:
+    if source in ABSENT_SOURCES:
         if set(block) != {"source"}:
             raise ValueError(f"{source} usage telemetry cannot carry numeric evidence")
         return MappingProxyType(dict(block))
@@ -591,10 +588,14 @@ def _cost_block(block: Mapping[str, Any]) -> Mapping[str, Any]:
     if not isinstance(block, Mapping):
         raise TypeError("cost telemetry must be a mapping")
     source = block.get("source")
-    if source not in _COST_SOURCES:
+    if source not in COST_SOURCES:
         raise ValueError(f"cost telemetry has invalid source {source!r}")
-    if source in {"missing", "not_applicable"}:
-        if set(block) != {"source"}:
+    if source in ABSENT_SOURCES:
+        # normalize_cost records the parts it did see when the total is
+        # missing; those stay diagnostics and never become a total.
+        diagnostics = {"currency", "observed_parts", "reason"} if source == "missing" else set()
+        extra = set(block) - {"source"}
+        if extra - diagnostics or (extra and block.get("reason") != "partial_cost_components"):
             raise ValueError(f"{source} cost telemetry cannot carry numeric evidence")
         return freeze_json_mapping(block, "cost telemetry")
     numeric_keys = {

@@ -1,23 +1,32 @@
 # Is my skill worth its tokens?
 
 Every skill you ship rides in the model's context on every request that loads it —
-the `SKILL.md`, its frontmatter, and whichever `references/` it pulls in. That is a
-standing cost paid on every run, forever. The naive version of the question wants one
-number ("my skill adds 9 KB, is that OK?"), but 9 KB is only the *bill*; whether it is
-*worth* it is the bill weighed against the **lift** those tokens buy — the with-skill
-minus without-skill pass-rate delta from the same paired cases the benchmark already
-runs. A skill that adds 4 KB and lifts nothing is worse than one that adds 12 KB and
-turns a 0.2 pass rate into 0.9. So the question is not "how big is it" but "what is the
+the `SKILL.md`, its frontmatter, and whichever `references/` it pulls in. That text is
+the visible cost and usually the smaller one. Once it sits in a cached prefix, later
+requests read it at about a tenth of the fresh-input price, and the cost-reduction
+guide that `/claude-api hillclimb` follows (in the claude-api skill) measured that
+"cost scales with extra actions triggered, not prompt length." The larger term is what
+the skill makes the model *do*: the extra tool calls, file reads, and output tokens a
+with-skill run spends beyond its without-skill pair. The naive version of the question
+wants one number ("my skill adds 9 KB, is that OK?"), but 9 KB is only part of the
+*bill*; whether it is *worth* it is the bill weighed against the **lift** those tokens
+buy — the with-skill minus without-skill pass-rate delta from the same paired cases
+the benchmark already runs. A skill that adds 4 KB and lifts nothing is worse than one
+that adds 12 KB and turns a 0.2 pass rate into 0.9. So the question is not "how big is it" but "what is the
 lift per token, and is any of that footprint buying nothing?"
 
 That splits into two measurements, and they need different evidence:
 
 - **Static footprint** is deterministic and free — no model, no run. `profile-skill`
-  counts it. This is the numerator's denominator: the tokens you pay unconditionally.
-- **Runtime lift and dollar cost** need real runs with telemetry. `token-overhead`
-  joins the static footprint to the measured objective lift and (when the runner
-  recorded it) the dollar delta; `cost-summary` rolls up spend across a whole suite.
-  These are only as real as the token/cost numbers your runner actually wrote.
+  counts it: the text every loading request carries, usually the smaller term once
+  cached.
+- **Runtime lift and dollar cost** need real runs with telemetry, and they hold the
+  larger term. `token-overhead` joins the static footprint to the measured objective
+  lift, the with-minus-without total-token delta, and (when the runner recorded it)
+  the dollar delta; `cost-summary` rolls up spend across a whole suite; the
+  benchmark's `trajectory_diff` shows where the extra spend went, as per-case
+  `tool_calls`, `file_reads`, and `commands` deltas. These are only as real as the
+  token/cost numbers and traces your runner actually wrote.
 
 ## Run the static half offline
 
@@ -57,68 +66,41 @@ reference that has quietly grown past its keep shows up here before you pay for 
 
 ## Run the runtime half — and see why the demo can't fake it
 
-Now join footprint to lift. `token-overhead` reads the same paired runs the benchmark
-graded and reports lift-per-token and lift-per-dollar per skill:
+Now join footprint to lift. `token-overhead` reads the same paired runs as the benchmark.
+The demo includes a judge assertion, so run its offline judge and pass the verdicts
+with `--judge-results`. Without those verdicts, the report withholds its headline lift.
 
 ```bash
 python3 ../../skill_benchmark.py prepare evals/shared-benchmark.json --split tune \
-  --runs-per-variant 2 --out /tmp/demo-tasks.jsonl
+  --include-ablations --ablation-dir /tmp/demo-abl --runs-per-variant 6 \
+  --out /tmp/demo-tasks.jsonl
 python3 ../../skill_benchmark.py run-codex --tasks /tmp/demo-tasks.jsonl \
   --runs /tmp/demo-runs --codex-cmd "python3 $(pwd)/stub_runner.py"
+python3 ../../skill_benchmark.py judge evals/shared-benchmark.json --runs /tmp/demo-runs \
+  --variant with_skill --variant without_skill \
+  --variant ablation:no-severity --variant ablation:no-checklist \
+  --judge-cmd "python3 $(pwd)/stub_judge.py" --out /tmp/demo-judge.jsonl
 python3 ../../skill_benchmark.py token-overhead evals/shared-benchmark.json \
-  --runs /tmp/demo-runs --format markdown
+  --runs /tmp/demo-runs --judge-results /tmp/demo-judge.jsonl --format markdown
 ```
 
-Real output against the offline stub runs (2026-09-29):
+Real output against the offline stub runs (2026-10-02, six repeats per arm; the summary
+table, before the per-case pairs):
 
 ```text
 # Token overhead report
 
-| Skill | Static SKILL tokens | Reference tokens | Runtime pairs | Mean total delta | ... | Mean cost delta USD | Lift per $ | Saturated/no-lift cost USD |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| demo-reviewer | None | None | None | None | ... | None | None | None |
+| Skill | Static SKILL tokens | Reference tokens | Runtime pairs | Mean total delta | Median total delta | Mean input delta | Mean objective lift | Lift per 1k total tokens | Mean cost delta USD | Lift per $ | Saturated/no-lift cost USD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| demo-reviewer | 144 | 51 | 12 | — | — | — | 1.0 | — | — | — | 0.0 |
 ```
 
-**Every column is `None` — but not because the runs are empty.** `c-review` carries one
-`type: "judge"` assertion (`actionable-review`), and `token-overhead` checks design
-completeness through the same gate `benchmark` uses. That gate reports
-`deferred_judge_verdicts` for any manifest with an ungraded qualitative assertion, and
-`token-overhead` has no `--judge-results` flag to clear it — so this top-level row stays
-`None` for a manifest with a judge assertion whether or not you ran `judge` separately,
-and it never fills in from a later run: read `reports[0].summary.observed` instead. The
-reason itself is `reports[0].summary.design_coverage_reason` — one of
-`deferred_judge_verdicts`, `unscorable_answer_attempts`, `answer_design_incomplete`,
-`grading_evidence_incomplete`, or `incomplete_answer_pairing`. When more than one of
-those blocked the row (a crashed arm behind an ungraded judge, say),
-`design_coverage_reason` names only the most recent one; the full ordered list is
-`reports[0].summary.incomplete_reasons`. A deferred judge always also counts as incomplete
-grading, so this demo reports `['grading_evidence_incomplete', 'deferred_judge_verdicts']`;
-that pair means the judge step has not run, not that grading is broken.
-
-```bash
-python3 ../../skill_benchmark.py token-overhead evals/shared-benchmark.json \
-  --runs /tmp/demo-runs \
-  | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["reports"][0]["summary"]["observed"], indent=2))'
-```
-
-Real output, trimmed to the fields that matter here:
-
-```json
-{
-  "paired_runtime_rows": 4,
-  "total_token_delta": {"mean": null, "n": 0},
-  "objective_delta": {"mean": 1.0, "n": 4}
-}
-```
-
-`objective_delta` is real: the skill wins every paired run (`with_skill` passes,
-`without_skill` fails). `total_token_delta` stays `null` for a different reason than
-missing telemetry — the stub *does* report tokens (0, honestly), but a token or cost
-delta also requires both arms to agree on a `model` identity, and the stub never sets
-one. Missing model identity blocks the comparison (`reason: "basis_missing"`) the same
-way missing usage would.
-
-`cost-summary` shows the usage half is actually present:
+The twelve runtime pairs have an objective lift of 1.0. Token and cost deltas are
+unavailable, shown as `—` in Markdown and `null` in JSON. The stub reports zero token
+usage, which counts as available telemetry, but it reports no model identity.
+A token or cost comparison needs a shared model identity, so these pairs are blocked
+with `basis_missing`. Zero total tokens also cannot divide a lift.
+`cost-summary` shows the same split:
 
 ```bash
 python3 ../../skill_benchmark.py cost-summary \
@@ -127,51 +109,63 @@ python3 ../../skill_benchmark.py cost-summary \
 
 ```json
 "coverage": {
-  "runs_seen": 8,
-  "runs_with_token_usage": 8,
+  "runs_seen": 48,
+  "runs_with_token_usage": 48,
   "runs_with_dollar_cost": 0,
   "runs_with_non_usd_cost": 0,
   "runs_missing_usage": 0,
-  "runs_missing_cost": 8
+  "runs_missing_cost": 48
 }
 ```
 
-Eight runs on disk, all eight carrying token usage — the stub reports an honest zero
-(`source: "trace_normalized"` in each run's `metrics.json`), which the ledger counts as
-*available*, not missing. A missing number and a zero number are different claims, and
-`runs_with_token_usage` only counts the latter as present. Only *cost* is missing here
-(`runs_missing_cost: 8`): the stub never emits a `cost_normalized` block at all, so that
-half is correctly `source: "missing"`.
+All 48 runs (two cases, four arms, six repeats) carry a usage block, and none carries a
+dollar cost. The harness records the missing cost as `source: "missing"` in each run's
+`metadata.json` rather than reporting `0`: a missing number and a zero number are
+different claims, and the ledger keeps them apart.
 
-To get real runtime numbers — including a bound token/cost delta — run the same cases
-through a runner that records a model identity alongside usage. `run-claude` parses the
-`claude -p` JSON envelope and records `usage_normalized` / `cost_normalized` with a
-`model` field; the Pi smoke runner does the same. Re-run `token-overhead` / `cost-summary`
-against *those* runs and the blocked deltas above become real numbers.
+To get real runtime numbers, run the same cases through a runner that captures
+telemetry. `run-claude` parses the `claude -p` JSON envelope and records
+`usage_normalized` / `cost_normalized`; the Pi smoke runner does the same. Re-run
+`token-overhead` / `cost-summary` against *those* runs and the `—` cells become the deltas
+below.
 
 ## Reading the numbers, symptom by symptom
 
-Once the runtime pairs are real, read the row for the keep/trim/cut decision. That row
-only ever fills in for a manifest with no unresolved `judge` assertion: `token-overhead`
-has no `--judge-results` flag, so a judge-bearing manifest like this demo's `c-review`
-case keeps the top-level row `None` forever, no matter how real the runs get. For that
-manifest, read `reports[0].summary.observed` (above) instead of the table:
+Once the runtime pairs have complete evidence, read the summary row to decide
+whether to keep, trim, or cut the skill. For a manifest with judge assertions, pass
+`--judge-results` to complete grading. A partial report keeps descriptive values in
+`reports[0].summary.observed` and explains the withheld headline in
+`design_coverage_reason` and `incomplete_reasons`.
 
 - **High `Lift per 1k total tokens` / `Lift per $`**
-  (`summary.observed.objective_lift_per_1k_total_tokens` / `objective_lift_per_dollar`) → the footprint is
+  (`summary.objective_lift_per_1k_total_tokens` / `objective_lift_per_dollar`) → the footprint is
   earning its keep. Leave it. This is the case the skill exists for.
-- **Positive footprint, `Mean objective lift` ≈ 0** (`summary.observed.objective_delta`)
+- **Positive footprint, `Mean objective lift` ≈ 0** (`summary.objective_delta`)
   → you are paying tokens for nothing measurable. Either the cases are
   **saturated** (the base model already passes them — the benchmark's
   `saturated`/`no-lift` case flags catch this) so the eval can't *see* the lift, or
   the skill genuinely isn't helping. Check the flags before you cut: saturation is
   an eval problem, no-lift is a skill problem. `Saturated/no-lift cost USD`
-  (`summary.observed.saturated_or_no_lift_cost_usd`) totals exactly the spend on
+  (`summary.saturated_or_no_lift_cost_usd`) totals exactly the spend on
   cases that bought no lift — that column is the trim list.
 - **Large `Reference tokens`, small lift** → suspect a reference. `profile-skill`
-  tells you which module carries the bytes; drop it from the skill, re-run, and if the
-  lift holds, the reference was dead weight. (This is a footprint ablation you can do
-  by hand; the [ablation study](ablation-study-walkthrough.md) does the causal version.)
+  tells you which module carries the bytes. Before you drop it and re-run, write down
+  three gates, following the adoption gates in the `/claude-api hillclimb` cost
+  guide: a quality band (the trimmed skill's lift stays within a named distance of
+  the current lift), a cost margin (runtime tokens or dollars fall by more than a
+  named amount), and a mechanism (the saving shows up where you predicted, such as a
+  smaller `file_reads` or `tool_calls` delta in `trajectory_diff`). Cut the reference
+  only when all three pass. A lower bill with no visible mechanism is a confound, and
+  a reference the model rarely read was nearly free, so deleting it may not cut cost
+  at all. (This is a footprint ablation you can do by hand; the [ablation
+  study](ablation-study-walkthrough.md) does the causal version.)
+- **`with_skill` already passes every case** → quality has nowhere left to climb on
+  this suite, so make the objective the same quality at lower cost. The blog post
+  [Automating eval design and hillclimbing with
+  Claude](https://claude.dev/blog/automating-eval-design-and-hillclimbing/) calls cost
+  "one generally strong objective" because you can still pursue it "even if an
+  evaluation is saturated"; the gates above are how you hold quality at parity while
+  you cut.
 - **`audit-manifest --runs <dir>`** folds the same signal into review findings —
   expensive-but-saturated cases, high-cost judge-only cases with no deterministic
   oracle — so the cost view shows up next to the manifest hygiene view.
