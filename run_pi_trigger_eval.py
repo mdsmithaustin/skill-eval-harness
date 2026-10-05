@@ -41,9 +41,11 @@ from skill_benchmark import (
     load_manifest_source,
     materialize_trigger_ablation,
     mount_skill_tree,
+    mounted_skills_by_id,
     pi_stream_terminal_error,
     repo_root_for_manifest,
     safe_trace_label,
+    skill_root_keys_for,
     skill_tree_hash,
     strict_json_loads,
     trigger_harness_identity,
@@ -54,9 +56,16 @@ from skill_benchmark import (
 from trigger_contracts import (
     InvocationOutcome,
     InvocationState,
+    LegacyAttribution,
+    SkillAttribution,
+    SkillId,
+    SkillTriggerConstraints,
+    TriggerAttribution,
     TriggerExpectation,
     TriggerObservation,
+    TriggerQueryDefinition,
     TriggerRepetitionIdentity,
+    parse_skill_constraints,
     validated_trigger_model,
     validated_trigger_protocol_limits,
 )
@@ -225,7 +234,8 @@ def observe_query(manifest_path: Path, query: str, should_trigger: bool, timeout
                   model: str | None, trace_dir: Path | None = None,
                   ablation: str | None = None,
                   identity: TriggerRepetitionIdentity | None = None,
-                  protocol_sha256: str | None = None) -> TriggerObservation:
+                  protocol_sha256: str | None = None,
+                  constraints: SkillTriggerConstraints | None = None) -> TriggerObservation:
     """Keep the typed observation alive until report aggregation completes."""
     manifest = load_manifest(manifest_path)
     with tempfile.TemporaryDirectory(prefix="pi-trigger-") as td:
@@ -246,8 +256,19 @@ def observe_query(manifest_path: Path, query: str, should_trigger: bool, timeout
         stream = invocation.provider_payload
         if not isinstance(stream, PiStream):
             raise TypeError("Pi invocation did not retain its parsed provider stream")
-        detection = detect_trigger_records(
-            stream.records, copied, source="pi", pi_stream=stream)
+        attribution: TriggerAttribution = LegacyAttribution()
+        if constraints is not None:
+            root_keys = dict(zip(manifest["skill_paths"], skill_root_keys_for(
+                repo_root_for_manifest(manifest_path), manifest["skill_paths"]), strict=True))
+            mounted = mounted_skills_by_id(root_keys, copied)
+            attribution = SkillAttribution(constraints, {
+                key: detect_trigger_records(stream.records, [mounted[key]], source="pi", pi_stream=stream)
+                for key in constraints.selected
+            })
+            detection = attribution.detection
+        else:
+            detection = detect_trigger_records(
+                stream.records, copied, source="pi", pi_stream=stream)
         if invocation.observation_complete:
             usage_normalized = dict(stream.usage_normalized)
             cost_normalized = dict(stream.cost_normalized)
@@ -285,7 +306,7 @@ def observe_query(manifest_path: Path, query: str, should_trigger: bool, timeout
                     "protocol_observation": {"config_isolated": True}}
                    if protocol_sha256 is not None else {}),
             },
-            identity=identity,
+            identity=identity, attribution=attribution,
         )
         result = observation.as_row()
         if trace_dir is not None:
@@ -297,11 +318,12 @@ def run_query(manifest_path: Path, query: str, should_trigger: bool, timeout: in
               model: str | None, trace_dir: Path | None = None,
               ablation: str | None = None,
               identity: TriggerRepetitionIdentity | None = None,
-              protocol_sha256: str | None = None) -> dict[str, Any]:
+              protocol_sha256: str | None = None,
+              constraints: SkillTriggerConstraints | None = None) -> dict[str, Any]:
     """Compatibility wire adapter for one trigger result row."""
     return observe_query(
         manifest_path, query, should_trigger, timeout, model, trace_dir,
-        ablation, identity, protocol_sha256,
+        ablation, identity, protocol_sha256, constraints,
     ).as_row()
 
 
@@ -328,11 +350,13 @@ def cases_from_manifest(manifest: dict[str, Any], split: str | None) -> list[dic
             # eval and the audit cannot disagree on a case's expected polarity.
             should = expected_trigger_polarity(c) == "TRIGGER"
             out.append({"query_id": str(c.get("id") or ""),
-                        "query": prompt, "should_trigger": should})
+                        "query": prompt, "should_trigger": should,
+                        **{key: c[key] for key in ("expected_skills", "forbidden_skills") if key in c}})
     return out
 
 
-def validate_trigger_rows(rows: Any, source: str) -> list[dict[str, Any]]:
+def validate_trigger_rows(rows: Any, source: str,
+                          declared_ids: frozenset[SkillId] = frozenset()) -> list[dict[str, Any]]:
     """Validate the shared trigger-row JSON boundary.
 
     `should_trigger` must already be a JSON boolean; using Python truthiness here
@@ -340,11 +364,12 @@ def validate_trigger_rows(rows: Any, source: str) -> list[dict[str, Any]]:
     if not isinstance(rows, list):
         raise SystemExit(f"{source}: expected a list of trigger rows or an object with evals/queries")
     out: list[dict[str, Any]] = []
-    seen: dict[str, tuple[str, bool]] = {}
-    seen_definitions: dict[str, tuple[str, bool]] = {}
+    seen: dict[str, TriggerQueryDefinition] = {}
+    seen_definitions: dict[str, tuple[str, bool, SkillTriggerConstraints | None]] = {}
     for i, row in enumerate(rows, 1):
-        if not isinstance(row, dict):
-            raise SystemExit(f"{source}: row {i} must be an object")
+        if not isinstance(row, dict) or not all(isinstance(key, str) for key in row):
+            raise SystemExit(f"{source}: row {i} must be an object with string keys")
+        row = {key: value for key, value in row.items() if isinstance(key, str)}
         query = row.get("query")
         if not isinstance(query, str) or not query.strip():
             raise SystemExit(f"{source}: row {i} query must be a non-empty string")
@@ -355,14 +380,21 @@ def validate_trigger_rows(rows: Any, source: str) -> list[dict[str, Any]]:
                 and row.get("query_id") != row.get("id")):
             raise SystemExit(
                 f"{source}: row {i} has conflicting query_id and id aliases")
+        try:
+            constraints = parse_skill_constraints(row, declared_ids)
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(f"{source}: row {i}: {exc}") from exc
         query_id = row.get("query_id", row.get("id"))
         if query_id is None or query_id == "":
-            encoded = json.dumps([query, should_trigger], ensure_ascii=False,
+            definition = [query, should_trigger]
+            if constraints is not None:
+                definition.append(constraints.as_dict())
+            encoded = json.dumps(definition, ensure_ascii=False,
                                  separators=(",", ":")).encode("utf-8")
             query_id = "query-" + hashlib.sha256(encoded).hexdigest()
         if not isinstance(query_id, str) or not query_id.strip():
             raise SystemExit(f"{source}: row {i} query_id must be a non-empty string")
-        authored = (query, should_trigger)
+        authored = (query, should_trigger, constraints)
         if query_id in seen:
             if seen[query_id] != authored:
                 raise SystemExit(
@@ -370,17 +402,19 @@ def validate_trigger_rows(rows: Any, source: str) -> list[dict[str, Any]]:
             raise SystemExit(f"{source}: duplicate query_id {query_id!r}")
         inference_query = canonical_trigger_query(query)
         prior = seen_definitions.setdefault(
-            inference_query, (query_id, should_trigger))
-        if prior != (query_id, should_trigger):
+            inference_query, (query_id, should_trigger, constraints))
+        if prior != (query_id, should_trigger, constraints):
             raise SystemExit(
-                f"{source}: canonical query aliases alias the same query and must share one query ID and polarity; "
-                f"got {prior!r} and {(query_id, should_trigger)!r}")
+                f"{source}: canonical query aliases alias the same query and must share one query ID, polarity, and scope; "
+                f"got {prior!r} and {(query_id, should_trigger, constraints)!r}")
         seen[query_id] = authored
         normalized = dict(row)
         normalized.pop("id", None)
         normalized["query_id"] = query_id
         normalized["query"] = query
         normalized["should_trigger"] = should_trigger
+        if constraints is not None:
+            normalized.update(constraints.as_dict())
         out.append(normalized)
     return out
 
@@ -389,6 +423,8 @@ def eval_rows_from_args(args: Any, manifest_path: Path) -> list[dict[str, Any]]:
     """Resolve the trigger rows for a runner invocation: an explicit --eval-set
     file ({query, should_trigger} rows, bare list or under evals/queries), else
     the manifest's kind:'trigger' cases. Shared with run_trigger_matrix."""
+    manifest = load_manifest(manifest_path)
+    declared_ids = frozenset(SkillId(value) for value in manifest.get("skill_paths", []))
     if args.eval_set:
         rows = strict_json_loads(Path(args.eval_set).read_text(encoding="utf-8"))
         if isinstance(rows, dict):
@@ -397,8 +433,8 @@ def eval_rows_from_args(args: Any, manifest_path: Path) -> list[dict[str, Any]]:
                 raise SystemExit(
                     f"{args.eval_set}: expected exactly one of evals or queries")
             rows = rows[aliases[0]]
-        return validate_trigger_rows(rows, str(args.eval_set))
-    return validate_trigger_rows(cases_from_manifest(load_manifest(manifest_path), args.split), str(manifest_path))
+        return validate_trigger_rows(rows, str(args.eval_set), declared_ids)
+    return validate_trigger_rows(cases_from_manifest(manifest, args.split), str(manifest_path), declared_ids)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -452,7 +488,7 @@ def main() -> int:
                 futures.append(ex.submit(
                     observe_query, manifest_path, row["query"], row["should_trigger"],
                     timeout, args.model, trace_dir, args.ablation, identity,
-                    protocol_sha256))
+                    protocol_sha256, parse_skill_constraints(row)))
         for fut in as_completed(futures):
             observations.append(fut.result())
     observations.sort(key=lambda observation: (
@@ -494,7 +530,8 @@ def main() -> int:
         "runs_per_query": args.runs_per_query,
         "design": [
             {"agent": "pi", "model": args.model, "query_id": row["query_id"],
-             "query": row["query"], "should_trigger": row["should_trigger"]}
+             "query": row["query"], "should_trigger": row["should_trigger"],
+             **{key: row[key] for key in ("expected_skills", "forbidden_skills") if key in row}}
             for row in rows
         ],
         "summary": summary,

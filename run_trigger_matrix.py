@@ -66,7 +66,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import Enum
@@ -116,16 +116,19 @@ from skill_benchmark import (
     codex_trigger_context_isolation_args,
     detect_trigger_detection,
     detect_trigger_records,
+    event_is_completed,
     frontmatter_value,
     invoke_argv_with_timeout,
     iter_json_objects,
     locate_codex_rollout,
     materialize_trigger_ablation,
     mount_skill_tree,
+    mounted_skills_by_id,
     normalize_trace_records,
     parse_trace_jsonl_text,
     repo_root_for_manifest,
     safe_trace_label,
+    skill_root_keys_for,
     skill_tree_hash,
     stream_duplicate_keys,
     stream_usage_and_cost,
@@ -142,12 +145,18 @@ from skill_benchmark import (
 from trigger_contracts import (
     InvocationOutcome,
     InvocationState,
+    LegacyAttribution,
+    SkillAttribution,
+    SkillId,
+    SkillTriggerConstraints,
+    TriggerAttribution,
     TriggerDetection,
     TriggerEvidence,
     TriggerEvidenceKind,
     TriggerExpectation,
     TriggerObservation,
     TriggerRepetitionIdentity,
+    parse_skill_constraints,
     validated_trigger_model,
     validated_trigger_protocol_limits,
 )
@@ -209,6 +218,20 @@ def mounted_skill_names(copied: list[Path]) -> list[MountedSkillName]:
         stripped = str(declared).strip() if declared else ""
         names.append(MountedSkillName(folder=folder, frontmatter=stripped or folder))
     return names
+
+
+def validate_attribution_names(
+    adapter: AgentAdapter, constraints: SkillTriggerConstraints,
+    mounted: Mapping[SkillId, Path],
+) -> None:
+    if adapter.skill_name_source is None:
+        return
+    names = {key: adapter.exposed_skill_names(mounted_skill_names([path]))[0]
+             for key, path in mounted.items()}
+    for key in constraints.selected:
+        name = names[key]
+        if sum(value == name for value in names.values()) > 1:
+            raise ValueError(f"{adapter.name} cannot attribute duplicate exposed skill name {name!r} to {key!r}")
 
 
 def require_agent_capabilities(name: str) -> Any:
@@ -529,16 +552,14 @@ class ClaudeAdapter(AgentAdapter):
     def detect(self, invocation: InvocationOutcome, skill_names: list[str], copied: list[Path]) -> TriggerDetection:
         # Primary evidence: the Skill tool invoked with a mounted skill's name.
         # Fallback: the shared path detector (the model Read the mounted files).
-        evidence: list[str] = []
-        for event in iter_json_objects(invocation.stdout, strict=False):
-            if not isinstance(event, dict) or event.get("type") != "assistant":
-                continue
-            for block in (event.get("message") or {}).get("content") or []:
-                if not isinstance(block, dict) or block.get("type") != "tool_use" or block.get("name") != "Skill":
-                    continue
-                invoked = str((block.get("input") or {}).get("skill") or "")
-                if invoked in skill_names:
-                    evidence.append(f"Skill tool invoked: {invoked}")
+        records = [event for event in iter_json_objects(invocation.stdout, strict=False)
+                   if isinstance(event, dict)]
+        event_doc, _ = normalize_trace_records(records, source="claude")
+        evidence = [f"Skill tool invoked: {event['input_summary']}"
+                    for event in event_doc["events"]
+                    if event.get("type") == "skill_load" and event_is_completed(event)
+                    and event.get("is_error") is not True
+                    and event.get("input_summary") in skill_names]
         if evidence:
             return TriggerDetection.from_texts(TriggerEvidenceKind.SKILL_TOOL, evidence[:5])
         return super().detect(invocation, skill_names, copied)
@@ -898,6 +919,7 @@ def matrix_failure_observation(
     exc: BaseException,
     metadata: dict[str, Any] | None = None,
     identity: TriggerRepetitionIdentity | None = None,
+    constraints: SkillTriggerConstraints | None = None,
 ) -> TriggerObservation:
     return TriggerObservation.harness_failure(
         agent=agent,
@@ -906,16 +928,17 @@ def matrix_failure_observation(
         expectation=TriggerExpectation.from_bool(should_trigger),
         error=exc,
         metadata=metadata,
-        identity=identity,
+        identity=identity, constraints=constraints,
     )
 
 
 def matrix_failure_row(agent: str, model: str | None, query: str, should_trigger: bool,
                        exc: BaseException, metadata: dict[str, Any] | None = None,
-                       identity: TriggerRepetitionIdentity | None = None) -> dict[str, Any]:
+                       identity: TriggerRepetitionIdentity | None = None,
+                       constraints: SkillTriggerConstraints | None = None) -> dict[str, Any]:
     """Compatibility wire adapter; matrix aggregation retains the typed value."""
     return matrix_failure_observation(
-        agent, model, query, should_trigger, exc, metadata, identity,
+        agent, model, query, should_trigger, exc, metadata, identity, constraints,
     ).as_row()
 
 
@@ -929,6 +952,8 @@ def observe_cell_query(
     trace_dir: Path | None = None,
     metadata: dict[str, Any] | None = None,
     identity: TriggerRepetitionIdentity | None = None,
+    constraints: SkillTriggerConstraints | None = None,
+    root_keys: Mapping[SkillId, str] | None = None,
 ) -> TriggerObservation:
     """Observe one cell without erasing its domain type before aggregation."""
     secrets: list[str] = []
@@ -944,10 +969,27 @@ def observe_cell_query(
         if mounted_hash != expected_hash:
             raise ValueError(
                 f"{adapter.name} mounted skill tree hash {mounted_hash} does not match {expected_hash}")
+        mounted: dict[SkillId, Path] = {}
+        selected_names: dict[SkillId, list[str]] = {}
+        if constraints is not None:
+            if root_keys is None:
+                raise ValueError("scoped attribution requires declared root keys")
+            mounted = mounted_skills_by_id(root_keys, copied)
+            validate_attribution_names(adapter, constraints, mounted)
+            selected_names = {key: adapter.exposed_skill_names(mounted_skill_names([mounted[key]]))
+                              for key in constraints.selected}
         names = adapter.exposed_skill_names(mounted_skill_names(copied))
         invocation = validate_invoke_result(adapter.name, adapter.invoke(query, model, workspace, timeout))
         secrets = workspace_secret_values(workspace) + ambient_secret_values()
-        detection = adapter.detect(invocation, names, copied)
+        attribution: TriggerAttribution = LegacyAttribution()
+        if constraints is not None:
+            attribution = SkillAttribution(constraints, {
+                key: adapter.detect(invocation, selected_names[key], [mounted[key]])
+                for key in constraints.selected
+            })
+            detection = attribution.detection
+        else:
+            detection = adapter.detect(invocation, names, copied)
 
     redacted_stdout = redact_sensitive_text(invocation.stdout, secrets)
     redacted_stderr = redact_sensitive_text(invocation.stderr, secrets)
@@ -964,10 +1006,19 @@ def observe_cell_query(
         stderr=redacted_stderr,
         provider_error=redacted_provider_error,
     ).with_metadata(redact_sensitive_value(invocation_metadata, secrets))
-    redacted_detection = TriggerDetection(tuple(
-        TriggerEvidence(item.kind, redact_sensitive_text(item.text, secrets))
-        for item in detection.evidence
-    ))
+    if isinstance(attribution, SkillAttribution):
+        attribution = SkillAttribution(attribution.constraints, {
+            key: TriggerDetection(tuple(
+                TriggerEvidence(item.kind, redact_sensitive_text(item.text, secrets))
+                for item in value.evidence
+            )) for key, value in attribution.detections.items()
+        })
+        redacted_detection = attribution.detection
+    else:
+        redacted_detection = TriggerDetection(tuple(
+            TriggerEvidence(item.kind, redact_sensitive_text(item.text, secrets))
+            for item in detection.evidence
+        ))
 
     telemetry_error = None
     if invocation.observation_complete:
@@ -1008,7 +1059,7 @@ def observe_cell_query(
         usage=usage,
         cost=cost,
         metadata=observation_metadata,
-        identity=identity,
+        identity=identity, attribution=attribution,
     )
     row = observation.as_row()
 
@@ -1022,6 +1073,7 @@ def observe_cell_query(
             "observation_complete": row["observation_complete"],
             "triggered": row["triggered"],
             "evidence": row["evidence"],
+            **(attribution.as_dict() if isinstance(attribution, SkillAttribution) else {}),
             "usage_normalized": usage,
             "cost_normalized": cost,
             **(identity.as_dict() if identity is not None else {}),
@@ -1059,11 +1111,13 @@ def observe_cell_query(
 def run_cell_query(adapter: AgentAdapter, tree_dir: Path, query: str, should_trigger: bool,
                    model: str | None, timeout: int, trace_dir: Path | None = None,
                    metadata: dict[str, Any] | None = None,
-                   identity: TriggerRepetitionIdentity | None = None) -> dict[str, Any]:
+                   identity: TriggerRepetitionIdentity | None = None,
+                   constraints: SkillTriggerConstraints | None = None,
+                   root_keys: Mapping[SkillId, str] | None = None) -> dict[str, Any]:
     """Compatibility wire adapter for callers that need one persisted row."""
     return observe_cell_query(
         adapter, tree_dir, query, should_trigger, model, timeout, trace_dir,
-        metadata, identity,
+        metadata, identity, constraints, root_keys,
     ).as_row()
 
 
@@ -1096,7 +1150,8 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
                backend_options: dict[str, Any] | None = None,
                trace_runs: Path | None = None, ablation: str | None = None) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
-    rows = validate_trigger_rows(rows, "trigger matrix rows")
+    rows = validate_trigger_rows(rows, "trigger matrix rows",
+                                 frozenset(SkillId(value) for value in manifest.get("skill_paths", [])))
     if not rows:
         raise SystemExit("no trigger queries")
     if not agents:
@@ -1112,6 +1167,8 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     repo_root = repo_root_for_manifest(manifest_path)
+    root_keys = dict(zip(manifest["skill_paths"], skill_root_keys_for(
+        repo_root, manifest["skill_paths"]), strict=True))
     reject_duplicates(agents, "--agent")
     if models is not None:
         reject_duplicates(models, "--model")
@@ -1142,6 +1199,12 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
         # One skill tree for the whole matrix: every cell mounts the exact same
         # bytes, and the recorded hash/provenance proves which revision was measured.
         tree_dir, tree_hash, provenance = trigger_tree_for_manifest(repo_root, manifest, Path(td), ablation)
+        for adapter in adapters:
+            for row in rows:
+                constraints = parse_skill_constraints(row)
+                if constraints is not None:
+                    validate_attribution_names(adapter, constraints, {
+                        key: tree_dir / root_key for key, root_key in root_keys.items()})
         protocol = trigger_protocol(
             adapters, models, runs_per_query=runs_per_query,
             timeout=timeout, workers=workers)
@@ -1152,16 +1215,18 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
             trace_runs.mkdir(parents=True, exist_ok=True)
             trace_root = Path(tempfile.mkdtemp(prefix="matrix-", dir=trace_runs))
         futures, observations, design = [], [], []
-        future_context: dict[Any, tuple[str, str | None, str, bool, dict[str, Any], TriggerRepetitionIdentity]] = {}
+        future_context: dict[Any, tuple[str, str | None, str, bool, dict[str, Any], TriggerRepetitionIdentity, SkillTriggerConstraints | None]] = {}
         with ThreadPoolExecutor(max_workers=workers) as ex:
             for adapter in adapters:
                 for model in (models if models is not None else adapter.default_models):
                     for row_index, row in enumerate(rows, 1):
                         query = str(row["query"])
+                        constraints = parse_skill_constraints(row)
                         design.append({
                             "agent": adapter.name, "model": model,
                             "query_id": row["query_id"], "query": query,
                             "should_trigger": row["should_trigger"],
+                            **(constraints.as_dict() if constraints else {}),
                         })
                         for run_number in range(1, runs_per_query + 1):
                             trace_dir = None
@@ -1182,17 +1247,17 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
                             identity = TriggerRepetitionIdentity(row["query_id"], run_number)
                             future = ex.submit(observe_cell_query, adapter, tree_dir,
                                                query, should_trigger,
-                                               model, timeout, trace_dir, metadata, identity)
+                                               model, timeout, trace_dir, metadata, identity, constraints, root_keys)
                             futures.append(future)
                             future_context[future] = (
-                                adapter.name, model, query, should_trigger, metadata, identity)
+                                adapter.name, model, query, should_trigger, metadata, identity, constraints)
             for fut in as_completed(futures):
                 try:
                     observations.append(fut.result())
                 except Exception as exc:
-                    agent, model, query, should_trigger, metadata, identity = future_context[fut]
+                    agent, model, query, should_trigger, metadata, identity, constraints = future_context[fut]
                     observations.append(matrix_failure_observation(
-                        agent, model, query, should_trigger, exc, metadata, identity))
+                        agent, model, query, should_trigger, exc, metadata, identity, constraints))
     observations.sort(key=lambda observation: (
         observation.agent, str(observation.model or ""),
         str(observation.identity.query_id if observation.identity else ""),

@@ -517,5 +517,100 @@ class TriggerObservationTruthTableTests(unittest.TestCase):
             TriggerDetection(("untyped evidence",))  # type: ignore[arg-type]
 
 
+
+
+class SkillAttributionContractTests(unittest.TestCase):
+    def observation(self, expected, forbidden, activated, *, complete=True):
+        from trigger_contracts import SkillAttribution, SkillTriggerConstraints
+        constraints = SkillTriggerConstraints(frozenset(expected), frozenset(forbidden))
+        attribution = SkillAttribution(constraints, {
+            key: TriggerDetection.from_texts(TriggerEvidenceKind.MOUNTED_PATH, [key] if key in activated else [])
+            for key in constraints.selected
+        })
+        invocation = (InvocationOutcome.from_process(stdout="", stderr="", returncode=0, elapsed_ms=1)
+                      if complete else InvocationOutcome.from_timeout(stdout="", stderr="timeout", elapsed_ms=1))
+        return TriggerObservation(
+            agent="stub", model=None, query="review the change",
+            expectation=TriggerExpectation.from_bool(bool(expected)),
+            invocation=invocation, detection=attribution.detection,
+            usage={"source": "missing"}, cost={"source": "missing"}, attribution=attribution,
+        )
+
+    def test_joint_verdict_requires_every_expected_skill_and_no_forbidden_skill(self):
+        cases = [
+            (["review"], ["release"], ["review"], True, True),
+            (["review"], ["release"], ["release"], False, False),
+            (["review"], ["release"], ["review", "release"], True, False),
+            (["review"], ["release"], [], False, False),
+            (["review", "check"], ["release"], ["review"], True, False),
+            ([], ["release"], [], False, True),
+            ([], ["release"], ["release"], True, False),
+        ]
+        for expected, forbidden, activated, triggered, passed in cases:
+            with self.subTest(expected=expected, activated=activated):
+                row = self.observation(expected, forbidden, activated).as_row()
+                self.assertEqual((row["triggered"], row["pass"]), (triggered, passed))
+                self.assertEqual(row["activated_skills"], sorted(activated))
+                self.assertEqual(TriggerObservation.from_row(row).as_row(), row)
+
+    def test_incomplete_scope_keeps_evidence_but_has_no_verdict(self):
+        row = self.observation(["review"], ["release"], ["review"], complete=False).as_row()
+        self.assertEqual(row["activated_skills"], ["review"])
+        self.assertIsNone(row["triggered"])
+        self.assertIsNone(row["pass"])
+        self.assertIsNone(TriggerObservation.from_row(row).passed)
+        for key in ("triggered", "pass"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "null"):
+                TriggerObservation.from_row({**row, key: False})
+
+    def test_saved_scope_rejects_forged_or_omitted_projections(self):
+        row = self.observation(["review"], ["release"], ["review"]).as_row()
+        changes = {
+            "activated_skills": [], "missing_expected_skills": ["review"],
+            "forbidden_activations": ["release"], "skill_detections": {},
+            "pass": False, "triggered": False, "expected_skills": ["other"],
+            "evidence": [], "evidence_typed": [],
+        }
+        for key, value in changes.items():
+            with self.subTest(key=key), self.assertRaises((ValueError, TypeError)):
+                TriggerObservation.from_row({**row, key: value})
+        for key in ("activated_skills", "missing_expected_skills", "forbidden_activations",
+                    "skill_detections", "expected_skills", "forbidden_skills"):
+            altered = dict(row)
+            del altered[key]
+            with self.subTest(omitted=key), self.assertRaises((ValueError, TypeError)):
+                TriggerObservation.from_row(altered)
+
+    def test_scope_is_reserved_in_both_metadata_namespaces(self):
+        observation = self.observation(["review"], [], ["review"])
+        from dataclasses import replace
+        for key in ("expected_skills", "forbidden_skills", "skill_detections",
+                    "activated_skills", "missing_expected_skills", "forbidden_activations"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "collides"):
+                observation.with_metadata({key: []})
+            with self.subTest(invocation_key=key), self.assertRaisesRegex(ValueError, "collides"):
+                replace(observation, invocation=observation.invocation.with_metadata({key: []}))
+
+    def test_scope_parser_distinguishes_omission_from_invalid_explicit_values(self):
+        from trigger_contracts import parse_skill_constraints
+        declared = frozenset({"review", "release"})
+        self.assertIsNone(parse_skill_constraints({"should_trigger": True}, declared))
+        self.assertEqual(parse_skill_constraints({"should_trigger": True, "expected_skills": ["review"]}, declared).as_dict(),
+                         {"expected_skills": ["review"], "forbidden_skills": []})
+        self.assertEqual(parse_skill_constraints({"should_trigger": False, "forbidden_skills": ["release"]}, declared).as_dict(),
+                         {"expected_skills": [], "forbidden_skills": ["release"]})
+        invalid = [
+            {"expected_skills": None}, {"expected_skills": "review"}, {"expected_skills": []},
+            {"expected_skills": [""]}, {"expected_skills": ["review", "review"]},
+            {"expected_skills": ["unknown"]}, {"expected_skills": ["review"], "forbidden_skills": ["review"]},
+            {"expected_skills": ["review"], "forbidden_skills": None},
+            {"expected_skills": ["review"], "should_trigger": False},
+            {"forbidden_skills": ["release"]},
+        ]
+        for fields in invalid:
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                parse_skill_constraints({"should_trigger": True, **fields}, declared)
+
+
 if __name__ == "__main__":
     unittest.main()

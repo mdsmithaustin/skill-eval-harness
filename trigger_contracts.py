@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, TypeAlias
+from typing import Any, NewType, TypeAlias
 
 import telemetry as telemetry_domain
 from invocation_contracts import InvocationState, validate_invocation_lifecycle
@@ -388,6 +388,131 @@ class TriggerDetection:
         return cls(tuple(TriggerEvidence(kind, text) for text in texts if isinstance(text, str) and text.strip()))
 
 
+SkillId = NewType("SkillId", str)
+
+
+@dataclass(frozen=True)
+class SkillTriggerConstraints:
+    expected: frozenset[SkillId]
+    forbidden: frozenset[SkillId]
+
+    def __post_init__(self) -> None:
+        for values in (self.expected, self.forbidden):
+            if not isinstance(values, frozenset) or any(
+                not isinstance(value, str) or not value.strip() for value in values
+            ):
+                raise TypeError("skill constraints require frozensets of non-empty identities")
+            for value in values:
+                validate_json_text(value, "skill identity")
+        if not self.expected and not self.forbidden:
+            raise ValueError("skill constraints must select at least one skill")
+        if self.expected & self.forbidden:
+            raise ValueError("expected_skills and forbidden_skills must be disjoint")
+
+    @property
+    def selected(self) -> frozenset[SkillId]:
+        return self.expected | self.forbidden
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"expected_skills": sorted(self.expected),
+                "forbidden_skills": sorted(self.forbidden)}
+
+
+def parse_skill_constraints(
+    row: Mapping[str, Any], declared_ids: frozenset[SkillId] | None = None,
+) -> SkillTriggerConstraints | None:
+    if "expected_skills" not in row and "forbidden_skills" not in row:
+        return None
+    parsed: list[frozenset[SkillId]] = []
+    for field_name in ("expected_skills", "forbidden_skills"):
+        values = row.get(field_name, [])
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value.strip() for value in values
+        ):
+            raise ValueError(f"{field_name} must be a list of non-empty skill_paths identities")
+        if len(values) != len(set(values)):
+            raise ValueError(f"{field_name} must not contain duplicate identities")
+        identities = frozenset(SkillId(value) for value in values)
+        if declared_ids is not None and identities - declared_ids:
+            raise ValueError(f"{field_name} contains unknown skill_paths identities: "
+                             + ", ".join(sorted(identities - declared_ids)))
+        parsed.append(identities)
+    constraints = SkillTriggerConstraints(parsed[0], parsed[1])
+    if type(row.get("should_trigger")) is not bool or row["should_trigger"] != bool(constraints.expected):
+        raise ValueError("scoped should_trigger must equal whether expected_skills is non-empty")
+    return constraints
+
+
+@dataclass(frozen=True)
+class LegacyAttribution:
+    pass
+
+
+@dataclass(frozen=True)
+class SkillAttribution:
+    constraints: SkillTriggerConstraints
+    detections: Mapping[SkillId, TriggerDetection]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.constraints, SkillTriggerConstraints):
+            raise TypeError("skill attribution requires typed constraints")
+        if not isinstance(self.detections, Mapping) or set(self.detections) != self.constraints.selected:
+            raise ValueError("skill attribution requires exactly one detection per selected skill")
+        if any(not isinstance(value, TriggerDetection) for value in self.detections.values()):
+            raise TypeError("skill attribution requires typed detections")
+        object.__setattr__(self, "detections", MappingProxyType(dict(self.detections)))
+
+    @property
+    def activated(self) -> frozenset[SkillId]:
+        return frozenset(key for key, value in self.detections.items() if value.triggered)
+
+    @property
+    def detection(self) -> TriggerDetection:
+        return TriggerDetection(tuple(item for key in sorted(self.detections)
+                                      for item in self.detections[key].evidence))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self.constraints.as_dict(),
+            "skill_detections": {
+                key: [{"kind": item.kind.value, "text": item.text}
+                      for item in self.detections[key].evidence]
+                for key in sorted(self.detections)
+            },
+            "activated_skills": sorted(self.activated),
+            "missing_expected_skills": sorted(self.constraints.expected - self.activated),
+            "forbidden_activations": sorted(self.constraints.forbidden & self.activated),
+        }
+
+    @classmethod
+    def absent(cls, constraints: SkillTriggerConstraints) -> SkillAttribution:
+        return cls(constraints, {key: TriggerDetection.absent() for key in constraints.selected})
+
+    @classmethod
+    def from_row(cls, raw: Mapping[str, Any], constraints: SkillTriggerConstraints) -> SkillAttribution:
+        detections = raw.get("skill_detections")
+        if not isinstance(detections, Mapping):
+            raise TypeError("scoped observation requires skill_detections")
+        parsed: dict[SkillId, TriggerDetection] = {}
+        for key, entries in detections.items():
+            if not isinstance(key, str) or not isinstance(entries, list):
+                raise TypeError("skill_detections must map identities to typed evidence lists")
+            evidence = []
+            for item in entries:
+                if not isinstance(item, Mapping) or set(item) != {"kind", "text"}:
+                    raise ValueError("skill detection entries require kind and text")
+                evidence.append(TriggerEvidence(TriggerEvidenceKind(item["kind"]), item["text"]))
+            parsed[SkillId(key)] = TriggerDetection(tuple(evidence))
+        attribution = cls(constraints, parsed)
+        for key, value in attribution.as_dict().items():
+            if key not in raw or not strict_json_equal(raw[key], value):
+                raise ValueError(f"persisted {key} disagrees with skill attribution")
+        return attribution
+
+
+TriggerAttribution: TypeAlias = LegacyAttribution | SkillAttribution
+TriggerQueryDefinition: TypeAlias = tuple[str, bool, SkillTriggerConstraints | None]
+
 _USAGE_SOURCES = {"provider_reported", "trace_normalized", "estimated", "missing", "not_applicable"}
 _COST_SOURCES = {"provider_reported", "trace_normalized", "price_table_estimated", "estimated", "missing", "not_applicable"}
 _TRIGGER_RESERVED_METADATA = {
@@ -397,6 +522,8 @@ _TRIGGER_RESERVED_METADATA = {
     "usage_normalized", "cost_normalized", "stderr", "provider_error",
     "query_id", "run_number", "invocation_metadata", "observation_metadata",
     "measurement_status", "trigger_evidence_observed",
+    "expected_skills", "forbidden_skills", "skill_detections",
+    "activated_skills", "missing_expected_skills", "forbidden_activations",
 }
 _TRIGGER_EXPERIMENT_METADATA = {
     "measurement", "ablation", "skill_tree_hash", "protocol_sha256",
@@ -523,6 +650,27 @@ class CompleteTriggerResult:
 
 
 @dataclass(frozen=True)
+class CompleteSkillTriggerResult:
+    attribution: SkillAttribution
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.attribution, SkillAttribution):
+            raise TypeError("complete skill trigger results require typed attribution")
+
+    @property
+    def triggered(self) -> bool:
+        constraints = self.attribution.constraints
+        selected = constraints.expected or constraints.forbidden
+        return bool(self.attribution.activated & selected)
+
+    @property
+    def passed(self) -> bool:
+        constraints = self.attribution.constraints
+        return (constraints.expected <= self.attribution.activated
+                and not constraints.forbidden & self.attribution.activated)
+
+
+@dataclass(frozen=True)
 class IncompleteTriggerResult:
     """An invocation outcome that cannot inhabit the quality-result state."""
 
@@ -533,7 +681,7 @@ class IncompleteTriggerResult:
             raise ValueError("incomplete trigger results require a non-complete invocation state")
 
 
-TriggerResult: TypeAlias = CompleteTriggerResult | IncompleteTriggerResult
+TriggerResult: TypeAlias = CompleteTriggerResult | CompleteSkillTriggerResult | IncompleteTriggerResult
 
 
 @dataclass(frozen=True, order=True)
@@ -582,6 +730,7 @@ class TriggerObservation:
     cost: Mapping[str, Any]
     metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
     identity: TriggerRepetitionIdentity | None = None
+    attribution: TriggerAttribution = field(default_factory=LegacyAttribution)
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent, str) or not self.agent.strip():
@@ -602,6 +751,13 @@ class TriggerObservation:
             raise TypeError("trigger observation detection must be TriggerDetection")
         if self.identity is not None and not isinstance(self.identity, TriggerRepetitionIdentity):
             raise TypeError("trigger observation identity must be TriggerRepetitionIdentity or None")
+        if not isinstance(self.attribution, (LegacyAttribution, SkillAttribution)):
+            raise TypeError("trigger observation requires typed attribution")
+        if isinstance(self.attribution, SkillAttribution):
+            if self.expectation.should_trigger != bool(self.attribution.constraints.expected):
+                raise ValueError("expectation disagrees with skill constraints")
+            if self.detection != self.attribution.detection:
+                raise ValueError("trigger detection disagrees with per-skill evidence")
         usage = _usage_block(self.usage)
         cost = _cost_block(self.cost)
         if not self.invocation.observation_complete and (
@@ -627,21 +783,27 @@ class TriggerObservation:
     def result(self) -> TriggerResult:
         """Classify evidence before exposing a quality verdict."""
         if self.invocation.observation_complete:
+            if isinstance(self.attribution, SkillAttribution):
+                return CompleteSkillTriggerResult(self.attribution)
             return CompleteTriggerResult(self.expectation, self.detection.triggered)
         return IncompleteTriggerResult(self.invocation.state)
+
+    @property
+    def constraints(self) -> SkillTriggerConstraints | None:
+        return self.attribution.constraints if isinstance(self.attribution, SkillAttribution) else None
 
     @property
     def passed(self) -> bool | None:
         """Compatibility projection; incomplete evidence has no pass value."""
         result = self.result
-        return result.passed if isinstance(result, CompleteTriggerResult) else None
+        return result.passed if isinstance(result, (CompleteTriggerResult, CompleteSkillTriggerResult)) else None
 
     def with_metadata(self, values: Mapping[str, Any]) -> TriggerObservation:
         return replace(self, metadata={**dict(self.metadata), **dict(values)})
 
     def as_row(self) -> dict[str, Any]:
         result = self.result
-        complete = isinstance(result, CompleteTriggerResult)
+        complete = isinstance(result, (CompleteTriggerResult, CompleteSkillTriggerResult))
         row: dict[str, Any] = {
             "population": "trigger",
             "agent": self.agent,
@@ -672,6 +834,8 @@ class TriggerObservation:
             "invocation_metadata": dict(self.invocation.metadata),
             "observation_metadata": dict(self.metadata),
         }
+        if isinstance(self.attribution, SkillAttribution):
+            row.update(self.attribution.as_dict())
         for key, value in self.invocation.metadata.items():
             row[key] = value
         if self.invocation.provider_error is not None:
@@ -799,16 +963,23 @@ class TriggerObservation:
                 for item in legacy_evidence
             ]
         detection = TriggerDetection(tuple(evidence_items))
+        constraints = parse_skill_constraints(raw)
+        attribution = (SkillAttribution.from_row(raw, constraints)
+                       if constraints is not None else LegacyAttribution())
+        if constraints is None and any(key in raw for key in (
+            "skill_detections", "activated_skills", "missing_expected_skills", "forbidden_activations"
+        )):
+            raise ValueError("legacy observation cannot carry scoped attribution projections")
         observation = cls(
             agent=agent, model=model, query=query, expectation=expectation,
             invocation=invocation, detection=detection,
             usage=usage, cost=cost,
             metadata=observation_metadata,
-            identity=TriggerRepetitionIdentity.from_row(raw),
+            identity=TriggerRepetitionIdentity.from_row(raw), attribution=attribution,
         )
         result = observation.result
         expected_status = (
-            "complete" if isinstance(result, CompleteTriggerResult) else "incomplete"
+            "complete" if isinstance(result, (CompleteTriggerResult, CompleteSkillTriggerResult)) else "incomplete"
         )
         stored_status = raw.get("measurement_status")
         if "measurement_status" in raw and stored_status != expected_status:
@@ -820,12 +991,14 @@ class TriggerObservation:
             raise ValueError("persisted trigger evidence flag disagrees with trigger evidence")
         stored_triggered = raw.get("triggered")
         stored_pass = raw.get("pass")
-        if isinstance(result, CompleteTriggerResult):
+        if isinstance(result, (CompleteTriggerResult, CompleteSkillTriggerResult)):
             if not isinstance(stored_triggered, bool) or stored_triggered != result.triggered:
                 raise ValueError("persisted triggered flag disagrees with the typed observation")
             if not isinstance(stored_pass, bool) or stored_pass != result.passed:
                 raise ValueError("persisted pass flag disagrees with the typed observation")
         else:
+            if isinstance(attribution, SkillAttribution) and (stored_triggered is not None or stored_pass is not None):
+                raise ValueError("incomplete scoped observations require null triggered and pass")
             # Historical rows encoded incomplete evidence as false. Accept those
             # rows at the wire boundary, but never produce that lossy projection.
             if stored_triggered is not None and (
@@ -844,7 +1017,8 @@ class TriggerObservation:
     def harness_failure(cls, *, agent: str, model: str | None, query: str,
                         expectation: TriggerExpectation, error: BaseException,
                         metadata: Mapping[str, Any] | None = None,
-                        identity: TriggerRepetitionIdentity | None = None) -> TriggerObservation:
+                        identity: TriggerRepetitionIdentity | None = None,
+                        constraints: SkillTriggerConstraints | None = None) -> TriggerObservation:
         message = f"{type(error).__name__}: {error}"
         if metadata is not None and not isinstance(metadata, Mapping):
             raise TypeError("trigger failure metadata must be a mapping or None")
@@ -852,4 +1026,4 @@ class TriggerObservation:
         return cls(agent, model, query, expectation, invocation, TriggerDetection.absent(),
                    {"source": "missing"}, {"source": "missing"},
                    {"error": message, **dict({} if metadata is None else metadata)},
-                   identity)
+                   identity, SkillAttribution.absent(constraints) if constraints else LegacyAttribution())
