@@ -524,6 +524,7 @@ LIVE_SMOKES = {
 # Skip reasons allowed only where the platform lacks the capability.
 PLATFORM_SKIPS = {
     "process-group cleanup requires POSIX": lambda: not hasattr(os, "killpg"),
+    "tomllib is stdlib from Python 3.11": lambda: sys.version_info < (3, 11),
 }
 
 # Runtime skips (skipTest / SkipTest / pytest.skip), keyed by the test that
