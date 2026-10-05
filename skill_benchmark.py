@@ -18264,7 +18264,6 @@ def result_failure_lines(result: dict[str, Any]) -> list[str]:
 def benchmark_gate(
     report: Mapping[str, object], policy: report_domain.ReportGatePolicy,
 ) -> report_domain.ReportGateVerdict:
-    """Decide a saved answer benchmark's gate without reopening run artifacts."""
     reasons: list[str] = []
     if report.get("population") != "answer":
         reasons.append("gate requires an answer benchmark")

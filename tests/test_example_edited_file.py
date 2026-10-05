@@ -1,4 +1,3 @@
-"""Executable offline documentation for the committed edited-module example."""
 from __future__ import annotations
 
 import hashlib
@@ -38,6 +37,8 @@ class EditedFileExampleTests(unittest.TestCase):
              shlex.join([sys.executable, "-B", str(DEMO / "stub_runner.py")])],
             ["benchmark", str(DEMO / "evals/shared-benchmark.json"), "--runs", str(cls.runs),
              "--allow-scripts", "--out", str(benchmark)],
+            ["report", "--benchmark", str(benchmark), "--format", "github",
+             "--out", str(cls.directory / "summary.md"), "--fail-on-failures"],
         ]
         for args in commands:
             completed = subprocess.run(

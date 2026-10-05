@@ -1,4 +1,3 @@
-"""Replay one committed regular text edit and run trusted fixture tests."""
 from __future__ import annotations
 
 import hashlib

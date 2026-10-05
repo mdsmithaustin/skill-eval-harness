@@ -195,8 +195,9 @@ skill-benchmark --help
 | `docs/correctness-by-construction-audit.md` | The closed trigger, experimental-pair, answer-outcome, judge-verdict, prepared-task, Jetty, trace, human-text comparison, and ablation-provenance constructions, their proof tests, and residual risks. |
 | `TODO.md` | Status tracker: the eval-framework roadmap, remaining Jetty work, Gemini's explicitly gated autonomous-trigger follow-up, the `swap:<id>` ablation follow-on, and migration/user-journey documentation. |
 | `examples/demo-skill/` | Self-contained, **offline** end-to-end example: a tiny synthetic skill, two answer-path materialized ablations, one discovery ablation for trigger examples, and a deterministic stub runner (no model/API). `prepare → run-codex → judge → benchmark` confirms a regression per answer-path ablation; exercised by `tests/test_example_demo.py`. Also carries should-fire/should-not-fire trigger cases for `skill-trigger-matrix` (offline via `--agent stub`; live smoke via `RUN_TRIGGER_SMOKE=1`). Start here. |
+| `examples/edited-file-demo/` | Offline product-edit example with committed patch replay and trusted tests. Its README also documents the opt-in Codex permission smoke. |
 | `examples/adewale-workspace/` | Adewale-specific Pi smoke runner and cross-repo aggregate report (the trigger runners are the top-level `skill-pi-trigger-eval` and `skill-trigger-matrix`). |
-| `scripts/smoke_supported_clis.py` | Opt-in, low-cost smoke across native Claude/Codex/Gemini/Vibe answer paths and Pi trigger path using a disposable demo-skill eval. |
+| `scripts/smoke_supported_clis.py` | Opt-in, low-cost smoke across native Claude/Codex/Gemini/Vibe answer paths and Pi trigger path using a disposable demo-skill eval. Add `--permission-edit --agents codex` to verify a captured edit and native test-command success. |
 | `tests/test_skill_benchmark.py` | Executable examples for grading, leakage lint, script assertions, judge commands, Jetty export/import, trace artifacts, and trigger detection. |
 
 ## Manifest format
@@ -608,7 +609,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup, validation commands, a
 
 ```bash
 pip install -e ".[test]"
-python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py type_tests/*.py tests/*.py
+python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py examples/edited-file-demo/*.py examples/edited-file-demo/evals/fixtures/*.py examples/edited-file-demo/evals/oracles/*.py type_tests/*.py tests/*.py
 ty check --error-on-warning
 python3 -m unittest discover tests -v
 ```
@@ -656,6 +657,7 @@ skill-eval-harness/
 ├── examples/
 │   ├── demo-skill/             # offline end-to-end example (stub runner, materialized ablations)
 │   ├── skill-pins.json         # pinned SHAs + tree hashes for the ablation study
+│   ├── edited-file-demo/       # captured product edit + trusted replay tests
 │   └── adewale-workspace/      # Pi smoke runner + cross-repo aggregate report
 └── tests/                      # test_skill_benchmark.py + roadmap/cost/confidence-floor/doc-ref suites
 ```
@@ -664,7 +666,7 @@ skill-eval-harness/
 
 ```bash
 pip install -e ".[test]"
-python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py type_tests/*.py tests/*.py
+python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py examples/edited-file-demo/*.py examples/edited-file-demo/evals/fixtures/*.py examples/edited-file-demo/evals/oracles/*.py type_tests/*.py tests/*.py
 ty check --error-on-warning
 python3 -m unittest discover tests -v
 ```

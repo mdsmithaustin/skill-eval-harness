@@ -186,7 +186,6 @@ def assess_gemini_version_evidence(
 
 
 def assess_permission_edit(runs: Path, report: dict[str, Any]) -> bool:
-    """Require replay and the intended native test command in the same run."""
     treatments = [path.parent for path in runs.rglob("output.md")
                   if "with_skill" in path.relative_to(runs).parts]
     valid = bool(treatments)

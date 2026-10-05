@@ -1,4 +1,3 @@
-"""Exercise native Codex capture offline by editing the mounted fixture."""
 from __future__ import annotations
 
 import json
