@@ -89,6 +89,63 @@ Use `--trace-runs DIR` to write `trace.jsonl`/`events.json`/`metrics.json` per r
 `--ablation ID` to measure a materialized discovery/trigger-population ablation through
 any selected adapter, including Codex or Vibe.
 
+## Attribute activation within a catalog
+
+Keep every skill in the manifest's `skill_paths` when testing routing between
+skills. Add `expected_skills` and `forbidden_skills` to a trigger case or an
+`--eval-set` row. Each identity must exactly match a declared `skill_paths` entry.
+
+For a catalog that declares `skills/reviewer/SKILL.md` and
+`skills/release/SKILL.md`, this eval-set row requires the reviewer and forbids
+the release skill.
+
+```json
+{
+  "query_id": "review-change",
+  "query": "Review this change and identify its missing tests.",
+  "should_trigger": true,
+  "expected_skills": ["skills/reviewer/SKILL.md"],
+  "forbidden_skills": ["skills/release/SKILL.md"]
+}
+```
+
+In a manifest case, use `id`, `kind: "trigger"`, `split`, and `prompt` in place
+of the eval-set row's `query_id` and `query` fields. Dataset templates can fill
+identities in either scope list.
+
+List every required skill in `expected_skills`. A complete run passes only when
+all required skills load and no forbidden skill loads. Unlisted skills may load.
+For a negative row, set `should_trigger` to `false`, omit or empty
+`expected_skills`, and provide a nonempty `forbidden_skills` list.
+
+Both lists must contain unique identities and must not overlap. One omitted list
+defaults to empty. Explicit `null`, unknown identities, and two empty lists are
+invalid. Omitting both fields retains the existing rule that any mounted skill
+counts as activation, including the existing generated query IDs.
+
+The runners mount and hash the full catalog. Scope selects the evidence to score
+and adds nothing to the query sent to the agent. Claude load names come from
+mount folders. Codex and Vibe names come from trimmed frontmatter names. A
+selected skill whose exposed name also names another catalog root is rejected
+before invocation for these name-based adapters. Pi uses completed path evidence.
+Paths must identify the selected root or a descendant. A sibling directory with
+a matching prefix does not count. Incomplete or failed tool operations do not
+prove that a skill loaded.
+
+Scoped results include both canonical scope lists, `skill_detections` with typed
+evidence for every selected identity, `activated_skills`,
+`missing_expected_skills`, and `forbidden_activations`. For positive rows,
+`triggered` means at least one expected skill loaded. For negative rows, it means
+at least one forbidden skill loaded. Use `pass` for the joint verdict.
+Incomplete invocations retain `null` for both `triggered` and `pass`.
+
+Scope is part of query identity. `trigger-compare` blocks a changed scope even
+when the query ID and prompt stay the same. It also rejects saved results whose
+scope or derived evidence disagrees with the declared design. Keep one definition
+per canonical prompt, including its scope, so repeated agent and model runs remain
+one authored query for statistical inference. Regenerate both comparison arms
+with the same harness implementation after upgrading.
+
 ## Reading the matrix
 
 - **Positives fail on some model** → the description omits the invocation language

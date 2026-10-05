@@ -5,7 +5,10 @@ test_roadmap_features, test_followup_features, test_external_review_gaps,
 test_cbc) and test_skill_benchmark, which accreted by merge rather than by
 subject; docstrings citing finding/roadmap ids are preserved.
 """
+import copy
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -149,6 +152,241 @@ class ReportFormatsTests(unittest.TestCase):
                     runs=None, split=None, variant=None, judge_results=None,
                     allow_scripts=False, out=None,
                 ))
+
+
+class ReportGateTests(unittest.TestCase):
+    def benchmark(self, root, *, treatment="APPROVED", case=None,
+                  include_baseline=True, include_ablation=False):
+        variants = ["with_skill", "without_skill"]
+        ablations = []
+        if include_ablation:
+            variants.append("ablation:destructive")
+            ablations.append({"id": "destructive", "removed_component": "review policy"})
+        manifest = _manifest(root / "repo", [case or dict(CASE)], ablations=ablations)
+        runs = root / "runs"
+        for variant, text in (("with_skill", treatment), ("without_skill", "nope"),
+                              ("ablation:destructive", "nope")):
+            if variant not in variants or (variant == "without_skill" and not include_baseline):
+                continue
+            write_run(runs / "c" / variant, text, metadata={"returncode": 0})
+        attest_answer_design(manifest, runs, variants=variants)
+        return sb.build_benchmark_report(manifest, runs, variants_arg=variants)
+
+    def report_cli(self, root, report, *flags, format="junit", out=None):
+        benchmark = root / "benchmark.json"
+        benchmark.write_text(json.dumps(report), encoding="utf-8")
+        command = [sys.executable, str(ROOT / "skill_benchmark.py"), "report",
+                   "--benchmark", str(benchmark), "--format", format, *flags]
+        if out is not None:
+            command.extend(["--out", str(out)])
+        return subprocess.run(command, capture_output=True, text=True, check=False)
+
+    def test_cli_passes_expected_baseline_failures_and_preserves_render_bytes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = self.benchmark(root)
+            self.assertIs(report["results"][1]["assertions"][0]["passed"], False)
+            for format in ("junit", "github"):
+                with self.subTest(format=format):
+                    plain = self.report_cli(root, report, format=format)
+                    gated = self.report_cli(root, report, "--fail-on-failures", format=format)
+                    self.assertEqual(plain.returncode, 0, plain.stderr)
+                    self.assertEqual(gated.returncode, 0, gated.stderr)
+                    self.assertEqual(gated.stdout, plain.stdout)
+                    self.assertEqual(gated.stderr, "")
+            verdict = sb.benchmark_gate(report, sb.report_domain.ReportGatePolicy())
+            self.assertEqual(verdict, sb.report_domain.GatePassed(1))
+
+    def test_cli_renders_before_rejecting_treatment_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = self.benchmark(root, treatment="nope")
+            plain = self.report_cli(root, report)
+            out = root / "reports" / "junit.xml"
+            gated = self.report_cli(root, report, "--fail-on-failures", out=out)
+            self.assertEqual(gated.returncode, 1)
+            self.assertEqual(out.read_text(encoding="utf-8"), plain.stdout)
+            self.assertEqual(gated.stdout, "")
+            self.assertIn("report gate: c/default-model/with_skill/run-1: a:", gated.stderr)
+
+    def test_cli_rejects_missing_baseline_but_render_only_still_succeeds(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = self.benchmark(root, include_baseline=False)
+            plain = self.report_cli(root, report)
+            gated = self.report_cli(root, report, "--fail-on-failures")
+            self.assertEqual(plain.returncode, 0, plain.stderr)
+            self.assertEqual(gated.returncode, 1)
+            self.assertEqual(gated.stdout, plain.stdout)
+            self.assertIn("experiment evidence is incomplete", gated.stderr)
+
+    def test_cli_selection_is_repeatable_and_ablation_failures_are_opt_in(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = self.benchmark(root, include_ablation=True)
+            default = self.report_cli(root, report, "--fail-on-failures")
+            selected = self.report_cli(root, report, "--fail-on-failures",
+                                       "--gate-variant", "with_skill",
+                                       "--gate-variant", "ablation:destructive")
+            baseline = self.report_cli(root, report, "--fail-on-failures",
+                                       "--gate-variant", "without_skill")
+            self.assertEqual(default.returncode, 0, default.stderr)
+            self.assertEqual(selected.returncode, 1)
+            self.assertIn("ablation:destructive/run-1", selected.stderr)
+            self.assertEqual(baseline.returncode, 1)
+            self.assertIn("without_skill/run-1", baseline.stderr)
+
+    def test_cli_rejects_incomplete_saved_evidence_even_when_flags_claim_complete(self):
+        mutations = {
+            "design counts absent": lambda r: r["answer_design"].pop("expected_runs"),
+            "zero runs": lambda r: r["answer_design"].update(expected_runs=0, observed_runs=0),
+            "boolean counts": lambda r: r["answer_design"].update(expected_runs=True),
+            "missing attestation list": lambda r: r["answer_design"].pop("attestation_errors"),
+            "attestation error": lambda r: r["answer_design"].update(attestation_errors=[{"reason": "bad"}]),
+            "duplicate identity": lambda r: r["results"].__setitem__(1, copy.deepcopy(r["results"][0])),
+            "absent execution flag": lambda r: r["results"][1].pop("execution_valid"),
+            "absent output flag": lambda r: r["results"][1].pop("missing_output"),
+            "baseline crash": lambda r: r["results"][1].update(execution_valid=False),
+            "deferred baseline judge": lambda r: r["results"][1].update(deferred_judge_tasks=1),
+            "deferred experiment judge": lambda r: r.update(deferred_judge_tasks=[{"task": "pending"}]),
+            "blocked baseline grading": lambda r: r["results"][1].update(blocked_assertions=["a"]),
+            "null baseline verdict": lambda r: r["results"][1]["assertions"][0].update(passed=None),
+            "missing baseline verdict": lambda r: r["results"][1]["assertions"][0].pop("passed"),
+            "missing severity": lambda r: r["results"][0]["assertions"][0].pop("severity"),
+            "empty baseline assertions": lambda r: r["results"][1].update(assertions=[]),
+            "empty selected assertions": lambda r: r["results"][0].update(assertions=[]),
+            "forged pairing": lambda r: r["paired_summary"]["pairing"].update(eligible_pairs=2),
+            "missing pairing": lambda r: r["paired_summary"].pop("pairing"),
+            "boolean pairing count": lambda r: r["paired_summary"]["pairing"].update(eligible_pairs=True),
+            "invalid run number": lambda r: r["results"][1].update(run_number=True),
+            "missing model identity": lambda r: r["results"][1].pop("model"),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            complete = self.benchmark(root)
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    report = copy.deepcopy(complete)
+                    mutate(report)
+                    result = self.report_cli(root, report, "--fail-on-failures")
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("report gate:", result.stderr)
+                    self.assertTrue(result.stdout.startswith('<?xml version="1.0"'))
+
+    def test_cli_rejects_conflicting_row_population_without_traceback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            complete = self.benchmark(root)
+            for population in ("trigger", True, []):
+                for format in ("github", "junit"):
+                    with self.subTest(population=population, format=format):
+                        report = copy.deepcopy(complete)
+                        report["results"][0]["population"] = population
+                        rendered = self.report_cli(root, report, format=format)
+                        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+                        result = self.report_cli(root, report, "--fail-on-failures", format=format)
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertIn("report gate: pairing evidence:", result.stderr)
+                        self.assertIn("experimental row population", result.stderr)
+                        self.assertNotIn("Traceback", result.stderr)
+                        self.assertEqual(result.stdout, rendered.stdout)
+
+    def test_cli_rejects_absent_selected_variant_and_invalid_flags(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = self.benchmark(root)
+            absent = self.report_cli(root, report, "--fail-on-failures", "--gate-variant", "old_skill")
+            self.assertEqual(absent.returncode, 1)
+            self.assertIn("selected variant old_skill has no complete runs", absent.stderr)
+            for flags in (("--gate-variant", "with_skill"),
+                          ("--fail-on-failures", "--gate-variant", "unknown"),
+                          ("--fail-on-failures", "--gate-variant", "ablation:"),
+                          ("--fail-on-failures", "--gate-variant", "with_skill",
+                           "--gate-variant", "with_skill")):
+                with self.subTest(flags=flags):
+                    invalid = self.report_cli(root, report, *flags)
+                    self.assertEqual(invalid.returncode, 2, invalid.stderr)
+                    self.assertEqual(invalid.stdout, "")
+
+    def test_generated_deferred_judge_report_is_rejected(self):
+        case = {**CASE, "assertions": [*CASE["assertions"],
+                {"name": "quality", "type": "judge", "severity": "gate", "prompt": "Is it correct?"}]}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = self.benchmark(root, case=case)
+            self.assertTrue(report["deferred_judge_tasks"])
+            result = self.report_cli(root, report, "--fail-on-failures")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("deferred judge", result.stderr)
+
+    def test_soft_failures_and_skipped_dependencies_do_not_reject(self):
+        case = {**CASE, "assertions": [*CASE["assertions"],
+                {"name": "advice", "type": "contains", "value": "absent", "severity": "soft"},
+                {"name": "dependent", "type": "contains", "value": "absent",
+                 "severity": "critical", "depends_on": ["advice"]}]}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = self.benchmark(root, case=case)
+            row = report["results"][0]
+            self.assertTrue(row["assertions"][2]["skipped"])
+            self.assertFalse(row["vetoed"])
+            result = self.report_cli(root, report, "--fail-on-failures")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_critical_veto_and_reference_floor_are_preserved(self):
+        for severity, extra, expected in (("critical", {}, "critical veto"),
+                                          ("soft", {"reference_score": 0.5}, "reference floor")):
+            case = {**CASE, **extra, "assertions": [*CASE["assertions"],
+                    {"name": "policy", "type": "contains", "value": "absent", "severity": severity}]}
+            with self.subTest(severity=severity), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                report = self.benchmark(root, case=case)
+                result = self.report_cli(root, report, "--fail-on-failures")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(expected, result.stderr)
+
+    def test_no_applicable_presence_contrast_keeps_existing_pairing_semantics(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.benchmark(root, include_ablation=True)
+            manifest = root / "repo" / "evals" / "shared-benchmark.json"
+            runs = root / "ablation-only-runs"
+            write_run(runs / "c" / "ablation:destructive", "APPROVED", metadata={"returncode": 0})
+            variants = ["ablation:destructive"]
+            attest_answer_design(manifest, runs, variants=variants)
+            report = sb.build_benchmark_report(manifest, runs, variants_arg=variants)
+            self.assertEqual(report["availability"], "complete")
+            self.assertEqual(report["paired_summary"]["pairing"]["eligible_pairs"], 0)
+            result = self.report_cli(root, report, "--fail-on-failures",
+                                     "--gate-variant", "ablation:destructive")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_malformed_input_exits_two_without_writing_a_report(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            benchmark = root / "benchmark.json"
+            out = root / "junit.xml"
+            for contents in ('{"broken":', '[]', '{"results": [null]}', '{"results": [], "results": []}'):
+                with self.subTest(contents=contents):
+                    benchmark.write_text(contents, encoding="utf-8")
+                    result = subprocess.run([
+                        sys.executable, str(ROOT / "skill_benchmark.py"), "report",
+                        "--benchmark", str(benchmark), "--format", "junit",
+                        "--fail-on-failures", "--out", str(out)],
+                        capture_output=True, text=True, check=False)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertFalse(out.exists())
+                    self.assertEqual(result.stdout, "")
+
+    def test_gate_policy_is_frozen_and_rejects_empty_or_duplicate_selections(self):
+        from dataclasses import FrozenInstanceError
+
+        policy = sb.report_domain.ReportGatePolicy()
+        with self.assertRaises(FrozenInstanceError):
+            policy.variants = ()
+        for variants in ((), ("with_skill", "with_skill"), ("unknown",)):
+            with self.subTest(variants=variants), self.assertRaises(ValueError):
+                sb.report_domain.ReportGatePolicy(variants)
 
 
 class MultiModelFanOutTests(unittest.TestCase):

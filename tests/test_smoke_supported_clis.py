@@ -4,6 +4,9 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,6 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import skill_benchmark as sb
 from agent_capabilities import AGENT_CAPABILITIES, SMOKE_TARGETS, SmokeTarget
 from trigger_contracts import InvocationOutcome
 
@@ -247,6 +251,191 @@ class SupportedCliSmokeTests(unittest.TestCase):
             )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("at least one", completed.stderr)
+
+
+class PermissionEditSmokeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory(prefix="permission-edit-assessment-")
+        cls.addClassCleanup(cls.tmp.cleanup)
+        cls.directory = Path(cls.tmp.name)
+        cls.runs = cls.directory / "runs"
+        tasks = cls.directory / "tasks.jsonl"
+        demo = ROOT / "examples/edited-file-demo"
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
+               "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")}
+        for args in (
+            ["prepare", str(demo / "evals/shared-benchmark.json"), "--out", str(tasks)],
+            ["run-codex", "--tasks", str(tasks), "--runs", str(cls.runs), "--codex-cmd",
+             shlex.join([sys.executable, "-B", str(demo / "stub_runner.py")])],
+        ):
+            completed = subprocess.run([sys.executable, "-B", str(ROOT / "skill_benchmark.py"), *args],
+                                       cwd=ROOT, env=env, text=True, capture_output=True, check=False, timeout=60)
+            if completed.returncode != 0:
+                raise AssertionError(f"{args[0]} exited {completed.returncode}\n{completed.stderr}")
+        cls.treatment = cls.runs / "normalize-name/with_skill"
+
+    def copied_runs(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runs = Path(tmp.name) / "runs"
+        shutil.copytree(self.runs, runs)
+        return runs, runs / "normalize-name/with_skill"
+
+    def test_permission_assessment_requires_the_verified_edit_and_native_command(self):
+        report = {"checks": []}
+        self.assertTrue(smoke.assess_permission_edit(self.runs, report))
+        self.assertEqual([check["passed"] for check in report["checks"]], [True])
+
+    def test_permission_assessment_accepts_native_shell_test_command(self):
+        for shell in ("/bin/zsh", "/bin/bash", "/bin/sh", "zsh", "bash", "sh"):
+            for option in ("-lc", "-c"):
+                command = f"{shell} {option} 'python3 -B inputs/test_name_tools.py'"
+                with self.subTest(command=command):
+                    runs, run_dir = self.copied_runs()
+                    path = run_dir / "events.json"
+                    trace = json.loads(path.read_text())
+                    event = next(event for event in trace["events"]
+                                 if event["type"] == "command" and event["status"] == "completed")
+                    event["input_summary"] = command
+                    path.write_text(json.dumps(trace))
+                    sb.write_artifact_commit(run_dir)
+                    report = {"checks": []}
+                    self.assertTrue(smoke.assess_permission_edit(runs, report))
+                    self.assertEqual([check["passed"] for check in report["checks"]], [True])
+
+    def test_permission_assessment_rejects_shell_commands_outside_exact_test_contract(self):
+        commands = (
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py; true'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py && true'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py || true'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py | cat'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py & wait'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py > result.txt'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py\ntrue'",
+            "/bin/zsh -lc 'python3\n-B inputs/test_name_tools.py'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py'\ntrue",
+            "python3\n-B inputs/test_name_tools.py",
+            "/bin/zsh -lc 'python3 -B $(echo inputs/test_name_tools.py)'",
+            "/bin/zsh -lc 'python3 -B `echo inputs/test_name_tools.py`'",
+            "/bin/zsh -lc 'python3 -B ${TEST_FILE}'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py extra'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py' extra",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py' ; true",
+            "/bin/zsh -x -lc 'python3 -B inputs/test_name_tools.py'",
+            "/bin/zsh -ic 'python3 -B inputs/test_name_tools.py'",
+            "/bin/fish -c 'python3 -B inputs/test_name_tools.py'",
+            "/custom/bin/zsh -lc 'python3 -B inputs/test_name_tools.py'",
+            '/bin/zsh -lc "sh -c \'python3 -B inputs/test_name_tools.py\'"',
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py",
+            "/bin/zsh -lc 'python3 -B -c print(1)'",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                runs, run_dir = self.copied_runs()
+                path = run_dir / "events.json"
+                trace = json.loads(path.read_text())
+                event = next(event for event in trace["events"]
+                             if event["type"] == "command" and event["status"] == "completed")
+                event["input_summary"] = command
+                path.write_text(json.dumps(trace))
+                sb.write_artifact_commit(run_dir)
+                report = {"checks": []}
+                self.assertFalse(smoke.assess_permission_edit(runs, report))
+                self.assertEqual([check["passed"] for check in report["checks"]], [False])
+
+    def test_permission_assessment_requires_successful_completed_shell_test_command(self):
+        mutations = (
+            {"exit_code": 1}, {"exit_code": None}, {"exit_code": False},
+            {"status": "in_progress"}, {"status": "failed"},
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                runs, run_dir = self.copied_runs()
+                path = run_dir / "events.json"
+                trace = json.loads(path.read_text())
+                event = next(event for event in trace["events"]
+                             if event["type"] == "command" and event["status"] == "completed")
+                event["input_summary"] = "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py'"
+                event.update(mutation)
+                path.write_text(json.dumps(trace))
+                sb.write_artifact_commit(run_dir)
+                self.assertFalse(smoke.assess_permission_edit(runs, {"checks": []}))
+
+    def test_permission_assessment_rejects_denied_partial_missing_exit_and_false_claims(self):
+        mutations = {
+            "denied": lambda event: event.update(exit_code=1),
+            "missing-exit": lambda event: event.pop("exit_code"),
+            "boolean-exit": lambda event: event.update(exit_code=False),
+            "started": lambda event: event.update(status="in_progress"),
+            "failed": lambda event: event.update(status="failed"),
+            "unrelated": lambda event: event.update(input_summary="python3 -B -c 'print(1)'"),
+            "extra-command": lambda event: event.update(input_summary="python3 -B inputs/test_name_tools.py; true"),
+            "assistant-claim": lambda event: event.update(type="message", role="assistant"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                runs, run_dir = self.copied_runs()
+                path = run_dir / "events.json"
+                trace = json.loads(path.read_text())
+                event = next(event for event in trace["events"]
+                             if event["type"] == "command" and event["status"] == "completed")
+                mutate(event)
+                path.write_text(json.dumps(trace))
+                sb.write_artifact_commit(run_dir)
+                self.assertFalse(smoke.assess_permission_edit(runs, {"checks": []}))
+
+    def test_permission_assessment_rejects_an_incomplete_observation(self):
+        runs, run_dir = self.copied_runs()
+        metadata = json.loads((run_dir / "metadata.json").read_text())
+        metadata["trace_observation_complete"] = False
+        (run_dir / "metadata.json").write_text(json.dumps(metadata))
+        sb.write_artifact_commit(run_dir)
+        self.assertFalse(smoke.assess_permission_edit(runs, {"checks": []}))
+
+    def test_permission_assessment_rejects_native_command_success_without_an_edit(self):
+        runs, run_dir = self.copied_runs()
+        baseline = runs / "normalize-name/without_skill"
+        (run_dir / "workspace-changes.json").write_bytes((baseline / "workspace-changes.json").read_bytes())
+        (run_dir / "candidate.patch").unlink()
+        sb.write_artifact_commit(run_dir)
+        self.assertFalse(smoke.assess_permission_edit(runs, {"checks": []}))
+
+    def test_permission_assessment_rejects_missing_treatment(self):
+        self.assertFalse(smoke.assess_permission_edit(self.directory / "absent", {"checks": []}))
+
+    def test_permission_mode_requires_live_and_exactly_codex_before_invocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for flags in (["--permission-edit", "--agents", "codex"],
+                          ["--live", "--permission-edit", "--agents", "claude"],
+                          ["--live", "--permission-edit", "--agents", "codex,claude"],
+                          ["--live", "--permission-edit", "--agents", "codex,codex"]):
+                with self.subTest(flags=flags):
+                    completed = subprocess.run([sys.executable, str(SCRIPT), "--out-dir", tmp, *flags],
+                                               text=True, capture_output=True, check=False)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_permission_mode_records_the_explicit_workspace_write_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(out_dir=tmp, live=True, permission_edit=True, agents="codex", timeout=1,
+                                      **{f"{agent}_model": "test-model" for agent in SMOKE_TARGETS})
+            with mock.patch.object(smoke, "parse_args", return_value=args), \
+                 mock.patch.object(smoke.shutil, "which", return_value="/mock/codex"), \
+                 mock.patch.object(smoke, "run", return_value=True) as run, \
+                 mock.patch.object(smoke, "assess_permission_edit", return_value=True):
+                self.assertEqual(smoke.main(), 0)
+            commands = [call.args[0] for call in run.call_args_list]
+            answer = next(command for command in commands if "run-agent" in command)
+            self.assertEqual(shlex.split(answer[answer.index("--codex-cmd") + 1]),
+                             ["/mock/codex", "exec", "--sandbox", "workspace-write"])
+            benchmark = next(command for command in commands if "benchmark" in command)
+            self.assertIn("--allow-scripts", benchmark)
+            report = json.loads((Path(tmp) / "smoke.json").read_text())
+            self.assertEqual(report["permission_policy"], {
+                "agent": "codex", "sandbox": "workspace-write",
+                "command_prefix": ["/mock/codex", "exec", "--sandbox", "workspace-write"],
+            })
 
 
 if __name__ == "__main__":

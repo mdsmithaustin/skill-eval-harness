@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, NoReturn, TypeAlias
 
 from trigger_contracts import (
+    CompleteSkillTriggerResult,
     CompleteTriggerResult,
     IncompleteTriggerResult,
     InvocationState,
@@ -109,11 +110,11 @@ def summarize_trigger_cohort(observations: Sequence[TriggerObservation]) -> Trig
     if not observations:
         return EmptyTriggerCohort()
 
-    measured: list[CompleteTriggerResult] = []
+    measured: list[CompleteTriggerResult | CompleteSkillTriggerResult] = []
     reasons: Counter[InvocationState] = Counter()
     for observation in observations:
         result = observation.result
-        if isinstance(result, CompleteTriggerResult):
+        if isinstance(result, (CompleteTriggerResult, CompleteSkillTriggerResult)):
             measured.append(result)
         elif isinstance(result, IncompleteTriggerResult):
             reasons[result.state] += 1
@@ -203,7 +204,8 @@ def _query_summary_as_dict(query_id: str, query: str, expectation: TriggerExpect
     }
     block.pop("observed")
     block.pop("incomplete_observations")
-    return {**renamed, **block}
+    constraints = observations[0].constraints
+    return {**renamed, **block, **(constraints.as_dict() if constraints else {})}
 
 
 def summarize_trigger_matrix(observations: Iterable[TriggerObservation]) -> list[dict[str, Any]]:

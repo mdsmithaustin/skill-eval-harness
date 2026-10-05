@@ -164,6 +164,16 @@ class ValidatedLegacyCLIInvocation:
             if not isinstance(raw_variants, list):
                 raise TypeError("variant must be a repeated string option")
             variants = tuple(ExecutionVariant.parse(item) for item in raw_variants)
+        if command is CLICommand.REPORT:
+            gate_variants = arguments.get("gate_variant")
+            if gate_variants is not None:
+                if arguments.get("fail_on_failures") is not True:
+                    raise ValueError("gate-variant requires --fail-on-failures")
+                if not isinstance(gate_variants, list) or not gate_variants:
+                    raise ValueError("gate-variant must be a repeated string option")
+                selected = tuple(ExecutionVariant.parse(item) for item in gate_variants)
+                if len(set(selected)) != len(selected):
+                    raise ValueError("gate-variant values must be unique")
         if command is CLICommand.COMPARE_TASKS:
             for name in ("primary", "baseline"):
                 if arguments.get(name) is not None:

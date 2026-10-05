@@ -919,5 +919,39 @@ class ManifestLayoutTests(unittest.TestCase):
             self.assertEqual(row["skill_root_keys"], ["unslop"])
 
 
+
+
+class ScopedTriggerManifestTests(unittest.TestCase):
+    def test_full_and_lightweight_loaders_accept_positive_and_negative_scopes(self):
+        cases = [
+            {"id": "positive", "kind": "trigger", "split": "tune", "prompt": "review this change",
+             "should_trigger": True, "expected_skills": ["skills/demo/SKILL.md"]},
+            {"id": "negative", "kind": "trigger", "split": "tune", "prompt": "describe the weather",
+             "should_trigger": False, "forbidden_skills": ["skills/demo/SKILL.md"]},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            manifest = make_eval_repo(Path(td), cases=cases)
+            for loader in (sb.load_manifest_source, sb.validate_manifest):
+                with self.subTest(loader=loader.__name__):
+                    loaded = loader(manifest)
+                    projected = tr.cases_from_manifest(loaded, "tune")
+                    self.assertEqual(projected[0]["expected_skills"], ["skills/demo/SKILL.md"])
+                    self.assertEqual(projected[1]["forbidden_skills"], ["skills/demo/SKILL.md"])
+
+    def test_malformed_explicit_scope_cannot_bypass_either_loader(self):
+        for fields in ({"expected_skills": None}, {"expected_skills": []},
+                       {"expected_skills": ["unknown"]},
+                       {"expected_skills": ["skills/demo/SKILL.md"], "forbidden_skills": ["skills/demo/SKILL.md"]},
+                       {"forbidden_skills": ["skills/demo/SKILL.md"]}):
+            with self.subTest(fields=fields), tempfile.TemporaryDirectory() as td:
+                manifest = make_eval_repo(Path(td), cases=[{
+                    "id": "scoped", "kind": "trigger", "split": "tune", "prompt": "review this",
+                    "should_trigger": True, **fields,
+                }])
+                for loader in (sb.load_manifest_source, sb.validate_manifest):
+                    with self.subTest(loader=loader.__name__), self.assertRaises(SystemExit):
+                        loader(manifest)
+
+
 if __name__ == "__main__":
     unittest.main()

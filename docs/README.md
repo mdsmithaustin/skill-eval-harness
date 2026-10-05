@@ -13,6 +13,7 @@ title is the question; the body is the loop that answers it, runnable on
 | Question | Doc |
 |---|---|
 | How do I write an eval suite for my skill? | [`authoring-evals.md`](authoring-evals.md) |
+| How do I grade files an agent edits? | [`Edited-file demo`](../examples/edited-file-demo/README.md) |
 | How do I make my skill trigger reliably? | [`tuning-skill-activation.md`](tuning-skill-activation.md) |
 | Which parts of my skill are load-bearing? | [`ablation-study-walkthrough.md`](ablation-study-walkthrough.md) |
 | Is my skill worth its tokens? | [`is-my-skill-worth-its-tokens.md`](is-my-skill-worth-its-tokens.md) |

@@ -21,7 +21,7 @@ General eval frameworks (openai/evals, vitest-evals, viteval) score one output a
 | Is this eval safe to spend model budget on? | `validate --strict-leakage --leakage-min-chars 1 --check-ablations` and `audit-manifest --fail-on-blockers`. |
 | Can I trust this LLM judge or rubric result? | `judge`, `compare-judges`, `judge-robustness`, and `judge-alignment`. |
 | Could the eval be contaminated by leaked answer keys or memorized canaries? | Prompt leakage lint plus `contamination` over generated outputs. |
-| Can this become a CI gate? | `suite-run`, `report --format junit|github`, and readiness blockers from `audit-manifest`. |
+| Can this become a CI gate? | `suite-run`, `report --fail-on-failures --format junit|github`, and readiness blockers from `audit-manifest`. |
 
 ## Core loop
 
@@ -170,7 +170,7 @@ skill-benchmark --help
 | `docs/authoring-evals.md` | Opinionated workflow/quickstart for writing a new eval suite, including severity and graded assertions. |
 | `docs/tuning-skill-activation.md` | The activation-tuning loop: trigger cases in both polarities, the (agent, model) trigger-rate matrix, how to read under/over-trigger, and the adapter seam for adding agents. |
 | `docs/is-my-skill-worth-its-tokens.md` | Keep/trim/cut walkthrough: static footprint (`profile-skill`) vs. runtime lift-per-token and lift-per-dollar (`token-overhead`, `cost-summary`). |
-| `docs/gating-ci-on-evals.md` | The CI recipe: `report --format junit|github` for regressions plus `audit-manifest --fail-on-blockers` for manifest trust. |
+| `docs/gating-ci-on-evals.md` | The CI recipe: `report --fail-on-failures --format junit|github` for selected variants plus `audit-manifest --fail-on-blockers` for manifest trust. |
 | `docs/did-my-skill-edit-regress.md` | The edit → re-run → diff loop: the within-run `ablation_regressions` block (assertion-level, significance-gated) and cross-iteration `render-viewer --previous-workspace` diffs over the `iteration-N/` convention. |
 | `docs/which-model-should-my-skill-target.md` | Ranking model tiers by lift: `prepare --models` fan-out, the `by_model` / `model_analysis` blocks, and reading real lift vs. base-model saturation per tier. |
 | `docs/why-did-this-run-fail.md` | Debugging one failing run: the `error-analysis` taxonomy + review queue, then the run dir (`output.md`/`metadata.json`), mapped to a failure class and a manifest-or-skill decision. |
@@ -195,8 +195,9 @@ skill-benchmark --help
 | `docs/correctness-by-construction-audit.md` | The closed trigger, experimental-pair, answer-outcome, judge-verdict, prepared-task, Jetty, trace, human-text comparison, and ablation-provenance constructions, their proof tests, and residual risks. |
 | `TODO.md` | Status tracker: the eval-framework roadmap, remaining Jetty work, Gemini's explicitly gated autonomous-trigger follow-up, the `swap:<id>` ablation follow-on, and migration/user-journey documentation. |
 | `examples/demo-skill/` | Self-contained, **offline** end-to-end example: a tiny synthetic skill, two answer-path materialized ablations, one discovery ablation for trigger examples, and a deterministic stub runner (no model/API). `prepare → run-codex → judge → benchmark` confirms a regression per answer-path ablation; exercised by `tests/test_example_demo.py`. Also carries should-fire/should-not-fire trigger cases for `skill-trigger-matrix` (offline via `--agent stub`; live smoke via `RUN_TRIGGER_SMOKE=1`). Start here. |
+| `examples/edited-file-demo/` | Offline product-edit example with committed patch replay and trusted tests. Its README also documents the opt-in Codex permission smoke. |
 | `examples/adewale-workspace/` | Adewale-specific Pi smoke runner and cross-repo aggregate report (the trigger runners are the top-level `skill-pi-trigger-eval` and `skill-trigger-matrix`). |
-| `scripts/smoke_supported_clis.py` | Opt-in, low-cost smoke across native Claude/Codex/Gemini/Vibe answer paths and Pi trigger path using a disposable demo-skill eval. |
+| `scripts/smoke_supported_clis.py` | Opt-in, low-cost smoke across native Claude/Codex/Gemini/Vibe answer paths and Pi trigger path using a disposable demo-skill eval. Add `--permission-edit --agents codex` to verify a captured edit and native test-command success. |
 | `tests/test_skill_benchmark.py` | Executable examples for grading, leakage lint, script assertions, judge commands, Jetty export/import, trace artifacts, and trigger detection. |
 
 ## Manifest format
@@ -550,7 +551,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | Command | What it does |
 |---|---|
 | `skill-benchmark audit-manifest` | Readiness verdict + blockers; `--fail-on-blockers` gates CI on "worth paying to run". |
-| `skill-benchmark report` | Serialize `benchmark.json` as JUnit XML or GitHub job-summary + annotations. |
+| `skill-benchmark report` | Serialize `benchmark.json` as JUnit XML or GitHub job-summary + annotations. Add `--fail-on-failures` to require complete evidence and passing `with_skill` checks. Repeat `--gate-variant` to select other arms. |
 | `skill-benchmark contamination` | Output-side perimeter: canary tripwire, output↔answer n-gram overlap, released-at/cutoff gate. |
 | `skill-benchmark error-analysis` | Open-coding review queue + axial failure taxonomy over a `benchmark.json`. |
 | `skill-benchmark compare-judges` | Flag whether measured lift depends on which judge model graded. |
@@ -608,7 +609,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup, validation commands, a
 
 ```bash
 pip install -e ".[test]"
-python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py type_tests/*.py tests/*.py
+python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py examples/edited-file-demo/*.py examples/edited-file-demo/evals/fixtures/*.py examples/edited-file-demo/evals/oracles/*.py type_tests/*.py tests/*.py
 ty check --error-on-warning
 python3 -m unittest discover tests -v
 ```
@@ -656,6 +657,7 @@ skill-eval-harness/
 ├── examples/
 │   ├── demo-skill/             # offline end-to-end example (stub runner, materialized ablations)
 │   ├── skill-pins.json         # pinned SHAs + tree hashes for the ablation study
+│   ├── edited-file-demo/       # captured product edit + trusted replay tests
 │   └── adewale-workspace/      # Pi smoke runner + cross-repo aggregate report
 └── tests/                      # test_skill_benchmark.py + roadmap/cost/confidence-floor/doc-ref suites
 ```
@@ -664,7 +666,7 @@ skill-eval-harness/
 
 ```bash
 pip install -e ".[test]"
-python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py type_tests/*.py tests/*.py
+python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py examples/edited-file-demo/*.py examples/edited-file-demo/evals/fixtures/*.py examples/edited-file-demo/evals/oracles/*.py type_tests/*.py tests/*.py
 ty check --error-on-warning
 python3 -m unittest discover tests -v
 ```

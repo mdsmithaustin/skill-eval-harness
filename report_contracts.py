@@ -11,6 +11,43 @@ from types import MappingProxyType
 from typing import Any, Literal, TypeAlias, TypeVar
 
 from json_contracts import freeze_json_mapping
+from manifest_contracts import WITH_SKILL, ExecutionVariant
+
+
+@dataclass(frozen=True)
+class ReportGatePolicy:
+    variants: tuple[ExecutionVariant, ...] = (WITH_SKILL,)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.variants, tuple) or not self.variants:
+            raise ValueError("report gate requires selected variants")
+        variants = tuple(ExecutionVariant.parse(value) for value in self.variants)
+        if len(set(variants)) != len(variants):
+            raise ValueError("report gate variants must be unique")
+        object.__setattr__(self, "variants", variants)
+
+
+@dataclass(frozen=True)
+class GatePassed:
+    checked_runs: int
+
+    def __post_init__(self) -> None:
+        if type(self.checked_runs) is not int or self.checked_runs < 1:
+            raise ValueError("passed report gate requires checked runs")
+
+
+@dataclass(frozen=True)
+class GateRejected:
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.reasons, tuple) or not self.reasons
+                or any(not isinstance(reason, str) or not reason.strip()
+                       for reason in self.reasons)):
+            raise ValueError("rejected report gate requires reasons")
+
+
+ReportGateVerdict: TypeAlias = GatePassed | GateRejected
 
 
 class ReportCoverageState(str, Enum):

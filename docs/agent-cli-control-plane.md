@@ -114,3 +114,21 @@ Pi's Codex-backed default requires Pi's OpenAI Codex authentication. Jetty is an
 CLI; retain its separate token-backed smoke. The command exits nonzero unless every selected
 CLI completes its artifact contract and the demo fixtures pass, so incomplete or substituted
 trigger rows and failed provider runs are never reported as a smoke success.
+
+## Verify Codex edit and command permission
+
+The [edited-file example](../examples/edited-file-demo/README.md) grades a captured
+module edit by replaying its committed patch and running trusted tests. Its offline
+stub exercises that pipeline without a model.
+
+To exercise native Codex permissions, run the smoke with `--live --permission-edit
+--agents codex`. This mode uses `exec --sandbox workspace-write` and records the
+resolved command prefix. It requires a verified edit and a completed native event
+for exactly `python3 -B inputs/test_name_tools.py` with integer exit code zero in
+the same run. An unrelated successful command or an assistant claim cannot pass.
+Other agent selections fail before invocation. The default smoke retains its
+existing permission policies.
+
+A nonzero exit or `status: failed` in the retained `smoke.json` means failure.
+The live mode can spend money. Unit tests exercise its assessments with captured
+fixtures and make no live model calls.

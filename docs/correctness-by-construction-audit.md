@@ -30,7 +30,7 @@ subprocess bytes
   -> PiStream (Pi only)
   -> TriggerDetection
   -> TriggerObservation
-  -> CompleteTriggerResult | IncompleteTriggerResult
+  -> CompleteTriggerResult | CompleteSkillTriggerResult | IncompleteTriggerResult
   -> CompleteTriggerCohort | IncompleteTriggerCohort | EmptyTriggerCohort
   -> persisted JSON row
 ```
@@ -42,9 +42,13 @@ subprocess bytes
   Failed streams cannot carry numeric usage or cost.
 - `TriggerDetection.triggered` is derived from typed evidence. Unknown lifecycle events are not
   evidence, and callers cannot independently set a trigger boolean.
-- `TriggerObservation.result` is a sum type. Only `CompleteTriggerResult` carries `passed` and
-  `triggered`; `IncompleteTriggerResult` carries the failed invocation state instead. The
-  compatibility `passed` projection is therefore `bool | None`, not a total boolean.
+- `TriggerObservation.result` is a sum type. `CompleteTriggerResult` scores legacy activation.
+  `CompleteSkillTriggerResult` requires every expected skill and excludes every forbidden skill.
+  Both complete variants carry `passed` and `triggered`. `IncompleteTriggerResult` carries the
+  failed invocation state. The compatibility `passed` projection is `bool | None`.
+- Scoped attribution records typed evidence for each selected source identity. Persisted scope,
+  activated identities, missing expected identities, and forbidden activations must agree with
+  that evidence. Both runners keep the full catalog mounted and hashed.
 - `trigger_reporting.py` owns every raw trigger aggregate: overall report, matrix cell, polarity,
   and per-query. Only `CompleteTriggerCohort` has `pass_rate` and `trigger_rate`; incomplete and
   empty cohorts cannot serialize a numeric quality rate. Both trigger runners retain

@@ -61,6 +61,17 @@ the kinds on purpose:
   own? Keep these apart from answer-quality cases, because they test the description, not the
   answer.
 
+For a catalog trigger case, declare `expected_skills` and `forbidden_skills` as
+lists of exact entries from the manifest's `skill_paths`. A positive case requires
+a nonempty expected list. A negative case requires an empty expected list and a
+nonempty forbidden list. Both lists must contain unique identities and must not
+overlap. One omitted list defaults to empty. Omit both lists to keep the existing
+any-mounted-skill rule. A complete scoped run passes only when every expected
+skill loads and no forbidden skill loads. Unlisted skills may load.
+See [catalog activation attribution](tuning-skill-activation.md#attribute-activation-within-a-catalog)
+for the eval-set shape, provider naming rules, evidence fields, and comparison
+requirements.
+
 Prefer fixture-backed cases (`files: [...]`) over inline-only prompts. A real diff, README, or
 repo tells you more than a prompt the model can answer from general knowledge.
 

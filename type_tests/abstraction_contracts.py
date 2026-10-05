@@ -80,6 +80,7 @@ from trace_contracts import (
     MissingEventLog,
 )
 from trigger_contracts import (
+    CompleteSkillTriggerResult,
     CompleteTriggerResult,
     IncompleteTriggerResult,
     InvocationState,
@@ -111,7 +112,7 @@ def answer_outcome_is_exhaustive(outcome: AnswerOutcome) -> None:
 
 
 def trigger_result_is_exhaustive(result: TriggerResult) -> None:
-    if isinstance(result, CompleteTriggerResult):
+    if isinstance(result, (CompleteTriggerResult, CompleteSkillTriggerResult)):
         _passed: bool = result.passed
         _triggered: bool = result.triggered
     elif isinstance(result, IncompleteTriggerResult):

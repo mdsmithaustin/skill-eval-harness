@@ -210,10 +210,14 @@ from trace_contracts import (
 )
 from trigger_contracts import (
     InvocationOutcome,
+    SkillId,
+    SkillTriggerConstraints,
     TraceEventKind,
     TriggerDetection,
     TriggerEvidenceKind,
     TriggerObservation,
+    TriggerQueryDefinition,
+    parse_skill_constraints,
     validated_trigger_protocol_limits,
 )
 from trigger_reporting import CompleteTriggerCohort, summarize_trigger_cohort
@@ -1235,6 +1239,18 @@ def load_manifest_source(path: Path) -> dict[str, Any]:
                 rows.append(row)
             datasets[str(dataset_id)] = rows
         manifest["datasets"] = datasets
+    for case in iter_cases(manifest):
+        if is_trigger_case(case) and ("expected_skills" in case or "forbidden_skills" in case):
+            skill_paths = manifest.get("skill_paths")
+            if not isinstance(skill_paths, list) or not all(isinstance(value, str) for value in skill_paths):
+                die("manifest.skill_paths must be a list of strings for scoped trigger cases")
+            try:
+                parse_skill_constraints(
+                    {**case, "should_trigger": expected_trigger_polarity(case) == "TRIGGER"},
+                    frozenset(SkillId(value) for value in skill_paths),
+                )
+            except (TypeError, ValueError) as exc:
+                die(f"case {case.get('id')!r}: {exc}")
     return manifest
 
 
@@ -2385,6 +2401,15 @@ def skill_root_keys_for(repo_root: Path, skill_paths: Sequence[str]) -> list[str
         seen[key] = rel
         keys.append(key)
     return keys
+
+
+def mounted_skills_by_id(
+    root_keys: Mapping[SkillId, str], copied: Sequence[Path],
+) -> dict[SkillId, Path]:
+    mounted = {(path.parent if path.name == "SKILL.md" else path).name: path for path in copied}
+    if len(mounted) != len(copied) or set(mounted) != set(root_keys.values()):
+        raise ValueError("mounted skill roots disagree with the declared catalog")
+    return {identity: mounted[key] for identity, key in root_keys.items()}
 
 
 def derived_population(components: list[dict[str, Any]]) -> str:
@@ -6632,22 +6657,33 @@ def event_texts_for_tool_input(obj: Any) -> list[str]:
     return out
 
 
+def text_mentions_mounted_skill(text: str, copied_paths: Sequence[Path]) -> bool:
+    for path in copied_paths:
+        root = path.parent if path.name == "SKILL.md" else path
+        pattern = r"(?<![\w./-])" + re.escape(str(root)) + r"(?=$|[/\s\"'<>),;])"
+        if re.search(pattern, text):
+            return True
+    return False
+
+
 def detect_trigger_records(records: Iterable[dict[str, Any]], copied_paths: list[Path],
                            *, source: str = "generic",
                            pi_stream: PiStream | None = None) -> TriggerDetection:
     """Derive mounted-path evidence from provider-aware completed operations."""
-    needles = [str(p) for p in copied_paths] + [str(p.parent) for p in copied_paths]
     evidence: list[str] = []
     materialized = list(records)
     event_doc, _ = normalize_trace_records(
         materialized, source=source, pi_stream=pi_stream)
     for event in event_doc["events"]:
-        if not event_is_completed(event):
+        if not event_is_completed(event) or event.get("is_error") is True:
+            continue
+        exit_code = event.get("exit_code")
+        if exit_code is not None and (type(exit_code) is not int or exit_code != 0):
             continue
         if event.get("type") not in {"skill_load", "file_read", "command"}:
             continue
         for text in event_texts_for_tool_input(event):
-            if any(needle and needle in text for needle in needles):
+            if text_mentions_mounted_skill(text, copied_paths):
                 evidence.append(text[:500])
     return TriggerDetection.from_texts(TriggerEvidenceKind.MOUNTED_PATH, evidence[:5])
 
@@ -9369,7 +9405,6 @@ def codex_rollout_skill_loads(rollout_text: str, skill_names: list[str], copied_
     with `<skill>`, names a mounted skill, and, when present, carries a `<path>`
     under the mount. Tool calls, listings, prose, and outputs can mention a skill without
     loading it, so they do not count here."""
-    needles = [str(p) for p in copied_paths] + [str(p.parent) for p in copied_paths]
     names = set(skill_names)
     evidence: list[str] = []
     for record in iter_json_objects(rollout_text):
@@ -9388,7 +9423,7 @@ def codex_rollout_skill_loads(rollout_text: str, skill_names: list[str], copied_
                     continue
                 name = _codex_skill_tag(text, "name")
                 path = _codex_skill_tag(text, "path")
-                if name in names and (path is None or any(n and n in path for n in needles)):
+                if name in names and (path is None or text_mentions_mounted_skill(path, copied_paths)):
                     evidence.append(f"rollout skill injection: {name}" + (f" ({path})" if path else ""))
     return evidence[:5]
 
@@ -10527,7 +10562,7 @@ def vibe_skill_tool_evidence(stdout: str, skill_names: list[str]) -> list[str]:
     for event in events["events"]:
         invoked = str(event.get("input_summary") or "")
         if (event.get("type") == "skill_load" and event_is_completed(event)
-                and invoked in names):
+                and event.get("is_error") is not True and invoked in names):
             evidence.append(f"Vibe skill tool invoked: {invoked}")
     return evidence[:5]
 
@@ -15614,7 +15649,7 @@ class _TriggerReportRows:
     runs_per_query: int
     observations: tuple[TriggerObservation, ...]
     cells: dict[tuple[str, str | None, str], dict[int, TriggerObservation]]
-    queries: dict[str, tuple[str, bool]]
+    queries: dict[str, TriggerQueryDefinition]
     protocol: dict[str, Any]
     protocol_sha256: str
     manifest_identity: dict[str, Any]
@@ -15811,11 +15846,12 @@ def _trigger_report_rows(report: dict[str, Any], label: str) -> _TriggerReportRo
     if not isinstance(design, list) or not design:
         die(f"{label} design must be a non-empty list of expected trigger cells")
     expected_cells: set[tuple[str, str | None, str]] = set()
-    queries: dict[str, tuple[str, bool]] = {}
-    query_ids_by_definition: dict[str, tuple[str, bool]] = {}
+    queries: dict[str, TriggerQueryDefinition] = {}
+    query_ids_by_definition: dict[str, tuple[str, bool, SkillTriggerConstraints | None]] = {}
     for position, cell in enumerate(design, 1):
         if not isinstance(cell, dict):
             die(f"{label} design cell {position} must be an object")
+        cell = string_keyed_dict(cell, f"{label} design cell {position}")
         agent, model = cell.get("agent"), cell.get("model")
         query_id, query, should = (
             cell.get("query_id"), cell.get("query"), cell.get("should_trigger"))
@@ -15827,17 +15863,26 @@ def _trigger_report_rows(report: dict[str, Any], label: str) -> _TriggerReportRo
             die(f"{label} design cell {position} query_id must be non-empty")
         if not isinstance(query, str) or not query.strip() or type(should) is not bool:
             die(f"{label} design cell {position} has an invalid query definition")
-        definition = (query, should)
+        try:
+            constraints = parse_skill_constraints(
+                cell, frozenset(SkillId(value) for value in manifest_identity.get("skill_paths", [])))
+            if constraints is not None and any(
+                cell.get(key) != value for key, value in constraints.as_dict().items()
+            ):
+                raise ValueError("design skill constraints must be canonical")
+        except (TypeError, ValueError) as exc:
+            die(f"{label} design cell {position}: {exc}")
+        definition = (query, should, constraints)
         prior_definition = queries.setdefault(query_id, definition)
         if prior_definition != definition:
             die(f"{label} design query_id {query_id!r} identifies conflicting queries")
         inference_query = canonical_trigger_query(query)
         prior = query_ids_by_definition.setdefault(
-            inference_query, (query_id, should))
-        if prior != (query_id, should):
+            inference_query, (query_id, should, constraints))
+        if prior != (query_id, should, constraints):
             die(
-                f"{label} design canonical query aliases must share one query ID and polarity; "
-                f"got {prior!r} and {(query_id, should)!r}")
+                f"{label} design canonical query aliases must share one query ID, polarity, and scope; "
+                f"got {prior!r} and {(query_id, should, constraints)!r}")
         cell_key = (agent, model, query_id)
         if cell_key in expected_cells:
             die(f"{label} duplicates design cell ({agent}, {model}, {query_id})")
@@ -15871,7 +15916,7 @@ def _trigger_report_rows(report: dict[str, Any], label: str) -> _TriggerReportRo
             f"{label} results row {position} protocol_observation",
         )
         identity = observation.identity
-        definition = (observation.query, observation.expectation.should_trigger)
+        definition = (observation.query, observation.expectation.should_trigger, observation.constraints)
         cell_key = (observation.agent, observation.model, identity.query_id)
         if cell_key not in expected_cells:
             die(f"{label} results row {position} is not present in the declared design")
@@ -15993,7 +16038,8 @@ def build_trigger_comparison(baseline: dict[str, Any], ablation: dict[str, Any])
         definition = base_definition or abl_definition
         if definition is None:
             raise AssertionError("trigger cell has no authored-query definition")
-        query, should = definition
+        query, should, constraints = definition
+        scope = constraints.as_dict() if constraints else {}
         base_observations = [base_by_run[n] for n in sorted(base_by_run)]
         abl_observations = [abl_by_run[n] for n in sorted(abl_by_run)]
         base_cohort = summarize_trigger_cohort(base_observations)
@@ -16011,11 +16057,13 @@ def build_trigger_comparison(baseline: dict[str, Any], ablation: dict[str, Any])
                   else None)
         if reason:
             entry = {"agent": agent, "model": model, "query_id": query_id, "query": query,
-                     "should_trigger": should, "reason": reason}
+                     "should_trigger": should, **scope, "reason": reason}
             if reason == "query_definition_mismatch":
                 entry.update({
                     "ablation_query": abl_definition[0] if abl_definition else None,
                     "ablation_should_trigger": abl_definition[1] if abl_definition else None,
+                    "ablation_constraints": (abl_definition[2].as_dict()
+                                             if abl_definition and abl_definition[2] else None),
                 })
             elif reason == "protocol_observation_unsafe":
                 entry.update({
@@ -16031,7 +16079,7 @@ def build_trigger_comparison(baseline: dict[str, Any], ablation: dict[str, Any])
         abl_block = rates(abl_cohort)
         comparable.append({
             "agent": agent, "model": model, "query_id": query_id,
-            "query": query, "should_trigger": should,
+            "query": query, "should_trigger": should, **scope,
             "baseline": base_block, "ablation": abl_block,
             "pass_delta": abl_block["pass_rate"] - base_block["pass_rate"],
             "trigger_delta": abl_block["trigger_rate"] - base_block["trigger_rate"],
@@ -16040,19 +16088,21 @@ def build_trigger_comparison(baseline: dict[str, Any], ablation: dict[str, Any])
     # Agent/model cells are repeated measurements of the SAME authored query,
     # not independent experimental units. Collapse them before inference so a
     # single query run through many models cannot manufacture significance.
-    grouped_queries: dict[tuple[str, bool], list[dict[str, Any]]] = collections.defaultdict(list)
+    grouped_queries: dict[TriggerQueryDefinition, list[dict[str, Any]]] = collections.defaultdict(list)
     for entry in comparable:
-        grouped_queries[(canonical_trigger_query(entry["query"]), entry["should_trigger"])].append(entry)
+        grouped_queries[(canonical_trigger_query(entry["query"]), entry["should_trigger"],
+                         base_report.queries[entry["query_id"]][2])].append(entry)
     query_units = [{
         "query_id": entries[0]["query_id"],
         "query": entries[0]["query"],
         "inference_query": inference_query,
         "should_trigger": should,
+        **(constraints.as_dict() if constraints else {}),
         "cells": len(entries),
         "pass_delta": statistics.mean(e["pass_delta"] for e in entries),
         "trigger_delta": statistics.mean(e["trigger_delta"] for e in entries),
-    } for (inference_query, should), entries in sorted(
-        grouped_queries.items(), key=lambda item: item[0])]
+    } for (inference_query, should, constraints), entries in sorted(
+        grouped_queries.items(), key=lambda item: item[0][:2])]
     pass_deltas: list[int | float] = []
     for entry in query_units:
         delta = entry.get("pass_delta")
@@ -16115,7 +16165,8 @@ def build_trigger_comparison(baseline: dict[str, Any], ablation: dict[str, Any])
         "paired": {"comparable_queries": comparable, "query_units": query_units,
                    "blocked": blocked, "significance": significance,
                    **({"observed_significance": observed_significance} if blocked else {})},
-        "regressed_queries": [{k: entry[k] for k in ("query_id", "query", "should_trigger", "pass_delta")}
+        "regressed_queries": [{k: entry[k] for k in ("query_id", "query", "should_trigger", "pass_delta",
+                                                       "expected_skills", "forbidden_skills") if k in entry}
                               for entry in regressed],
         "summary": {"comparable": len(query_units), "comparable_cells": len(comparable),
                     "blocked": len(blocked),
@@ -18213,6 +18264,138 @@ def result_failure_lines(result: dict[str, Any]) -> list[str]:
     ]
 
 
+def benchmark_gate(
+    report: Mapping[str, object], policy: report_domain.ReportGatePolicy,
+) -> report_domain.ReportGateVerdict:
+    reasons: list[str] = []
+    if report.get("population") != "answer":
+        reasons.append("gate requires an answer benchmark")
+    if report.get("availability") != "complete":
+        reasons.append("experiment evidence is incomplete")
+    design = report.get("answer_design")
+    expected: int | None = None
+    if not isinstance(design, dict):
+        reasons.append("answer design evidence is missing")
+    else:
+        if design.get("complete") is not True or design.get("availability") != "complete":
+            reasons.append("answer design evidence is incomplete")
+        design = string_keyed_dict(design, "answer design")
+        counts = [design.get(key) for key in ("expected_runs", "observed_runs")]
+        if any(type(count) is not int or count < 1 for count in counts):
+            reasons.append("answer design requires positive expected and observed run counts")
+        elif counts[0] != counts[1]:
+            reasons.append("answer design run counts differ")
+        else:
+            expected = counts[0]
+        for key in ("missing_run_dirs", "extra_run_dirs", "attestation_errors"):
+            if design.get(key) != []:
+                reasons.append(f"answer design {key} must be an empty list")
+    if report.get("deferred_judge_tasks") != []:
+        reasons.append("deferred judge evidence is missing or incomplete")
+    raw_results = report.get("results")
+    if not isinstance(raw_results, list) or not raw_results:
+        return report_domain.GateRejected(tuple(reasons + ["benchmark results are empty or missing"]))
+    if len(raw_results) != expected:
+        reasons.append("result count does not match answer design")
+    identities: set[tuple[CaseId, ModelId | None, ExecutionVariant, RunNumber]] = set()
+    results: list[dict[str, Any]] = []
+    checked_by_variant = dict.fromkeys(policy.variants, 0)
+    for index, raw in enumerate(raw_results):
+        label = f"result {index + 1}"
+        if not isinstance(raw, dict):
+            reasons.append(f"{label} must be an object")
+            continue
+        try:
+            raw = string_keyed_dict(raw, label)
+            case_id = CaseId.parse(raw.get("case_id"))
+            if "model" not in raw:
+                raise ValueError("model identity is missing")
+            model = ModelId.parse(raw["model"]) if raw["model"] is not None else None
+            variant = ExecutionVariant.parse(raw.get("variant"))
+            run_number = RunNumber.parse(raw.get("run_number"))
+            identity = (case_id, model, variant, run_number)
+            label = f"{case_id}/{model or 'default-model'}/{variant}/run-{run_number}"
+            if identity in identities:
+                raise ValueError("duplicate result identity")
+            identities.add(identity)
+            if raw.get("execution_valid") is not True or raw.get("missing_output") is not False:
+                raise ValueError("execution is invalid or output is missing")
+            if (raw.get("grading_availability") != "complete"
+                    or raw.get("blocked_assertions") != []
+                    or type(raw.get("deferred_judge_tasks")) is not int
+                    or raw["deferred_judge_tasks"] != 0):
+                raise ValueError("grading evidence is incomplete")
+            assertions: list[object] = []
+            for key in ("assertions", "qualitative_assertions"):
+                rows = raw.get(key)
+                if not isinstance(rows, list):
+                    raise TypeError(f"{key} must be a list")
+                assertions.extend(rows)
+            observations = []
+            for assertion in assertions:
+                if not isinstance(assertion, dict):
+                    raise TypeError("assertion must be an object")
+                if "availability" not in assertion or "severity" not in assertion:
+                    raise ValueError("assertion availability or severity is missing")
+                observation = assertion_observation_from_row(
+                    string_keyed_dict(assertion, "assertion result"))
+                if isinstance(observation, SkippedAssertion):
+                    continue
+                if isinstance(observation, UnavailableAssertion):
+                    raise TypeError(f"assertion {observation.name} has no complete verdict")
+                observations.append(observation)
+            if not observations:
+                raise ValueError("run has no complete applicable assertion verdicts")
+            for key in ("critical_failures", "below_reference_floor"):
+                values = raw.get(key)
+                if not isinstance(values, list) or any(
+                    not isinstance(value, str) or not value for value in values
+                ):
+                    raise ValueError(f"{key} must be a list of assertion names")
+            if not isinstance(raw.get("vetoed"), bool):
+                raise TypeError("critical veto state is missing")
+            if "objective_pass_rate" not in raw:
+                raise ValueError("objective pass rate is missing")
+            if raw["objective_pass_rate"] is not None:
+                report_domain.UnitRate(raw["objective_pass_rate"])
+            results.append(raw)
+            if variant in checked_by_variant:
+                checked_by_variant[variant] += 1
+                if not any(observation.severity is not Severity.SOFT
+                           for observation in observations):
+                    reasons.append(f"{label} has no applicable gate assertions")
+                applicable = [observation.to_row() for observation in observations]
+                for failure in result_failure_lines({**raw, "assertions": applicable,
+                                                     "qualitative_assertions": []}):
+                    reasons.append(f"{label}: {failure}")
+                if raw["vetoed"] or raw["critical_failures"]:
+                    reasons.append(f"{label} has a critical veto")
+                if raw["below_reference_floor"]:
+                    reasons.append(f"{label} is below its reference floor")
+        except (TypeError, ValueError) as exc:
+            reasons.append(f"{label}: {exc}")
+    for variant, count in checked_by_variant.items():
+        if not count:
+            reasons.append(f"selected variant {variant} has no complete runs")
+    paired = report.get("paired_summary")
+    if not isinstance(paired, dict) or paired.get("availability") != "complete":
+        reasons.append("pairing evidence is missing or incomplete")
+    elif len(results) == len(raw_results):
+        try:
+            construction = _metric_pair_construction(results, "objective_pass_rate")
+            diagnostics = paired.get("pairing")
+            if (not isinstance(diagnostics, dict)
+                    or any(type(diagnostics.get(key)) is not int
+                           for key in ("eligible_pairs", "blocked_pairs"))
+                    or construction.blocked or diagnostics != construction.diagnostics()):
+                reasons.append("pairing evidence does not match complete result identities")
+        except (TypeError, ValueError) as exc:
+            reasons.append(f"pairing evidence: {exc}")
+    if reasons:
+        return report_domain.GateRejected(tuple(reasons))
+    return report_domain.GatePassed(sum(checked_by_variant.values()))
+
+
 def junit_xml_from_report(report: dict[str, Any]) -> str:
     """One <testcase> per case/variant/run over a benchmark report, evidence on
     failures, and the paired lift as suite properties — the CI-facing shape of
@@ -18345,17 +18528,44 @@ def github_summary_from_report(report: dict[str, Any]) -> str:
 
 
 def report_command(args: argparse.Namespace) -> int:
-    report = load_json(Path(args.benchmark))
-    if args.format == "junit":
-        rendered = junit_xml_from_report(report)
-    else:
-        rendered = github_summary_from_report(report)
+    gate_enabled = getattr(args, "fail_on_failures", False)
+    try:
+        report = load_json(Path(args.benchmark))
+    except SystemExit:
+        if gate_enabled:
+            return 2
+        raise
+    except (OSError, UnicodeError, ValueError) as exc:
+        if not gate_enabled:
+            raise
+        print(f"invalid benchmark report: {exc}", file=sys.stderr)
+        return 2
+    try:
+        if args.format == "junit":
+            rendered = junit_xml_from_report(report)
+        else:
+            rendered = github_summary_from_report(report)
+    except (AttributeError, TypeError, ValueError) as exc:
+        if not gate_enabled:
+            raise
+        print(f"invalid benchmark report: {exc}", file=sys.stderr)
+        return 2
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(rendered, encoding="utf-8")
     else:
         print(rendered, end="")
+    if gate_enabled:
+        policy = report_domain.ReportGatePolicy(tuple(
+            ExecutionVariant.parse(value)
+            for value in (getattr(args, "gate_variant", None) or [WITH_SKILL])
+        ))
+        verdict = benchmark_gate(report, policy)
+        if isinstance(verdict, report_domain.GateRejected):
+            for reason in verdict.reasons:
+                print(f"report gate: {reason}", file=sys.stderr)
+            return 1
     return 0
 
 
@@ -21765,6 +21975,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--benchmark", required=True, help="benchmark.json produced by `skill-benchmark benchmark --out`")
     p.add_argument("--format", choices=["junit", "github"], required=True)
     p.add_argument("--out", help="output path (e.g. junit.xml, or a file appended to $GITHUB_STEP_SUMMARY)")
+
+    p.add_argument("--fail-on-failures", action="store_true",
+                   help="exit 1 for incomplete evidence or failing selected variants")
+    p.add_argument("--gate-variant", action="append",
+                   help="variant checked by --fail-on-failures (repeatable; default: with_skill)")
 
     p = sub.add_parser("compare-judges", help="flag judge-sensitivity across judged benchmark reports")
     p.add_argument("--report", action="append", metavar="NAME=PATH", help="judge label = judged benchmark report JSON (repeatable)")

@@ -609,12 +609,21 @@ class ClaudeDetectionTests(unittest.TestCase):
     def _adapter(self):
         return tm.ClaudeAdapter()
 
-    def test_skill_tool_use_by_name_is_trigger_evidence(self):
-        stream = json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "name": "Skill", "input": {"skill": "demo-reviewer", "args": "..."}}]}})
+    def test_completed_skill_tool_use_by_name_is_trigger_evidence(self):
+        call = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "load-1", "name": "Skill",
+             "input": {"skill": "demo-reviewer", "args": "..."}}]}}
+        completed = {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "load-1", "content": "loaded"}]}}
+        stream = "\n".join(json.dumps(event) for event in [call, completed])
         detection = self._adapter().detect(completed_invocation(stream), ["demo-reviewer"], [])
-        self.assertTrue(detection.triggered)
-        self.assertIn("Skill tool invoked: demo-reviewer", detection.legacy_evidence)
+        self.assertEqual(detection.legacy_evidence, ["Skill tool invoked: demo-reviewer"])
+        incomplete = self._adapter().detect(completed_invocation(json.dumps(call)), ["demo-reviewer"], [])
+        self.assertFalse(incomplete.triggered)
+        completed["message"]["content"][0]["is_error"] = True
+        failed_stream = "\n".join(json.dumps(event) for event in [call, completed])
+        failed = self._adapter().detect(completed_invocation(failed_stream), ["demo-reviewer"], [])
+        self.assertFalse(failed.triggered)
 
     def test_other_skills_and_plain_answers_are_not_evidence(self):
         stream = "\n".join([
@@ -2537,6 +2546,295 @@ class TriggerComparisonTests(unittest.TestCase):
         baseline["evidence_class"] = "answer"
         with self.assertRaises(SystemExit):
             sb.build_trigger_comparison(baseline, trigger_report(self._ablation_rows(), ablation="x", provenance=ABLATION_PROVENANCE, tree_hash=EDIT_HASH))
+
+
+
+
+class CatalogAttributionTests(unittest.TestCase):
+    REVIEW = "skills/z-reviewer/SKILL.md"
+    RELEASE = "skills/a-release/SKILL.md"
+    OTHER = "skills/m-extra/SKILL.md"
+
+    def catalog(self, directory):
+        from helpers import make_eval_repo
+        path = make_eval_repo(Path(directory), skill_name="catalog-report-label",
+                             skill_paths=[self.REVIEW, self.OTHER, self.RELEASE], cases=[],
+                             ablations=[{"id": "drop-description", "class": "discovery",
+                                         "mechanism": "frontmatter_field",
+                                         "target": {"field": "when_to_use", "skill_root": self.REVIEW}}])
+        for identity, name, description in (
+            (self.REVIEW, "review-name", "Review change"),
+            (self.RELEASE, "release-name", "Release deploy"),
+            (self.OTHER, "extra-name", "Travel planning"),
+        ):
+            (path.parent.parent / identity).write_text(skill_markdown(name, description).replace("description:", "when_to_use: Extra discovery hint\ndescription:"), encoding="utf-8")
+        return path
+
+    def run_rows(self, manifest, rows, **kwargs):
+        return tm.run_matrix(manifest, rows, agents=["stub"], models=[None],
+                             runs_per_query=2, timeout=2, workers=1, **kwargs)
+
+    def test_catalog_verdicts_keep_full_mount_and_hash_with_reversed_declarations(self):
+        specs = [
+            ("review change", [self.REVIEW], [self.RELEASE], True, True),
+            ("release deploy", [self.REVIEW], [self.RELEASE], False, False),
+            ("review change release deploy", [self.REVIEW], [self.RELEASE], True, False),
+            ("weather forecast", [self.REVIEW], [self.RELEASE], False, False),
+            ("review change travel planning", [self.REVIEW], [self.RELEASE], True, True),
+            ("review change missing extra", [self.REVIEW, self.OTHER], [self.RELEASE], True, False),
+            ("travel planning negative", [], [self.RELEASE], False, True),
+            ("release deploy negative", [], [self.RELEASE], True, False),
+        ]
+        rows = [{"query_id": f"case-{i}", "query": query, "should_trigger": bool(expected),
+                 "expected_skills": expected, "forbidden_skills": forbidden}
+                for i, (query, expected, forbidden, _, _) in enumerate(specs)]
+        with tempfile.TemporaryDirectory() as td:
+            manifest = self.catalog(td)
+            report = self.run_rows(manifest, rows)
+            legacy = self.run_rows(manifest, [{"query": "travel planning", "should_trigger": True}])
+        self.assertEqual(report["skill_tree_hash"], legacy["skill_tree_hash"])
+        self.assertEqual(report["summary"]["measurement_status"], "complete")
+        self.assertEqual(report["summary"]["passed"], 6)
+        self.assertTrue(legacy["results"][0]["pass"])
+        self.assertNotIn("expected_skills", legacy["results"][0])
+        for row in report["results"]:
+            _, expected, forbidden, triggered, passed = specs[int(row["query_id"].split("-")[1])]
+            self.assertEqual((row["triggered"], row["pass"]), (triggered, passed))
+            self.assertEqual(row["expected_skills"], sorted(expected))
+            self.assertEqual(set(row["skill_detections"]), set(expected + forbidden))
+            self.assertEqual(row["skill_tree_hash"], report["skill_tree_hash"])
+        parsed = sb._trigger_report_rows(report, "catalog")
+        self.assertEqual(len(parsed.observations), 16)
+
+    def test_harness_failure_retains_scope_and_null_verdicts(self):
+        class Broken(tm.StubAdapter):
+            def invoke(self, *args):
+                raise RuntimeError("fixture invoke failed")
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(tm.ADAPTERS, {"stub": Broken}):
+            report = self.run_rows(self.catalog(td), [{"query": "review change", "should_trigger": True,
+                                                      "expected_skills": [self.REVIEW]}])
+        row = report["results"][0]
+        self.assertEqual(row["expected_skills"], [self.REVIEW])
+        self.assertEqual(row["skill_detections"], {self.REVIEW: []})
+        self.assertIsNone(row["pass"])
+        self.assertIsNone(row["triggered"])
+        self.assertEqual(report["summary"]["measurement_status"], "incomplete")
+        self.assertEqual(TriggerObservation.from_row(row).constraints.expected, frozenset({self.REVIEW}))
+
+    def test_selected_duplicate_exposed_name_rejected_before_any_invocation(self):
+        with tempfile.TemporaryDirectory() as td:
+            manifest = self.catalog(td)
+            (manifest.parent.parent / self.OTHER).write_text(skill_markdown('" review-name "', "Travel planning"))
+            for agent in ("codex", "vibe"):
+                with self.subTest(agent=agent), \
+                     mock.patch.object(tm.ADAPTERS[agent], "invoke", side_effect=AssertionError("must not invoke")), \
+                     self.assertRaisesRegex(ValueError, "duplicate exposed skill name"):
+                    tm.run_matrix(manifest, [{"query": "review change", "should_trigger": True,
+                                              "expected_skills": [self.REVIEW]}], agents=[agent], models=[None],
+                                  runs_per_query=1, timeout=1, workers=1)
+            report = self.run_rows(manifest, [{"query": "review change", "should_trigger": True,
+                                              "expected_skills": [self.REVIEW]}])
+        self.assertTrue(report["results"][0]["pass"])
+
+    def test_provider_specific_names_are_attributed_to_selected_root(self):
+        from trigger_contracts import parse_skill_constraints
+        with tempfile.TemporaryDirectory() as td:
+            manifest = self.catalog(td)
+            tree = Path(sb.build_canonical_skill_tree(manifest.parent.parent, tm.load_manifest(manifest), Path(td) / "tree"))
+            root_keys = {self.REVIEW: "z-reviewer", self.RELEASE: "a-release", self.OTHER: "m-extra"}
+            constraints = parse_skill_constraints({"should_trigger": True, "expected_skills": [self.REVIEW],
+                                                   "forbidden_skills": [self.RELEASE]})
+            for adapter, invoked, should_pass in (
+                (tm.ClaudeAdapter(), "z-reviewer", True),
+                (tm.ClaudeAdapter(), "review-name", False),
+                (tm.CodexAdapter(), "review-name", True),
+                (tm.CodexAdapter(), "z-reviewer", False),
+                (tm.VibeAdapter(), "review-name", True),
+                (tm.VibeAdapter(), "z-reviewer", False),
+            ):
+                if adapter.name == "claude":
+                    events = [
+                        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "s1", "name": "Skill", "input": {"skill": invoked}}]}},
+                        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "s1", "content": "loaded"}]}},
+                    ]
+                    invocation = completed_invocation("\n".join(map(json.dumps, events)))
+                elif adapter.name == "vibe":
+                    events = [
+                        {"role": "assistant", "tool_calls": [{"id": "s1", "function": {"name": "skill", "arguments": json.dumps({"name": invoked})}}]},
+                        {"role": "tool", "tool_call_id": "s1", "content": "loaded"},
+                        {"role": "assistant", "content": "done"},
+                    ]
+                    invocation = completed_invocation("\n".join(map(json.dumps, events)))
+                else:
+                    text = json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                        {"text": f"<skill>\n<name>{invoked}</name>\n</skill>"}]}})
+                    invocation = completed_invocation("").with_provider_payload(sb.CodexRollout("found", text=text))
+                def invoke(query, model, workspace, timeout, adapter=adapter, invocation=invocation):
+                    self.assertEqual(query, "review change")
+                    if isinstance(adapter, tm.CodexAdapter):
+                        shutil.rmtree(adapter._codex_home(workspace))
+                    return invocation
+
+                with self.subTest(agent=adapter.name, invoked=invoked), \
+                     mock.patch.object(adapter, "invoke", side_effect=invoke):
+                    row = tm.run_cell_query(adapter, tree, "review change", True, None, 1,
+                                            metadata={"skill_tree_hash": sb.skill_tree_hash(tree)},
+                                            constraints=constraints, root_keys=root_keys)
+                self.assertEqual(row["pass"], should_pass)
+                self.assertEqual(row["activated_skills"], [self.REVIEW] if should_pass else [])
+
+    def test_directory_and_sibling_prefix_paths_require_the_selected_root(self):
+        selected = Path("/tmp/catalog/review")
+        for path, expected in (("/tmp/catalog/review/SKILL.md", True),
+                               ("/tmp/catalog/review/references/check.md", True),
+                               ("/tmp/catalog/review-extra/SKILL.md", False),
+                               ("/tmp/catalog/other/SKILL.md", False)):
+            with self.subTest(path=path):
+                records = [{"type": "file_read", "path": path, "status": "completed"}]
+                self.assertEqual(sb.detect_trigger_records(records, [selected]).triggered, expected)
+                rollout = json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                    {"text": f"<skill>\n<name>review</name>\n<path>{path}</path>\n</skill>"}]}})
+                self.assertEqual(bool(sb.codex_rollout_skill_loads(rollout, ["review"], [selected])), expected)
+        for status in ("in_progress", "failed"):
+            self.assertFalse(sb.detect_trigger_records([
+                {"type": "file_read", "path": "/tmp/catalog/review/SKILL.md", "status": status}], [selected]).triggered)
+
+    def test_codex_failed_commands_do_not_credit_mounted_path_reads(self):
+        selected = Path("/tmp/catalog/review/SKILL.md")
+        for exit_code, expected in ((0, True), (1, False), (-1, False), (True, False), (False, False)):
+            with self.subTest(exit_code=exit_code):
+                records = [{"type": "item.completed", "item": {
+                    "type": "command_execution", "status": "completed",
+                    "exit_code": exit_code, "command": f"cat {selected}",
+                    "aggregated_output": "loaded" if expected else "Permission denied",
+                }}]
+                detection = sb.detect_trigger_records(records, [selected], source="codex")
+                self.assertEqual(detection.triggered, expected)
+                self.assertEqual(detection.legacy_evidence, [f"cat {selected}"] if expected else [])
+
+    def test_completed_file_reads_without_exit_code_remain_eligible(self):
+        selected = Path("/tmp/catalog/review/SKILL.md")
+        for exit_evidence in ({}, {"exit_code": None}):
+            for status, expected in (("completed", True), ("failed", False), (False, False)):
+                with self.subTest(status=status, exit_evidence=exit_evidence):
+                    records = [{"type": "file_read", "path": str(selected), "status": status,
+                                **exit_evidence}]
+                    detection = sb.detect_trigger_records(records, [selected])
+                    self.assertEqual(detection.triggered, expected)
+                    self.assertEqual(detection.legacy_evidence, [str(selected)] if expected else [])
+
+    def test_scope_changes_block_comparison_and_missing_repetitions_are_rejected(self):
+        rows = [{"query_id": "review", "query": "review change", "should_trigger": True,
+                 "expected_skills": [self.REVIEW]}]
+        with tempfile.TemporaryDirectory() as td:
+            manifest = self.catalog(td)
+            base = self.run_rows(manifest, rows)
+            changed = self.run_rows(manifest, [{**rows[0], "forbidden_skills": [self.RELEASE]}], ablation="drop-description")
+            matching = self.run_rows(manifest, rows, ablation="drop-description")
+        comparison = sb.build_trigger_comparison(base, matching)
+        self.assertEqual(comparison["summary"]["comparable"], 1)
+        self.assertEqual(comparison["paired"]["query_units"][0]["expected_skills"], [self.REVIEW])
+        self.assertEqual(comparison["paired"]["query_units"][0]["pass_delta"], 0.0)
+        blocked = sb.build_trigger_comparison(base, changed)
+        self.assertEqual(blocked["paired"]["blocked"][0]["reason"], "query_definition_mismatch")
+        missing = json.loads(json.dumps(base))
+        missing["results"].pop()
+        with self.assertRaises(SystemExit):
+            sb.build_trigger_comparison(missing, matching)
+        forged = json.loads(json.dumps(base))
+        forged["design"][0]["expected_skills"] = [self.RELEASE]
+        with self.assertRaises(SystemExit):
+            sb.build_trigger_comparison(forged, matching)
+
+    def test_loader_parity_dataset_scope_and_prompt_independence(self):
+        from copy import deepcopy
+        with tempfile.TemporaryDirectory() as td:
+            path = self.catalog(td)
+            manifest = tm.load_manifest(path)
+            manifest["datasets"] = {"targets": [{"id": "one", "target": self.REVIEW}]}
+            manifest["cases"] = [{"id": "scoped", "kind": "trigger", "split": "tune", "template": "targets",
+                                  "prompt": "review change", "should_trigger": True,
+                                  "expected_skills": ["{target}"]}]
+            path.write_text(json.dumps(manifest))
+            rows = tr.eval_rows_from_args(SimpleNamespace(eval_set=None, split="tune"), path)
+            self.assertEqual(rows[0]["expected_skills"], [self.REVIEW])
+            self.assertEqual(rows[0]["forbidden_skills"], [])
+            eval_set = Path(td) / "eval.json"
+            eval_set.write_text(json.dumps(rows))
+            explicit = tr.eval_rows_from_args(SimpleNamespace(eval_set=str(eval_set), split="tune"), path)
+            self.assertEqual(explicit, rows)
+            with self.assertRaisesRegex(SystemExit, "canonical query aliases"):
+                tr.validate_trigger_rows([rows[0], {**rows[0], "query_id": "different", "expected_skills": [self.RELEASE]}],
+                                         "fixture", frozenset([self.REVIEW, self.RELEASE]))
+            malformed = deepcopy(manifest)
+            malformed["cases"][0]["expected_skills"] = ["missing"]
+            path.write_text(json.dumps(malformed))
+            for loader in (sb.load_manifest_source, sb.validate_manifest, tr.load_manifest):
+                with self.subTest(loader=loader.__name__), self.assertRaises(SystemExit):
+                    loader(path)
+
+    def test_legacy_generated_ids_are_unchanged_and_scope_changes_new_ids(self):
+        query = "review change"
+        old_id = "query-653729a748d6a08f2bdf340ab1df29140ef5869777772561e7466345da82f6fc"
+        legacy = tr.validate_trigger_rows([{"query": query, "should_trigger": True}], "fixture")[0]
+        self.assertEqual(legacy["query_id"], old_id)
+        declared = frozenset([self.REVIEW, self.RELEASE])
+        scoped = tr.validate_trigger_rows([{**legacy, "query_id": "", "expected_skills": [self.REVIEW]}], "fixture", declared)[0]
+        forbidden = tr.validate_trigger_rows([{**legacy, "query_id": "", "expected_skills": [self.REVIEW], "forbidden_skills": [self.RELEASE]}], "fixture", declared)[0]
+        self.assertNotEqual(scoped["query_id"], old_id)
+        self.assertNotEqual(scoped["query_id"], forbidden["query_id"])
+
+    def test_pi_entrypoint_persists_the_same_scope_and_per_skill_evidence(self):
+        from trigger_contracts import parse_skill_constraints
+        with tempfile.TemporaryDirectory() as td:
+            manifest = self.catalog(td)
+            rows = [{"query_id": "pi-scoped", "query": "review change", "should_trigger": True,
+                     "expected_skills": [self.REVIEW], "forbidden_skills": [self.RELEASE]}]
+            eval_set = Path(td) / "rows.json"
+            eval_set.write_text(json.dumps(rows))
+            output = Path(td) / "report.json"
+
+            def invoke(plan):
+                self.assertEqual(plan.argv[-1], "review change")
+                skills = plan.cwd / "skills"
+                self.assertEqual(sorted(path.name for path in skills.iterdir()),
+                                 ["a-release", "m-extra", "z-reviewer"])
+                fixture = (ROOT / "tests/fixtures/pi/lifecycle-success.jsonl").read_text()
+                return completed_invocation(fixture.replace("/tmp/pi-config/skills/demo/SKILL.md",
+                                                             str(skills / "z-reviewer/SKILL.md")))
+
+            argv = ["skill-pi-trigger-eval", str(manifest), "--eval-set", str(eval_set),
+                    "--runs-per-query", "1", "--workers", "1", "--out", str(output)]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(tr, "invoke_argv_with_timeout", side_effect=invoke), \
+                 mock.patch("builtins.print"):
+                self.assertEqual(tr.main(), 0)
+            report = json.loads(output.read_text())
+            self.assertEqual(report["design"][0]["expected_skills"], [self.REVIEW])
+            self.assertEqual(report["results"][0]["activated_skills"], [self.REVIEW])
+            self.assertTrue(report["results"][0]["pass"])
+            self.assertEqual(sb._trigger_report_rows(report, "pi-scoped").queries["pi-scoped"][2],
+                             parse_skill_constraints(rows[0]))
+
+    def test_directory_without_skill_md_cannot_credit_another_root(self):
+        from trigger_contracts import parse_skill_constraints
+        with tempfile.TemporaryDirectory() as td:
+            tree = Path(td) / "tree"
+            empty = tree / "review"
+            empty.mkdir(parents=True)
+            (empty / "instructions.txt").write_text("Review instructions")
+            sibling = tree / "review-extra"
+            sibling.mkdir()
+            (sibling / "SKILL.md").write_text(skill_markdown("review-extra", "Release deploy"))
+            row = tm.run_cell_query(
+                tm.StubAdapter(), tree, "release deploy", True, None, 1,
+                metadata={"skill_tree_hash": sb.skill_tree_hash(tree)},
+                constraints=parse_skill_constraints({"should_trigger": True, "expected_skills": ["skills/review"]}),
+                root_keys={"skills/review": "review", "skills/review-extra/SKILL.md": "review-extra"},
+            )
+        self.assertEqual(row["missing_expected_skills"], ["skills/review"])
+        self.assertFalse(row["pass"])
+        self.assertFalse(row["triggered"])
 
 
 if __name__ == "__main__":
