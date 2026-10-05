@@ -97,6 +97,22 @@ class CLIInvocationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     CLIInvocation.from_namespace(namespace)
 
+    def test_report_gate_flags_are_validated_before_dispatch(self):
+        invocation = CLIInvocation.from_namespace(self.parse(
+            "report", "--benchmark", "benchmark.json", "--format", "junit",
+            "--fail-on-failures", "--gate-variant", "with_skill",
+            "--gate-variant", "ablation:policy"))
+        self.assertEqual(invocation.arguments["gate_variant"],
+                         ("with_skill", "ablation:policy"))
+        for flags in (("--gate-variant", "with_skill"),
+                      ("--fail-on-failures", "--gate-variant", "unknown"),
+                      ("--fail-on-failures", "--gate-variant", "ablation:"),
+                      ("--fail-on-failures", "--gate-variant", "with_skill",
+                       "--gate-variant", "with_skill")):
+            with self.subTest(flags=flags), self.assertRaises(ValueError):
+                CLIInvocation.from_namespace(self.parse(
+                    "report", "--benchmark", "benchmark.json", "--format", "junit", *flags))
+
     def test_unknown_command_is_not_an_invocation(self):
         with self.assertRaisesRegex(ValueError, "unknown CLI command"):
             CLIInvocation.from_namespace(argparse.Namespace(cmd="surprise"))

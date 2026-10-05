@@ -21,7 +21,7 @@ General eval frameworks (openai/evals, vitest-evals, viteval) score one output a
 | Is this eval safe to spend model budget on? | `validate --strict-leakage --leakage-min-chars 1 --check-ablations` and `audit-manifest --fail-on-blockers`. |
 | Can I trust this LLM judge or rubric result? | `judge`, `compare-judges`, `judge-robustness`, and `judge-alignment`. |
 | Could the eval be contaminated by leaked answer keys or memorized canaries? | Prompt leakage lint plus `contamination` over generated outputs. |
-| Can this become a CI gate? | `suite-run`, `report --format junit|github`, and readiness blockers from `audit-manifest`. |
+| Can this become a CI gate? | `suite-run`, `report --fail-on-failures --format junit|github`, and readiness blockers from `audit-manifest`. |
 
 ## Core loop
 
@@ -170,7 +170,7 @@ skill-benchmark --help
 | `docs/authoring-evals.md` | Opinionated workflow/quickstart for writing a new eval suite, including severity and graded assertions. |
 | `docs/tuning-skill-activation.md` | The activation-tuning loop: trigger cases in both polarities, the (agent, model) trigger-rate matrix, how to read under/over-trigger, and the adapter seam for adding agents. |
 | `docs/is-my-skill-worth-its-tokens.md` | Keep/trim/cut walkthrough: static footprint (`profile-skill`) vs. runtime lift-per-token and lift-per-dollar (`token-overhead`, `cost-summary`). |
-| `docs/gating-ci-on-evals.md` | The CI recipe: `report --format junit|github` for regressions plus `audit-manifest --fail-on-blockers` for manifest trust. |
+| `docs/gating-ci-on-evals.md` | The CI recipe: `report --fail-on-failures --format junit|github` for selected variants plus `audit-manifest --fail-on-blockers` for manifest trust. |
 | `docs/did-my-skill-edit-regress.md` | The edit → re-run → diff loop: the within-run `ablation_regressions` block (assertion-level, significance-gated) and cross-iteration `render-viewer --previous-workspace` diffs over the `iteration-N/` convention. |
 | `docs/which-model-should-my-skill-target.md` | Ranking model tiers by lift: `prepare --models` fan-out, the `by_model` / `model_analysis` blocks, and reading real lift vs. base-model saturation per tier. |
 | `docs/why-did-this-run-fail.md` | Debugging one failing run: the `error-analysis` taxonomy + review queue, then the run dir (`output.md`/`metadata.json`), mapped to a failure class and a manifest-or-skill decision. |
@@ -550,7 +550,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | Command | What it does |
 |---|---|
 | `skill-benchmark audit-manifest` | Readiness verdict + blockers; `--fail-on-blockers` gates CI on "worth paying to run". |
-| `skill-benchmark report` | Serialize `benchmark.json` as JUnit XML or GitHub job-summary + annotations. |
+| `skill-benchmark report` | Serialize `benchmark.json` as JUnit XML or GitHub job-summary + annotations. Add `--fail-on-failures` to require complete evidence and passing `with_skill` checks. Repeat `--gate-variant` to select other arms. |
 | `skill-benchmark contamination` | Output-side perimeter: canary tripwire, output↔answer n-gram overlap, released-at/cutoff gate. |
 | `skill-benchmark error-analysis` | Open-coding review queue + axial failure taxonomy over a `benchmark.json`. |
 | `skill-benchmark compare-judges` | Flag whether measured lift depends on which judge model graded. |

@@ -18213,6 +18213,136 @@ def result_failure_lines(result: dict[str, Any]) -> list[str]:
     ]
 
 
+def benchmark_gate(
+    report: Mapping[str, object], policy: report_domain.ReportGatePolicy,
+) -> report_domain.ReportGateVerdict:
+    """Decide a saved answer benchmark's gate without reopening run artifacts."""
+    reasons: list[str] = []
+    if report.get("population") != "answer":
+        reasons.append("gate requires an answer benchmark")
+    if report.get("availability") != "complete":
+        reasons.append("experiment evidence is incomplete")
+    design = report.get("answer_design")
+    expected: int | None = None
+    if not isinstance(design, dict):
+        reasons.append("answer design evidence is missing")
+    else:
+        if design.get("complete") is not True or design.get("availability") != "complete":
+            reasons.append("answer design evidence is incomplete")
+        design = string_keyed_dict(design, "answer design")
+        counts = [design.get(key) for key in ("expected_runs", "observed_runs")]
+        if any(type(count) is not int or count < 1 for count in counts):
+            reasons.append("answer design requires positive expected and observed run counts")
+        elif counts[0] != counts[1]:
+            reasons.append("answer design run counts differ")
+        else:
+            expected = counts[0]
+        for key in ("missing_run_dirs", "extra_run_dirs", "attestation_errors"):
+            if design.get(key) != []:
+                reasons.append(f"answer design {key} must be an empty list")
+    if report.get("deferred_judge_tasks") != []:
+        reasons.append("deferred judge evidence is missing or incomplete")
+    raw_results = report.get("results")
+    if not isinstance(raw_results, list) or not raw_results:
+        return report_domain.GateRejected(tuple(reasons + ["benchmark results are empty or missing"]))
+    if len(raw_results) != expected:
+        reasons.append("result count does not match answer design")
+    identities: set[tuple[CaseId, ModelId | None, ExecutionVariant, RunNumber]] = set()
+    results: list[dict[str, Any]] = []
+    checked_by_variant = dict.fromkeys(policy.variants, 0)
+    for index, raw in enumerate(raw_results):
+        label = f"result {index + 1}"
+        if not isinstance(raw, dict):
+            reasons.append(f"{label} must be an object")
+            continue
+        try:
+            raw = string_keyed_dict(raw, label)
+            case_id = CaseId.parse(raw.get("case_id"))
+            if "model" not in raw:
+                raise ValueError("model identity is missing")
+            model = ModelId.parse(raw["model"]) if raw["model"] is not None else None
+            variant = ExecutionVariant.parse(raw.get("variant"))
+            run_number = RunNumber.parse(raw.get("run_number"))
+            identity = (case_id, model, variant, run_number)
+            label = f"{case_id}/{model or 'default-model'}/{variant}/run-{run_number}"
+            if identity in identities:
+                raise ValueError("duplicate result identity")
+            identities.add(identity)
+            if raw.get("execution_valid") is not True or raw.get("missing_output") is not False:
+                raise ValueError("execution is invalid or output is missing")
+            if (raw.get("grading_availability") != "complete"
+                    or raw.get("blocked_assertions") != []
+                    or type(raw.get("deferred_judge_tasks")) is not int
+                    or raw["deferred_judge_tasks"] != 0):
+                raise ValueError("grading evidence is incomplete")
+            assertions: list[object] = []
+            for key in ("assertions", "qualitative_assertions"):
+                rows = raw.get(key)
+                if not isinstance(rows, list):
+                    raise TypeError(f"{key} must be a list")
+                assertions.extend(rows)
+            observations = []
+            for assertion in assertions:
+                if not isinstance(assertion, dict):
+                    raise TypeError("assertion must be an object")
+                if "availability" not in assertion or "severity" not in assertion:
+                    raise ValueError("assertion availability or severity is missing")
+                observation = assertion_observation_from_row(
+                    string_keyed_dict(assertion, "assertion result"))
+                if isinstance(observation, SkippedAssertion):
+                    continue
+                if isinstance(observation, UnavailableAssertion):
+                    raise TypeError(f"assertion {observation.name} has no complete verdict")
+                observations.append(observation)
+            if not observations:
+                raise ValueError("run has no complete applicable assertion verdicts")
+            for key in ("critical_failures", "below_reference_floor"):
+                values = raw.get(key)
+                if not isinstance(values, list) or any(
+                    not isinstance(value, str) or not value for value in values
+                ):
+                    raise ValueError(f"{key} must be a list of assertion names")
+            if not isinstance(raw.get("vetoed"), bool):
+                raise TypeError("critical veto state is missing")
+            if "objective_pass_rate" not in raw:
+                raise ValueError("objective pass rate is missing")
+            if raw["objective_pass_rate"] is not None:
+                report_domain.UnitRate(raw["objective_pass_rate"])
+            results.append(raw)
+            if variant in checked_by_variant:
+                checked_by_variant[variant] += 1
+                if not any(observation.severity is not Severity.SOFT
+                           for observation in observations):
+                    reasons.append(f"{label} has no applicable gate assertions")
+                applicable = [observation.to_row() for observation in observations]
+                for failure in result_failure_lines({**raw, "assertions": applicable,
+                                                     "qualitative_assertions": []}):
+                    reasons.append(f"{label}: {failure}")
+                if raw["vetoed"] or raw["critical_failures"]:
+                    reasons.append(f"{label} has a critical veto")
+                if raw["below_reference_floor"]:
+                    reasons.append(f"{label} is below its reference floor")
+        except (TypeError, ValueError) as exc:
+            reasons.append(f"{label}: {exc}")
+    for variant, count in checked_by_variant.items():
+        if not count:
+            reasons.append(f"selected variant {variant} has no complete runs")
+    paired = report.get("paired_summary")
+    if not isinstance(paired, dict) or paired.get("availability") != "complete":
+        reasons.append("pairing evidence is missing or incomplete")
+    elif len(results) == len(raw_results):
+        construction = _metric_pair_construction(results, "objective_pass_rate")
+        diagnostics = paired.get("pairing")
+        if (not isinstance(diagnostics, dict)
+                or any(type(diagnostics.get(key)) is not int
+                       for key in ("eligible_pairs", "blocked_pairs"))
+                or construction.blocked or diagnostics != construction.diagnostics()):
+            reasons.append("pairing evidence does not match complete result identities")
+    if reasons:
+        return report_domain.GateRejected(tuple(reasons))
+    return report_domain.GatePassed(sum(checked_by_variant.values()))
+
+
 def junit_xml_from_report(report: dict[str, Any]) -> str:
     """One <testcase> per case/variant/run over a benchmark report, evidence on
     failures, and the paired lift as suite properties — the CI-facing shape of
@@ -18345,17 +18475,44 @@ def github_summary_from_report(report: dict[str, Any]) -> str:
 
 
 def report_command(args: argparse.Namespace) -> int:
-    report = load_json(Path(args.benchmark))
-    if args.format == "junit":
-        rendered = junit_xml_from_report(report)
-    else:
-        rendered = github_summary_from_report(report)
+    gate_enabled = getattr(args, "fail_on_failures", False)
+    try:
+        report = load_json(Path(args.benchmark))
+    except SystemExit:
+        if gate_enabled:
+            return 2
+        raise
+    except (OSError, UnicodeError, ValueError) as exc:
+        if not gate_enabled:
+            raise
+        print(f"invalid benchmark report: {exc}", file=sys.stderr)
+        return 2
+    try:
+        if args.format == "junit":
+            rendered = junit_xml_from_report(report)
+        else:
+            rendered = github_summary_from_report(report)
+    except (AttributeError, TypeError, ValueError) as exc:
+        if not gate_enabled:
+            raise
+        print(f"invalid benchmark report: {exc}", file=sys.stderr)
+        return 2
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(rendered, encoding="utf-8")
     else:
         print(rendered, end="")
+    if gate_enabled:
+        policy = report_domain.ReportGatePolicy(tuple(
+            ExecutionVariant.parse(value)
+            for value in (getattr(args, "gate_variant", None) or [WITH_SKILL])
+        ))
+        verdict = benchmark_gate(report, policy)
+        if isinstance(verdict, report_domain.GateRejected):
+            for reason in verdict.reasons:
+                print(f"report gate: {reason}", file=sys.stderr)
+            return 1
     return 0
 
 
@@ -21765,6 +21922,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--benchmark", required=True, help="benchmark.json produced by `skill-benchmark benchmark --out`")
     p.add_argument("--format", choices=["junit", "github"], required=True)
     p.add_argument("--out", help="output path (e.g. junit.xml, or a file appended to $GITHUB_STEP_SUMMARY)")
+
+    p.add_argument("--fail-on-failures", action="store_true",
+                   help="exit 1 for incomplete evidence or failing selected variants")
+    p.add_argument("--gate-variant", action="append",
+                   help="variant checked by --fail-on-failures (repeatable; default: with_skill)")
 
     p = sub.add_parser("compare-judges", help="flag judge-sensitivity across judged benchmark reports")
     p.add_argument("--report", action="append", metavar="NAME=PATH", help="judge label = judged benchmark report JSON (repeatable)")

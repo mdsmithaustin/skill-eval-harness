@@ -8,15 +8,16 @@ check, merge on green. But an eval is not a test (see
 manifest can be green because it is *good* or because it is *too weak to fail*. So a
 useful gate has two independent jobs, and they key on different things:
 
-1. **Did the graded outputs regress?** — turn `benchmark.json` into a CI-native
-   pass/fail with `report --format junit|github`.
+1. **Do the selected checks pass?** — turn `benchmark.json` into a CI-native
+   pass/fail with `report --fail-on-failures --format junit|github`.
 2. **Is the manifest itself strong enough to trust the green?** — `audit-manifest
    --fail-on-blockers` fails when the suite has structural blockers (no adversarial
    coverage, a leak-saturated case, an instruction-simulated ablation masquerading
    as evidence).
 
-Neither calls a model. Both run in the same offline path the demo uses, so your CI
-never needs an API key to grade.
+The saved report gate and manifest audit do not call a model. Objective grading
+also runs without a model. A live `judge` step calls its configured model and needs
+that provider's credentials. The bundled demo uses a local stub for its judge.
 
 ## Run both gates offline on the demo
 
@@ -34,7 +35,8 @@ python3 $HARNESS benchmark evals/shared-benchmark.json --runs /tmp/demo-runs \
   --variant with_skill --variant without_skill \
   --judge-results /tmp/demo-judge-results.jsonl --out /tmp/demo-benchmark.json
 
-python3 $HARNESS report --benchmark /tmp/demo-benchmark.json --format github
+python3 $HARNESS report --benchmark /tmp/demo-benchmark.json --format github \
+  --fail-on-failures
 ```
 
 Real output (2026-09-29, Python 3.12, the demo README's 6-run walkthrough):
@@ -52,7 +54,7 @@ Real output (2026-09-29, Python 3.12, the demo README's 6-run walkthrough):
 
 `--format github` writes a job-summary table (and annotations) straight into a GitHub
 Actions run. `--format junit` writes the same result as JUnit XML, one `<testcase>` per
-case/variant/run, which any CI that reads JUnit will render and gate on (trimmed to the
+case/variant/run, which a CI JUnit viewer can render (trimmed to the
 first two runs of each case/variant; the demo's 6 runs each produce `run-1` .. `run-6`):
 
 ```text
@@ -87,8 +89,29 @@ annotation.
 
 The `without_skill` failures are *expected* here — that arm exists to prove the skill is
 what passes the cases. Which is the first subtlety of gating an eval: you do not gate on
-"all testcases green." You gate on the **lift** and on **named regressions**, not on the
-raw pass count.
+"all testcases green." `--fail-on-failures` checks `with_skill` by default. It
+requires complete evidence across the experiment and passing applicable non-soft
+checks in the selected arm.
+It preserves critical vetoes and reference-floor failures. Baseline assertion
+failures remain visible without rejecting that default gate.
+
+Use repeatable `--gate-variant` options to select other arms. For example, add
+`--gate-variant with_skill --gate-variant ablation:preserve-behavior` to require both.
+This replaces the default selection. A destructive ablation belongs in the gate
+only when you intend its assertions to pass.
+
+The command renders identical bytes with or without the gate. Exit 0 means the
+selected checks pass. Exit 1 means incomplete evidence or a selected failure.
+Exit 2 means invalid arguments, unreadable or malformed JSON, or an unrenderable
+report shape. Diagnostics go to stderr, including when `--out` writes a report.
+A missing baseline, a deferred judge, a duplicate identity, or blocked grading in
+any arm rejects the gate. An absent selected variant also rejects it. Pairing uses
+the report's existing contrast rules. A report with a missing control arm stays
+partial. A report with no applicable presence contrast can remain complete.
+
+The gate reads saved evidence only. It does not reopen artifacts or verify their
+current contents. It applies no lift, rate, or statistical significance threshold.
+Without `--fail-on-failures`, `report` retains its render-only exit behavior.
 
 ## The second gate: is the manifest strong enough?
 
@@ -143,7 +166,8 @@ The recipe for a skill repo's `.github/workflows/`:
     skill-benchmark benchmark evals/shared-benchmark.json \
       --runs eval-runs/latest --variant with_skill --variant without_skill \
       --judge-results judge-results.jsonl --out benchmark.json
-    skill-benchmark report --benchmark benchmark.json --format github >> "$GITHUB_STEP_SUMMARY"
+    skill-benchmark report --benchmark benchmark.json --format github \
+      --fail-on-failures >> "$GITHUB_STEP_SUMMARY"
 
 - name: Fail if the manifest is too weak to trust
   run: skill-benchmark audit-manifest evals/shared-benchmark.json --fail-on-blockers
@@ -168,21 +192,22 @@ blow its budget — the operational half of the same gate.
   no-adversarial blocker means nothing tests the skill under pressure. Fix the
   manifest, not the threshold. (Missing hidden splits surface as a `required`
   *finding*, not a blocker — advice the exit code deliberately does not fail on.)
-- **JUnit shows `errors` > 0 (not `failures`)** → runs crashed or timed out. These are
-  execution errors, not quality failures; they poison the denominator. Re-run before you
-  read the gate.
+- **JUnit shows `errors` > 0** → experiment evidence is incomplete. Inspect answer
+  design, execution, grading, and pairing evidence. A crash also appears as a run
+  failure. Repair missing evidence before interpreting quality results.
 - **Everything green but lift ≈ 0** → the gate is passing on a saturated suite. The
   benchmark's `saturated`/`no-lift` case flags are the tell; a suite that can't fail
   isn't guarding anything.
 
 ## What keeps the gate honest
 
-- **Grading is model-free by construction.** `benchmark`, `report`, and `audit-manifest`
-  never call a model or the network (a guard test patches `subprocess`/`urllib` to raise
-  in the grade path). Your CI grades deterministically; the only model calls are the
-  earlier, explicit runner step that produced the outputs.
-- **Gate on lift and named regressions, not raw pass count.** The `without_skill` arm is
-  *supposed* to fail. A gate that counts total green would block every honest suite.
+- **Saved evidence checks do not call a model.** `report` and `audit-manifest`
+  inspect existing evidence. `benchmark` merges saved judge verdicts. The explicit
+  runner and live `judge` steps call models. Opt-in script assertions execute their
+  configured commands.
+- **Select the variants whose checks must pass.** The default gate checks
+  `with_skill`. Expected `without_skill` and destructive ablation failures remain
+  visible. Lift and significance require a separate policy decision.
 - **A green benchmark is not a green skill-loads.** The answer runners force-load the
   skill; passing them says nothing about autonomous activation. If activation matters for
   your gate, add a `skill-trigger-matrix` check — see

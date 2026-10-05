@@ -238,6 +238,28 @@ skill-benchmark report --benchmark benchmark.json --format junit --out junit.xml
 skill-benchmark report --benchmark benchmark.json --format github --out "$GITHUB_STEP_SUMMARY"
 ```
 
+Rendering alone returns zero for complete or partial reports. Add `--fail-on-failures`
+to check the saved evidence and the `with_skill` variant. Repeat `--gate-variant` to
+select other variants instead. This option requires `--fail-on-failures` and rejects
+duplicates or unsupported variant names.
+
+```bash
+skill-benchmark report --benchmark benchmark.json --format junit --out junit.xml \
+  --fail-on-failures
+skill-benchmark report --benchmark benchmark.json --format github \
+  --fail-on-failures --gate-variant with_skill --gate-variant ablation:preserve-behavior
+```
+
+The gate writes the same report before returning its verdict. Exit 0 means that all
+selected runs have applicable gate assertions and pass their non-soft checks.
+Exit 1 means incomplete experiment evidence, an empty selected cohort, a failed
+selected check, a critical veto, or a reference-floor failure. Completeness applies
+to every arm, including unselected baseline and ablation runs. Expected baseline
+assertion failures do not reject the default gate. Exit 2 means invalid arguments,
+unreadable or malformed JSON, or a report shape that cannot be rendered. Gate
+reasons go to stderr. The saved report gate does not reopen run artifacts or apply a
+lift, rate, or significance threshold.
+
 The full CI gating recipe — both report formats plus the manifest-trust gate — is [`gating-ci-on-evals.md`](gating-ci-on-evals.md).
 
 ## Trend, staleness, and harder-case suggestions
