@@ -2699,6 +2699,30 @@ class CatalogAttributionTests(unittest.TestCase):
             self.assertFalse(sb.detect_trigger_records([
                 {"type": "file_read", "path": "/tmp/catalog/review/SKILL.md", "status": status}], [selected]).triggered)
 
+    def test_codex_failed_commands_do_not_credit_mounted_path_reads(self):
+        selected = Path("/tmp/catalog/review/SKILL.md")
+        for exit_code, expected in ((0, True), (1, False), (-1, False), (True, False), (False, False)):
+            with self.subTest(exit_code=exit_code):
+                records = [{"type": "item.completed", "item": {
+                    "type": "command_execution", "status": "completed",
+                    "exit_code": exit_code, "command": f"cat {selected}",
+                    "aggregated_output": "loaded" if expected else "Permission denied",
+                }}]
+                detection = sb.detect_trigger_records(records, [selected], source="codex")
+                self.assertEqual(detection.triggered, expected)
+                self.assertEqual(detection.legacy_evidence, [f"cat {selected}"] if expected else [])
+
+    def test_completed_file_reads_without_exit_code_remain_eligible(self):
+        selected = Path("/tmp/catalog/review/SKILL.md")
+        for exit_evidence in ({}, {"exit_code": None}):
+            for status, expected in (("completed", True), ("failed", False), (False, False)):
+                with self.subTest(status=status, exit_evidence=exit_evidence):
+                    records = [{"type": "file_read", "path": str(selected), "status": status,
+                                **exit_evidence}]
+                    detection = sb.detect_trigger_records(records, [selected])
+                    self.assertEqual(detection.triggered, expected)
+                    self.assertEqual(detection.legacy_evidence, [str(selected)] if expected else [])
+
     def test_scope_changes_block_comparison_and_missing_repetitions_are_rejected(self):
         rows = [{"query_id": "review", "query": "review change", "should_trigger": True,
                  "expected_skills": [self.REVIEW]}]

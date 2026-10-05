@@ -6677,6 +6677,9 @@ def detect_trigger_records(records: Iterable[dict[str, Any]], copied_paths: list
     for event in event_doc["events"]:
         if not event_is_completed(event) or event.get("is_error") is True:
             continue
+        exit_code = event.get("exit_code")
+        if exit_code is not None and (type(exit_code) is not int or exit_code != 0):
+            continue
         if event.get("type") not in {"skill_load", "file_read", "command"}:
             continue
         for text in event_texts_for_tool_input(event):
@@ -18378,13 +18381,16 @@ def benchmark_gate(
     if not isinstance(paired, dict) or paired.get("availability") != "complete":
         reasons.append("pairing evidence is missing or incomplete")
     elif len(results) == len(raw_results):
-        construction = _metric_pair_construction(results, "objective_pass_rate")
-        diagnostics = paired.get("pairing")
-        if (not isinstance(diagnostics, dict)
-                or any(type(diagnostics.get(key)) is not int
-                       for key in ("eligible_pairs", "blocked_pairs"))
-                or construction.blocked or diagnostics != construction.diagnostics()):
-            reasons.append("pairing evidence does not match complete result identities")
+        try:
+            construction = _metric_pair_construction(results, "objective_pass_rate")
+            diagnostics = paired.get("pairing")
+            if (not isinstance(diagnostics, dict)
+                    or any(type(diagnostics.get(key)) is not int
+                           for key in ("eligible_pairs", "blocked_pairs"))
+                    or construction.blocked or diagnostics != construction.diagnostics()):
+                reasons.append("pairing evidence does not match complete result identities")
+        except (TypeError, ValueError) as exc:
+            reasons.append(f"pairing evidence: {exc}")
     if reasons:
         return report_domain.GateRejected(tuple(reasons))
     return report_domain.GatePassed(sum(checked_by_variant.values()))

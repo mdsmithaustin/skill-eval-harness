@@ -273,6 +273,24 @@ class ReportGateTests(unittest.TestCase):
                     self.assertIn("report gate:", result.stderr)
                     self.assertTrue(result.stdout.startswith('<?xml version="1.0"'))
 
+    def test_cli_rejects_conflicting_row_population_without_traceback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            complete = self.benchmark(root)
+            for population in ("trigger", True, []):
+                for format in ("github", "junit"):
+                    with self.subTest(population=population, format=format):
+                        report = copy.deepcopy(complete)
+                        report["results"][0]["population"] = population
+                        rendered = self.report_cli(root, report, format=format)
+                        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+                        result = self.report_cli(root, report, "--fail-on-failures", format=format)
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertIn("report gate: pairing evidence:", result.stderr)
+                        self.assertIn("experimental row population", result.stderr)
+                        self.assertNotIn("Traceback", result.stderr)
+                        self.assertEqual(result.stdout, rendered.stdout)
+
     def test_cli_rejects_absent_selected_variant_and_invalid_flags(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
