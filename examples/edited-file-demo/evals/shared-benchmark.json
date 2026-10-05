@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "skill_name": "name-normalizer",
+  "skill_paths": ["skills/name-normalizer/SKILL.md"],
+  "variants": ["with_skill", "without_skill"],
+  "cases": [
+    {
+      "id": "normalize-name",
+      "kind": "task",
+      "split": "tune",
+      "prompt": "Fix inputs/name_tools.py so normalize_name collapses all whitespace to single spaces, trims leading and trailing whitespace, and uses Unicode case folding. Edit only this module. Run exactly python3 -B inputs/test_name_tools.py. Leave the test file unchanged.",
+      "files": ["fixtures/name_tools.py", "fixtures/test_name_tools.py"],
+      "expected_behavior": ["The captured module passes trusted product tests after replay."],
+      "assertions": [
+        {
+          "name": "verified-edit",
+          "type": "script",
+          "severity": "gate",
+          "command": ["python3", "-B", "oracles/check_edit.py", "{output_dir}"],
+          "timeout_s": 30
+        }
+      ]
+    }
+  ]
+}

@@ -12,7 +12,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -27,6 +29,7 @@ if str(ROOT) not in sys.path:
 from agent_capabilities import SMOKE_TARGETS
 from skill_benchmark import ProcessInvocationPlan, invoke_argv_with_timeout
 from telemetry import ObservationEvidence
+from trace_contracts import event_is_completed
 from trigger_contracts import CompleteTriggerResult, TriggerObservation
 
 DEFAULT_MODELS = {name: target.resolved_model(os.environ) for name, target in SMOKE_TARGETS.items()}
@@ -35,6 +38,8 @@ SMOKE_TRIGGER_EXPECTATIONS = (
     ("Review this code change and label the severity of each finding.", True),
     ("What is the capital of France?", False),
 )
+EDIT_DEMO = ROOT / "examples" / "edited-file-demo"
+EDIT_TEST_ARGV = ("python3", "-B", "inputs/test_name_tools.py")
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -180,6 +185,53 @@ def assess_gemini_version_evidence(
     return valid
 
 
+def assess_permission_edit(runs: Path, report: dict[str, Any]) -> bool:
+    """Require replay and the intended native test command in the same run."""
+    treatments = [path.parent for path in runs.rglob("output.md")
+                  if "with_skill" in path.relative_to(runs).parts]
+    valid = bool(treatments)
+    for run_dir in treatments:
+        try:
+            replay = subprocess.run(
+                [sys.executable, "-B", str(EDIT_DEMO / "evals/oracles/check_edit.py"), str(run_dir)],
+                text=True, capture_output=True, check=False, timeout=30,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+            metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+            trace = json.loads((run_dir / "events.json").read_text(encoding="utf-8"))
+            events = trace["events"]
+            if (trace.get("schema_version") != 2 or trace.get("source") != "codex"
+                    or not isinstance(events, list) or not all(isinstance(event, dict) for event in events)):
+                raise ValueError("normalized Codex events are required")
+            complete = (metadata.get("observation_complete") is True
+                        and metadata.get("trace_observation_complete") is True
+                        and metadata.get("provider") == "codex"
+                        and metadata.get("invocation_state") == "complete"
+                        and type(metadata.get("returncode")) is int
+                        and metadata["returncode"] == 0)
+            test_completed = any(
+                event.get("type") == "command" and event_is_completed(event)
+                and type(event.get("exit_code")) is int and event["exit_code"] == 0
+                and shlex.split(event.get("input_summary", "")) == list(EDIT_TEST_ARGV)
+                for event in events
+            )
+            passed = replay.returncode == 0 and complete and test_completed
+            detail = replay.stdout.strip() if passed else (
+                replay.stderr.strip() or "complete native test-command evidence is required")
+        except (OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as exc:
+            passed = False
+            detail = f"could not assess permission edit: {exc}"
+        valid &= passed
+        report["checks"].append({
+            "label": "codex:permission-edit", "passed": passed,
+            "run_dir": str(run_dir), "detail": detail,
+        })
+    if not treatments:
+        report["checks"].append({"label": "codex:permission-edit", "passed": False,
+                                 "detail": "no with_skill run artifacts"})
+    return valid
+
+
 def assess_trigger_report(path: Path, report: dict[str, Any], agent: str = "pi") -> bool:
     try:
         trigger = json.loads(path.read_text(encoding="utf-8"))
@@ -218,6 +270,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", required=True, help="persistent directory for tasks, run artifacts, reports, and smoke.json; never cleaned by this command")
     parser.add_argument("--live", action="store_true", help="required acknowledgement before any model CLI is invoked")
+    parser.add_argument("--permission-edit", action="store_true", help="Codex-only workspace-write check using the edited-file fixture; requires --live --agents codex")
     supported = ",".join(SMOKE_TARGETS)
     parser.add_argument("--agents", default=supported, help=f"comma-separated subset of {supported}")
     for name in SMOKE_TARGETS:
@@ -237,6 +290,9 @@ def main() -> int:
     if not args.live:
         print("Refusing live model calls without --live. This smoke can spend money.", file=sys.stderr)
         return 2
+    permission_edit = getattr(args, "permission_edit", False)
+    if permission_edit and agents != ("codex",):
+        raise SystemExit("--permission-edit requires exactly --agents codex")
 
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -245,7 +301,8 @@ def main() -> int:
     attempt_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=out_dir))
     work = attempt_dir / "work"
     work.mkdir()
-    manifest = make_smoke_repo(work)
+    manifest = (EDIT_DEMO / "evals/shared-benchmark.json"
+                if permission_edit else make_smoke_repo(work))
     models = {name: getattr(args, f"{name}_model") for name in SMOKE_TARGETS}
     report: dict[str, Any] = {
         "kind": "supported-cli-live-smoke",
@@ -260,6 +317,11 @@ def main() -> int:
             "This verifies CLI integration and artifact contracts, not model quality. Inspect benchmark/trigger reports for quality.",
         ],
     }
+    if permission_edit:
+        report["scope"] = {"answer_case": 1, "answer_variants": 2,
+                           "work_dir": str(work), "artifact_dir": str(attempt_dir)}
+        permission_policy: dict[str, Any] = {"agent": "codex", "sandbox": "workspace-write"}
+        report["permission_policy"] = permission_policy
     python = sys.executable
     harness = str(ROOT / "skill_benchmark.py")
     trigger = str(ROOT / "run_trigger_matrix.py")
@@ -288,19 +350,30 @@ def main() -> int:
         all_ok &= prepared
         if not prepared:
             continue
-        answered = run([python, harness, "run-agent", "--agent", agent, "--tasks", str(tasks), "--runs", str(runs),
-                        "--model", models[agent], "--timeout", str(args.timeout)],
+        answer_command = [python, harness, "run-agent", "--agent", agent, "--tasks", str(tasks), "--runs", str(runs),
+                          "--model", models[agent], "--timeout", str(args.timeout)]
+        if permission_edit:
+            prefix = [executable, "exec", "--sandbox", "workspace-write"]
+            permission_policy["command_prefix"] = prefix
+            answer_command.extend(["--codex-cmd", shlex.join(prefix)])
+        answered = run(answer_command,
                        cwd=work, report=report, label=f"{agent}:answer")
         all_ok &= answered
         if not answered:
             continue
         if agent == "gemini":
             all_ok &= assess_gemini_version_evidence(runs, report)
-        benchmarked = run([python, harness, "benchmark", str(manifest), "--runs", str(runs), "--split", "tune", "--out", str(benchmark)],
+        benchmark_command = [python, harness, "benchmark", str(manifest), "--runs", str(runs), "--split", "tune", "--out", str(benchmark)]
+        if permission_edit:
+            benchmark_command.append("--allow-scripts")
+        benchmarked = run(benchmark_command,
                           cwd=work, report=report, label=f"{agent}:benchmark")
         all_ok &= benchmarked
         if benchmarked:
-            all_ok &= assess_answer_benchmark(benchmark, agent, report)
+            if permission_edit:
+                all_ok &= assess_permission_edit(runs, report)
+            else:
+                all_ok &= assess_answer_benchmark(benchmark, agent, report)
     report["status"] = "passed" if all_ok else "failed"
     write_json(out_dir / "smoke.json", report)
     print(f"{report['status']}: {out_dir / 'smoke.json'}")

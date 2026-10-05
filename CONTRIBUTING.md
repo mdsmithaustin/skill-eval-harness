@@ -23,7 +23,7 @@ Run these before opening a PR:
 
 ```sh
 pip install -e ".[test]"
-python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py type_tests/*.py tests/*.py
+python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py examples/edited-file-demo/*.py examples/edited-file-demo/evals/fixtures/*.py examples/edited-file-demo/evals/oracles/*.py type_tests/*.py tests/*.py
 ty check --error-on-warning
 python3 -m unittest discover tests -v
 ```
