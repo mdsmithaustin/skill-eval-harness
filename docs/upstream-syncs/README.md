@@ -7,16 +7,23 @@ Keep a dated record of each sync and an annotated checkpoint tag after acceptanc
 ## Prepare a branch from fork main
 
 1. Start with a clean checkout of the fork. Verify that `origin` names
-   `https://github.com/mdsmithaustin/skill-eval-harness.git` and `upstream` names
-   `https://github.com/adewale/skill-eval-harness.git` with `git remote -v`.
-2. Fetch both repositories.
+   `https://github.com/mdsmithaustin/skill-eval-harness.git` with `git remote -v`.
+2. Check for the parent remote with `git remote get-url upstream`. If the remote
+   does not exist, add it.
+
+   ```sh
+   git remote add upstream https://github.com/adewale/skill-eval-harness.git
+   ```
+
+   Verify that `upstream` names that URL with `git remote -v` before fetching.
+3. Fetch both repositories.
 
    ```sh
    git fetch origin
    git fetch upstream
    ```
 
-3. Set `SYNC_DATE` to the record date in `YYYY-MM-DD` format. Pin both inputs before
+4. Set `SYNC_DATE` to the record date in `YYYY-MM-DD` format. Pin both inputs before
    merging, and create the branch from the fetched fork `main`.
 
    ```sh
