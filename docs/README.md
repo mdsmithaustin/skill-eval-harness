@@ -74,6 +74,10 @@ Point-in-time findings: [`repo-effectiveness-audit.md`](repo-effectiveness-audit
 [`correctness-by-construction-audit.md`](correctness-by-construction-audit.md). Durable rules
 distilled from those audits and production runs live in [`LESSONS_LEARNED.md`](../LESSONS_LEARNED.md).
 
+Fork maintainers use the [upstream sync workflow](upstream-syncs/README.md) to preserve
+merge ancestry and record accepted checkpoints. The [2026-10-05 sync record](upstream-syncs/2026-10-05.md)
+documents the pinned inputs, preservation choices, and verification limits.
+
 ## Adding a user journey
 
 The mold, distilled from `tuning-skill-activation.md` and
