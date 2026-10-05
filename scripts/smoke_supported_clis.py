@@ -42,6 +42,20 @@ EDIT_DEMO = ROOT / "examples" / "edited-file-demo"
 EDIT_TEST_ARGV = ("python3", "-B", "inputs/test_name_tools.py")
 
 
+def is_edit_test_command(command: str) -> bool:
+    try:
+        if "\n" in command or "\r" in command:
+            return False
+        argv = shlex.split(command)
+        if (len(argv) == 3
+                and argv[0] in {"sh", "bash", "zsh", "/bin/sh", "/bin/bash", "/bin/zsh"}
+                and argv[1] in {"-c", "-lc"}):
+            argv = shlex.split(argv[2])
+        return tuple(argv) == EDIT_TEST_ARGV
+    except ValueError:
+        return False
+
+
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
@@ -211,7 +225,7 @@ def assess_permission_edit(runs: Path, report: dict[str, Any]) -> bool:
             test_completed = any(
                 event.get("type") == "command" and event_is_completed(event)
                 and type(event.get("exit_code")) is int and event["exit_code"] == 0
-                and shlex.split(event.get("input_summary", "")) == list(EDIT_TEST_ARGV)
+                and is_edit_test_command(event.get("input_summary", ""))
                 for event in events
             )
             passed = replay.returncode == 0 and complete and test_completed

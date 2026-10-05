@@ -287,6 +287,81 @@ class PermissionEditSmokeTests(unittest.TestCase):
         self.assertTrue(smoke.assess_permission_edit(self.runs, report))
         self.assertEqual([check["passed"] for check in report["checks"]], [True])
 
+    def test_permission_assessment_accepts_native_shell_test_command(self):
+        for shell in ("/bin/zsh", "/bin/bash", "/bin/sh", "zsh", "bash", "sh"):
+            for option in ("-lc", "-c"):
+                command = f"{shell} {option} 'python3 -B inputs/test_name_tools.py'"
+                with self.subTest(command=command):
+                    runs, run_dir = self.copied_runs()
+                    path = run_dir / "events.json"
+                    trace = json.loads(path.read_text())
+                    event = next(event for event in trace["events"]
+                                 if event["type"] == "command" and event["status"] == "completed")
+                    event["input_summary"] = command
+                    path.write_text(json.dumps(trace))
+                    sb.write_artifact_commit(run_dir)
+                    report = {"checks": []}
+                    self.assertTrue(smoke.assess_permission_edit(runs, report))
+                    self.assertEqual([check["passed"] for check in report["checks"]], [True])
+
+    def test_permission_assessment_rejects_shell_commands_outside_exact_test_contract(self):
+        commands = (
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py; true'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py && true'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py || true'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py | cat'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py & wait'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py > result.txt'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py\ntrue'",
+            "/bin/zsh -lc 'python3\n-B inputs/test_name_tools.py'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py'\ntrue",
+            "python3\n-B inputs/test_name_tools.py",
+            "/bin/zsh -lc 'python3 -B $(echo inputs/test_name_tools.py)'",
+            "/bin/zsh -lc 'python3 -B `echo inputs/test_name_tools.py`'",
+            "/bin/zsh -lc 'python3 -B ${TEST_FILE}'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py extra'",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py' extra",
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py' ; true",
+            "/bin/zsh -x -lc 'python3 -B inputs/test_name_tools.py'",
+            "/bin/zsh -ic 'python3 -B inputs/test_name_tools.py'",
+            "/bin/fish -c 'python3 -B inputs/test_name_tools.py'",
+            "/custom/bin/zsh -lc 'python3 -B inputs/test_name_tools.py'",
+            '/bin/zsh -lc "sh -c \'python3 -B inputs/test_name_tools.py\'"',
+            "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py",
+            "/bin/zsh -lc 'python3 -B -c print(1)'",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                runs, run_dir = self.copied_runs()
+                path = run_dir / "events.json"
+                trace = json.loads(path.read_text())
+                event = next(event for event in trace["events"]
+                             if event["type"] == "command" and event["status"] == "completed")
+                event["input_summary"] = command
+                path.write_text(json.dumps(trace))
+                sb.write_artifact_commit(run_dir)
+                report = {"checks": []}
+                self.assertFalse(smoke.assess_permission_edit(runs, report))
+                self.assertEqual([check["passed"] for check in report["checks"]], [False])
+
+    def test_permission_assessment_requires_successful_completed_shell_test_command(self):
+        mutations = (
+            {"exit_code": 1}, {"exit_code": None}, {"exit_code": False},
+            {"status": "in_progress"}, {"status": "failed"},
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                runs, run_dir = self.copied_runs()
+                path = run_dir / "events.json"
+                trace = json.loads(path.read_text())
+                event = next(event for event in trace["events"]
+                             if event["type"] == "command" and event["status"] == "completed")
+                event["input_summary"] = "/bin/zsh -lc 'python3 -B inputs/test_name_tools.py'"
+                event.update(mutation)
+                path.write_text(json.dumps(trace))
+                sb.write_artifact_commit(run_dir)
+                self.assertFalse(smoke.assess_permission_edit(runs, {"checks": []}))
+
     def test_permission_assessment_rejects_denied_partial_missing_exit_and_false_claims(self):
         mutations = {
             "denied": lambda event: event.update(exit_code=1),
