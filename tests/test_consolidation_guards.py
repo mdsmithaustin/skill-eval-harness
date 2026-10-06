@@ -1094,9 +1094,13 @@ class TimeoutConventionTests(unittest.TestCase):
         self.assertEqual(outcome, {"answer": "", "returncode": 124, "timed_out": True})
 
 
+_SEP = r"(?:[ \t]|\\\n)+"
+
+
 def _publish_command(tool: str, subcommand: str) -> re.Pattern[str]:
-    """`tool subcommand`, allowing option tokens (and one value after each) between them."""
-    return re.compile(rf"\b{tool}(?:\s+-\S*(?:\s+[^\s-]\S*)?)*\s+{subcommand}\b", re.IGNORECASE)
+    """`tool subcommand` on one logical shell line, with option tokens (and one value after each) between."""
+    option = rf"{_SEP}-\S*(?:{_SEP}(?!run\b)[^\s-]\S*)?"
+    return re.compile(rf"\b{tool}(?:{option})*{_SEP}{subcommand}\b", re.IGNORECASE)
 
 
 PUBLISH_ROUTES = {
@@ -1203,13 +1207,41 @@ class PackagingWorkflowTests(unittest.TestCase):
     def test_a_command_that_only_looks_like_a_route_is_not_one(self):
         for step in ("uv sync --frozen", "uv run publish", "uv pip install twine",
                      "twine check dist/*", "hatch build", "poetry install", "pdm install",
-                     "flit build"):
+                     "flit build", "uv -q run publish", "pdm -v run publish",
+                     "poetry -q run publish"):
             with self.subTest(step=step), tempfile.TemporaryDirectory() as tmp:
                 github = Path(tmp) / ".github"
                 (github / "workflows").mkdir(parents=True)
                 (github / "workflows" / "ci.yml").write_text(
                     "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
                     f"    steps:\n      - run: {step}\n", encoding="utf-8")
+                self.assertEqual(publish_routes(github), [])
+
+    def test_a_route_spread_over_continuation_lines_is_reported(self):
+        blocks = {
+            "uv \\\n            --directory sub \\\n            publish": "uv publish",
+            "python -m twine \\\n            --no-color \\\n            upload dist/*": "twine upload",
+        }
+        for block, route in blocks.items():
+            with self.subTest(route=route), tempfile.TemporaryDirectory() as tmp:
+                github = Path(tmp) / ".github"
+                (github / "workflows").mkdir(parents=True)
+                (github / "workflows" / "release.yml").write_text(
+                    "on: push\njobs:\n  ship:\n    runs-on: ubuntu-latest\n"
+                    f"    steps:\n      - run: |\n          {block}\n", encoding="utf-8")
+                self.assertEqual(publish_routes(github), [f"workflows/release.yml: {route}"])
+
+    def test_a_tool_and_a_subcommand_in_different_steps_are_not_a_route(self):
+        pairs = (("uv --version", "Publish coverage report"),
+                 ("pip install twine --upgrade", "Upload coverage"))
+        for command, next_step in pairs:
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as tmp:
+                github = Path(tmp) / ".github"
+                (github / "workflows").mkdir(parents=True)
+                (github / "workflows" / "ci.yml").write_text(
+                    "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+                    f"      - run: {command}\n      - name: {next_step}\n        run: echo ok\n",
+                    encoding="utf-8")
                 self.assertEqual(publish_routes(github), [])
 
     def test_a_yaml_comment_that_names_a_publish_route_is_not_a_route(self):

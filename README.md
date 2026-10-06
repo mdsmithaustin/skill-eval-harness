@@ -594,6 +594,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup, validation commands, and eval-safety rules. The short version:
 
 ```bash
+pip uninstall -y skill-eval-harness   # prints a warning and exits 0 when it is not installed
 pip install -e ".[test]"
 python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py examples/edited-file-demo/*.py examples/edited-file-demo/evals/fixtures/*.py examples/edited-file-demo/evals/oracles/*.py type_tests/*.py tests/*.py
 ruff check .
@@ -669,6 +670,7 @@ skill-eval-harness/
 ## Development
 
 ```bash
+pip uninstall -y skill-eval-harness   # prints a warning and exits 0 when it is not installed
 pip install -e ".[test]"
 python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py examples/edited-file-demo/*.py examples/edited-file-demo/evals/fixtures/*.py examples/edited-file-demo/evals/oracles/*.py type_tests/*.py tests/*.py
 ruff check .
