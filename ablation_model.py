@@ -40,6 +40,7 @@ from typing import Any
 
 from agent_capabilities import BACKENDS
 from completion_contracts import completion_unscorable_reason
+from invocation_contracts import RecoveryCase
 from json_contracts import freeze_json_value
 from manifest_contracts import (
     CaseId,
@@ -668,6 +669,7 @@ class PreparedTask:
     skill_tree_hash: str | None = None
     answer_key: dict[str, Any] | None = None
     skill_root_keys: tuple[str, ...] = ()
+    recovery: RecoveryCase | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "case_id", CaseId.parse(self.case_id))
@@ -798,6 +800,8 @@ class PreparedTask:
             row["skill_root_keys"] = list(self.skill_root_keys)
         if self.answer_key:
             row.update(self.answer_key)
+        if self.recovery is not None:
+            row["recovery"] = self.recovery.as_dict()
         row["tags"] = list(self.tags)
         return row
 
@@ -830,6 +834,7 @@ class PreparedTask:
             instruction=row.get("instruction", ""),
             prompt=row.get("prompt", ""),
             tags=collections["tags"],
+            recovery=RecoveryCase.parse(row["recovery"]) if "recovery" in row else None,
             ablation=rec,
             skill_tree_hash=row.get("skill_tree_hash"),
             answer_key=answer_key,

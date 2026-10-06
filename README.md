@@ -392,7 +392,12 @@ runs/<case_id>/<variant>/run-1/candidate-files/<sha256> # content copies the pat
 runs/answer-design.json                          # exact expected answer experiment and eval-contract digest
 ```
 
-Answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
+Prepared `run-agent` rows can optionally carry a fixed [recovery case](docs/recovery.md).
+Those rows retain one fixture across an intentional checkpoint stop, fresh recovery, and fresh refusal.
+They write `recovery.json` and raw process evidence rather than an ordinary answer grade.
+Completed phases establish runner capability, not provider eligibility or permission enforcement.
+
+Ordinary answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
 temporary workspace and delete it afterwards. Before deletion they diff it against a copy taken
 right after the harness built it, for every outcome including a timeout, so partial edits from a
 killed run are kept. `workspace-changes.json` lists each changed path with its before and after state

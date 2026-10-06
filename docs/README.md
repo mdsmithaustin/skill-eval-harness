@@ -54,6 +54,8 @@ The typed implementation boundary map and extension rules live in
 
 ## Reference
 
+- [`recovery.md`](recovery.md) defines optional prepared recovery rows, process evidence, and consumer eligibility limits.
+
 [`commands.md`](commands.md) is the full per-command reference (flags, examples, output shapes);
 the [README](../README.md#commands) carries the grouped index.
 

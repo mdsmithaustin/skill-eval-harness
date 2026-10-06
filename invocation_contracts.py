@@ -8,8 +8,105 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from json_contracts import freeze_json_mapping, validate_json_text
+from json_contracts import freeze_json_mapping, strict_json_loads, validate_json_text
 from manifest_contracts import ModelId
+
+
+class CheckpointMatch(str, Enum):
+    BYTES = "bytes"
+    JSON = "json"
+
+
+@dataclass(frozen=True)
+class RecoveryCase:
+    checkpoint_path: str
+    expected_content: bytes
+    recovery_prompt: str
+    refusal_prompt: str
+    forbidden_path: str
+    match: CheckpointMatch = CheckpointMatch.BYTES
+
+    @classmethod
+    def parse(cls, raw: Any) -> RecoveryCase:
+        if not isinstance(raw, dict):
+            raise ValueError("recovery must be an object")
+        required = {"checkpoint_path", "expected_content", "recovery_prompt",
+                    "refusal_prompt", "forbidden_path"}
+        if set(raw) - required - {"match"} or required - set(raw):
+            raise ValueError("recovery requires checkpoint_path, expected_content, "
+                             "recovery_prompt, refusal_prompt and forbidden_path")
+        for key in required:
+            value = raw[key]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"recovery.{key} must be non-empty text")
+            validate_json_text(value, f"recovery.{key}")
+        for key in ("checkpoint_path", "forbidden_path"):
+            path = Path(raw[key])
+            if path.is_absolute() or path == Path(".") or ".." in path.parts or "\x00" in raw[key]:
+                raise ValueError(f"recovery.{key} must be a safe non-root relative path")
+        if Path(raw["checkpoint_path"]) == Path(raw["forbidden_path"]):
+            raise ValueError("recovery paths must be distinct")
+        try:
+            match = CheckpointMatch(raw.get("match", "bytes"))
+        except (ValueError, TypeError) as exc:
+            raise ValueError("recovery.match must be bytes or json") from exc
+        expected = raw["expected_content"].encode("utf-8")
+        if match is CheckpointMatch.JSON:
+            try:
+                strict_json_loads(expected)
+            except (ValueError, UnicodeError) as exc:
+                raise ValueError("recovery.expected_content must be valid JSON for json matching") from exc
+        return cls(raw["checkpoint_path"], expected, raw["recovery_prompt"],
+                   raw["refusal_prompt"], raw["forbidden_path"], match)
+
+    def as_dict(self) -> dict[str, str]:
+        return {"checkpoint_path": self.checkpoint_path,
+                "expected_content": self.expected_content.decode("utf-8"),
+                "recovery_prompt": self.recovery_prompt,
+                "refusal_prompt": self.refusal_prompt,
+                "forbidden_path": self.forbidden_path, "match": self.match.value}
+
+    def matches(self, content: bytes) -> bool:
+        if self.match is CheckpointMatch.BYTES:
+            return content == self.expected_content
+        def equivalent(actual: Any, expected: Any) -> bool:
+            if isinstance(actual, bool) != isinstance(expected, bool):
+                return False
+            if isinstance(actual, dict) and isinstance(expected, dict):
+                return actual.keys() == expected.keys() and all(
+                    equivalent(actual[key], expected[key]) for key in actual)
+            if isinstance(actual, list) and isinstance(expected, list):
+                return len(actual) == len(expected) and all(
+                    equivalent(actual_item, expected_item)
+                    for actual_item, expected_item in zip(actual, expected, strict=True))
+            return actual == expected
+        try:
+            actual = strict_json_loads(content)
+            expected = strict_json_loads(self.expected_content)
+        except (ValueError, UnicodeError):
+            return False
+        return equivalent(actual, expected)
+
+
+class RecoveryProcessState(str, Enum):
+    CHECKPOINT_STOP = "checkpoint_stop"
+    COMPLETE = "complete"
+    DEADLINE = "deadline"
+    NATURAL_COMPLETION = "natural_completion"
+    CHECKPOINT_MISMATCH = "checkpoint_mismatch"
+    OBSERVER_FAILED = "observer_failed"
+    CAPTURE_FAILED = "capture_failed"
+    SIGNAL_FAILED = "signal_failed"
+    CLEANUP_FAILED = "cleanup_failed"
+    SPAWN_FAILED = "spawn_failed"
+    PROCESS_FAILED = "process_failed"
+
+
+@dataclass
+class RecoveryCapture:
+    directory: Path
+    checkpoint: RecoveryCase | None = None
+    state: RecoveryProcessState | None = field(default=None, init=False)
 
 
 class InvocationState(str, Enum):
@@ -119,6 +216,7 @@ class InvocationRequest:
     # applies it through its own control (a CLI flag or config override); the
     # runner refuses the request before any spend when a backend has none.
     effort: str | None = None
+    recovery_capture: RecoveryCapture | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.prompt, str):
@@ -149,6 +247,7 @@ class InvocationRequest:
         model: object,
         timeout_s: object,
         effort: object = None,
+        recovery_capture: RecoveryCapture | None = None,
     ) -> InvocationRequest:
         if not isinstance(prompt, str):
             raise ValueError("invocation prompt must be text")
@@ -162,6 +261,7 @@ class InvocationRequest:
             model=None if model is None else ModelId.parse(model),
             timeout_s=TimeoutSeconds.parse(timeout_s),
             effort=effort,
+            recovery_capture=recovery_capture,
         )
 
 
@@ -179,6 +279,7 @@ class ProcessInvocationPlan:
     redact_output: Callable[[str], str] | None = field(default=None, repr=False)
     # False leaves stdout as captured when it is the run's evidence.
     redact_stdout: bool = True
+    recovery_capture: RecoveryCapture | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.argv, tuple):
@@ -227,6 +328,7 @@ class ProcessInvocationPlan:
         environment: Mapping[str, str] | None = None,
         redact_output: Callable[[str], str] | None = None,
         redact_stdout: bool = True,
+        recovery_capture: RecoveryCapture | None = None,
     ) -> ProcessInvocationPlan:
         if isinstance(argv, (str, bytes)):
             raise TypeError("process argv must be a sequence of argument strings")
@@ -238,6 +340,7 @@ class ProcessInvocationPlan:
             environment=environment,
             redact_output=redact_output,
             redact_stdout=redact_stdout,
+            recovery_capture=recovery_capture,
         )
 
 

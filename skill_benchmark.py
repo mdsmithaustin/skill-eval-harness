@@ -181,6 +181,9 @@ from invocation_contracts import (
     InvocationResult,
     InvocationState,
     ProcessInvocationPlan,
+    RecoveryCapture,
+    RecoveryCase,
+    RecoveryProcessState,
 )
 from jetty_contracts import (
     JettyObservation,
@@ -261,8 +264,11 @@ from trigger_contracts import (
 )
 from trigger_reporting import CompleteTriggerCohort, summarize_trigger_cohort
 from workspace_contracts import (
+    RegularFile,
+    Symlink,
     WorkspaceChangesState,
     captured_workspace,
+    index_tree,
     workspace_changes_state,
 )
 
@@ -1939,6 +1945,8 @@ def answer_case_input_fingerprint(task: dict[str, Any], pt: PreparedTask) -> str
         "tags": list(pt.tags),
         "turns": raw_turns,
     }
+    if pt.recovery is not None:
+        payload["recovery"] = pt.recovery.as_dict()
     return canonical_json_sha256(payload)
 
 
@@ -1968,6 +1976,8 @@ def answer_task_fingerprint(task: dict[str, Any], pt: PreparedTask,
         "turns": raw_turns,
         "answer_key": pt.answer_key,
     }
+    if pt.recovery is not None:
+        payload["recovery"] = pt.recovery.as_dict()
     return canonical_json_sha256(payload)
 
 
@@ -6744,6 +6754,40 @@ def mount_skill_tree(tree_dir: Path, skills_dir: Path) -> list[Path]:
     return copied
 
 
+def recovery_file_bytes(workspace: Path, relative: str) -> bytes:
+    path = workspace / relative
+    resolved = path.resolve()
+    if workspace.resolve() not in resolved.parents:
+        raise ValueError(f"recovery path escapes workspace: {relative}")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ValueError(f"recovery path is not a regular file: {relative}")
+        return handle.read()
+
+
+def recovery_group_stopped(pgid: int) -> tuple[bool, str]:
+    if Path("/proc").is_dir():
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            if int(fields[2]) == pgid and fields[0] not in {"Z", "X"}:
+                return False, "procfs_live_member"
+        return True, "procfs_no_live_members"
+    killpg = getattr(os, "killpg", None)
+    if not callable(killpg):
+        return False, "unsupported"
+    try:
+        killpg(pgid, 0)
+    except ProcessLookupError:
+        return True, "killpg_no_members"
+    return False, "killpg_members_remain"
+
+
 def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
     """Typed subprocess owner for every spawned runner/adapter process.
 
@@ -6818,12 +6862,254 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                 return status is not None
         return proc.poll() is not None
 
+    def observe_recovery_process(proc: subprocess.Popen[bytes], capture: RecoveryCapture,
+                                 input_bytes: bytes | None, start: float) -> InvocationOutcome:
+        deadline = time.monotonic() + timeout
+        state = RecoveryProcessState.COMPLETE
+        error: str | None = None
+        observed: bytes | None = None
+        out, err = b"", b""
+        started = False
+        drained = False
+        signal_sent: int | None = None
+        checkpoint_live = False
+        interruption: BaseException | None = None
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    state = RecoveryProcessState.DEADLINE
+                    break
+                if process_leader_exited(proc):
+                    state = (RecoveryProcessState.NATURAL_COMPLETION if capture.checkpoint
+                             else RecoveryProcessState.COMPLETE)
+                    break
+                if capture.checkpoint is not None:
+                    try:
+                        candidate = recovery_file_bytes(cwd, capture.checkpoint.checkpoint_path)
+                    except FileNotFoundError:
+                        candidate = None
+                    if candidate is not None:
+                        if not capture.checkpoint.matches(candidate):
+                            state = RecoveryProcessState.CHECKPOINT_MISMATCH
+                            break
+                        observed = candidate
+                        try:
+                            (capture.directory / "checkpoint-observed.bin").write_bytes(observed)
+                        except OSError as exc:
+                            state = RecoveryProcessState.CAPTURE_FAILED
+                            error = f"{type(exc).__name__}: {exc}"
+                            break
+                        if time.monotonic() >= deadline:
+                            state = RecoveryProcessState.DEADLINE
+                            break
+                        if process_leader_exited(proc):
+                            state = RecoveryProcessState.NATURAL_COMPLETION
+                            break
+                        checkpoint_live = True
+                        state = RecoveryProcessState.CHECKPOINT_STOP
+                        break
+                try:
+                    out, err = proc.communicate(
+                        input=input_bytes if not started else None,
+                        timeout=min(PROCESS_LEADER_POLL_INTERVAL_S, remaining))
+                except subprocess.TimeoutExpired as exc:
+                    started = True
+                    out, err = exc.output or b"", exc.stderr or b""
+                except Exception as exc:
+                    state = RecoveryProcessState.CAPTURE_FAILED
+                    error = f"{type(exc).__name__}: {exc}"
+                    break
+                else:
+                    drained = True
+                    state = (RecoveryProcessState.NATURAL_COMPLETION if capture.checkpoint
+                             else RecoveryProcessState.COMPLETE)
+                    break
+        except BaseException as exc:
+            state = RecoveryProcessState.OBSERVER_FAILED
+            error = f"{type(exc).__name__}: {exc}"
+            if not isinstance(exc, Exception):
+                interruption = exc
+        try:
+            if state is RecoveryProcessState.CHECKPOINT_STOP:
+                if time.monotonic() >= deadline:
+                    state = RecoveryProcessState.DEADLINE
+                elif process_leader_exited(proc):
+                    state = RecoveryProcessState.NATURAL_COMPLETION
+                else:
+                    try:
+                        killpg = getattr(os, "killpg", None)
+                        if not callable(killpg):
+                            raise OSError("intentional checkpoint stop requires POSIX process groups")
+                        killpg(proc.pid, signal.SIGTERM)
+                        signal_sent = int(signal.SIGTERM)
+                    except OSError as exc:
+                        state = RecoveryProcessState.SIGNAL_FAILED
+                        error = f"{type(exc).__name__}: {exc}"
+            if state is RecoveryProcessState.CHECKPOINT_STOP:
+                try:
+                    out, err = proc.communicate(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+                    drained = True
+                except subprocess.TimeoutExpired as exc:
+                    out, err = exc.output or out, exc.stderr or err
+                except Exception as exc:
+                    state = RecoveryProcessState.CAPTURE_FAILED
+                    error = f"{type(exc).__name__}: {exc}"
+            group_cleanup = kill_process_group(proc.pid)
+            if group_cleanup["status"] in {"unsupported", "warning"}:
+                if proc.poll() is None:
+                    proc.kill()
+                if state in {RecoveryProcessState.COMPLETE, RecoveryProcessState.CHECKPOINT_STOP}:
+                    state = RecoveryProcessState.CLEANUP_FAILED
+            if not drained:
+                try:
+                    out, err = proc.communicate(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+                    drained = True
+                except subprocess.TimeoutExpired as exc:
+                    out, err = exc.output or out, exc.stderr or err
+                    for pipe in (proc.stdout, proc.stderr):
+                        if pipe is not None:
+                            pipe.close()
+                    if state in {RecoveryProcessState.COMPLETE, RecoveryProcessState.CHECKPOINT_STOP}:
+                        state = RecoveryProcessState.CAPTURE_FAILED
+                except Exception as exc:
+                    state = RecoveryProcessState.CAPTURE_FAILED
+                    error = f"{type(exc).__name__}: {exc}"
+                    for pipe in (proc.stdout, proc.stderr):
+                        if pipe is not None:
+                            pipe.close()
+            proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+            group_deadline = time.monotonic() + PROCESS_PIPE_DRAIN_GRACE_S
+            while True:
+                group_stopped, group_observation = recovery_group_stopped(proc.pid)
+                if group_stopped or time.monotonic() >= group_deadline:
+                    break
+                time.sleep(PROCESS_LEADER_POLL_INTERVAL_S)
+            if not group_stopped and state in {RecoveryProcessState.COMPLETE, RecoveryProcessState.CHECKPOINT_STOP}:
+                state = RecoveryProcessState.CLEANUP_FAILED
+            if state is RecoveryProcessState.CHECKPOINT_STOP:
+                assert capture.checkpoint is not None
+                sigkill = getattr(signal, "SIGKILL", None)
+                signal_exits = {-int(signal.SIGTERM)}
+                if isinstance(sigkill, int):
+                    signal_exits.add(-sigkill)
+                if proc.returncode not in signal_exits:
+                    state = RecoveryProcessState.NATURAL_COMPLETION
+                else:
+                    try:
+                        stable_checkpoint = recovery_file_bytes(cwd, capture.checkpoint.checkpoint_path)
+                    except FileNotFoundError:
+                        state = RecoveryProcessState.CHECKPOINT_MISMATCH
+                    except Exception as exc:
+                        state = RecoveryProcessState.OBSERVER_FAILED
+                        error = f"{type(exc).__name__}: {exc}"
+                    else:
+                        if stable_checkpoint != observed:
+                            state = RecoveryProcessState.CHECKPOINT_MISMATCH
+        except BaseException as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            if not isinstance(exc, Exception):
+                interruption = exc
+            if state in {RecoveryProcessState.COMPLETE, RecoveryProcessState.CHECKPOINT_STOP}:
+                state = RecoveryProcessState.CLEANUP_FAILED
+            group_cleanup = {"status": "warning", "error": error}
+            group_stopped, group_observation = False, "cleanup_exception"
+            try:
+                kill_process_group(proc.pid)
+            except Exception as exc:
+                group_cleanup["retry_error"] = f"{type(exc).__name__}: {exc}"
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+                try:
+                    out, err = proc.communicate(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+                    drained = True
+                except subprocess.TimeoutExpired as exc:
+                    out, err = exc.output or out, exc.stderr or err
+                    for pipe in (proc.stdout, proc.stderr):
+                        if pipe is not None:
+                            pipe.close()
+                proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+            except Exception as exc:
+                group_cleanup["drain_error"] = f"{type(exc).__name__}: {exc}"
+        if state is RecoveryProcessState.COMPLETE and proc.returncode != 0:
+            state = RecoveryProcessState.PROCESS_FAILED
+        facts = {"state": state.value, "pid": proc.pid, "process_group": proc.pid,
+                 "os_returncode": proc.returncode, "signal_sent": signal_sent,
+                 "leader_reaped": proc.returncode is not None, "pipes_drained": drained,
+                 "group_stopped": group_stopped, "group_observation": group_observation,
+                 "process_group_cleanup": group_cleanup,
+                 "checkpoint_observed_live": checkpoint_live,
+                 "checkpoint_sha256": hashlib.sha256(observed).hexdigest() if observed is not None else None,
+                 "compatibility_returncode": 124 if state is RecoveryProcessState.DEADLINE else proc.returncode,
+                 "error": error}
+        for name, content in (("stdout.bin", out), ("stderr.bin", err)):
+            try:
+                (capture.directory / name).write_bytes(content)
+            except Exception as exc:
+                state = RecoveryProcessState.CAPTURE_FAILED
+                facts["state"] = state.value
+                facts["error"] = f"{type(exc).__name__}: {exc}"
+        facts["raw_sha256"] = {"stdout.bin": hashlib.sha256(out).hexdigest(),
+                               "stderr.bin": hashlib.sha256(err).hexdigest()}
+        facts["raw_files_present"] = {
+            name: (capture.directory / name).is_file() for name in ("stdout.bin", "stderr.bin")}
+        try:
+            write_json(capture.directory / "process.json", facts)
+        except Exception:
+            state = RecoveryProcessState.CAPTURE_FAILED
+        capture.state = state
+        if interruption is not None:
+            raise interruption
+        if proc.returncode is None:
+            return InvocationOutcome.harness_failed("recovery process leader was not reaped", metadata=facts)
+        stdout, stdout_valid = _wire_text(out, redact_stdout)
+        stderr, stderr_valid = _wire_text(err, redact_stderr)
+        metadata = {"recovery_process": facts, "process_group_cleanup": group_cleanup,
+                    "stdout_utf8_valid": stdout_valid, "stderr_utf8_valid": stderr_valid}
+        elapsed = int((time.time() - start) * 1000)
+        if state is RecoveryProcessState.DEADLINE:
+            return InvocationOutcome.from_timeout(stdout=stdout, stderr=stderr[:4000],
+                                                  elapsed_ms=elapsed, metadata=metadata)
+        return InvocationOutcome.from_process(stdout=stdout, stderr=stderr[:4000],
+                                              returncode=proc.returncode,
+                                              elapsed_ms=elapsed, metadata=metadata)
+
     try:
         input_bytes = input_text.encode("utf-8") if input_text is not None else None
     except UnicodeEncodeError:
         return InvocationOutcome.spawn_failed(
             stderr="subprocess stdin is not valid UTF-8", elapsed_ms=0)
     start = time.time()
+    capture = plan.recovery_capture
+    if capture is not None:
+        execution_environment = os.environ if env is None else env
+        if os.path.dirname(argv[0]):
+            executable_path = Path(argv[0])
+            if not executable_path.is_absolute():
+                executable_path = cwd / executable_path
+            executable = shutil.which(str(executable_path))
+        else:
+            search_path = os.pathsep.join(
+                str(Path(part) if Path(part).is_absolute() else cwd / part)
+                for part in execution_environment.get("PATH", os.defpath).split(os.pathsep))
+            executable = shutil.which(argv[0], path=search_path)
+        wrapper = {"client_argv": argv, "cwd": str(cwd), "executable": executable,
+                   "executable_observation": "resolved from client cwd and PATH before spawn",
+                   "executable_sha256": None, "version": None,
+                   "effective_exec_argv": None, "effective_exec_argv_source": None,
+                   "execution_boundary": (
+                       "existing backend client subprocess; original POSIX process group"
+                       if callable(getattr(os, "killpg", None)) else
+                       "existing backend client subprocess; process-group control unavailable"),
+                   "evidence_directory": str(capture.directory.resolve()),
+                   "evidence_write_protection": "not established by the runner"}
+        if executable is not None:
+            try:
+                wrapper["executable_sha256"] = hashlib.sha256(Path(executable).read_bytes()).hexdigest()
+            except OSError:
+                pass
+        write_json(capture.directory / "invocation.json", wrapper)
     try:
         proc = subprocess.Popen(
             argv,
@@ -6835,10 +7121,21 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
             start_new_session=True,
         )
     except (OSError, ValueError) as exc:
+        if capture is not None:
+            capture.state = RecoveryProcessState.SPAWN_FAILED
+            write_json(capture.directory / "process.json", {
+                "state": capture.state.value, "os_returncode": None, "pid": None,
+                "error": f"{type(exc).__name__}: {exc}",
+                "raw_sha256": {"stdout.bin": hashlib.sha256(b"").hexdigest(),
+                               "stderr.bin": hashlib.sha256(b"").hexdigest()}})
+            (capture.directory / "stdout.bin").write_bytes(b"")
+            (capture.directory / "stderr.bin").write_bytes(b"")
         return InvocationOutcome.spawn_failed(
             stderr=redact_stderr(f"{type(exc).__name__}: {exc}")[:4000],
             elapsed_ms=int((time.time() - start) * 1000),
         )
+    if capture is not None:
+        return observe_recovery_process(proc, capture, input_bytes, start)
     deadline = time.monotonic() + timeout
     communication_started = False
     communication_complete = False
@@ -10252,6 +10549,7 @@ def gemini_cli_invoke(
     gemini_cmd: str | None = None, timeout: int = DEFAULT_RUNNER_TIMEOUT_S,
     cwd: str | Path | None = None, output_format: str = "stream-json",
     allow_read_tools: bool = True,
+    recovery_capture: RecoveryCapture | None = None,
 ) -> dict[str, Any]:
     """Invoke official Gemini CLI behind isolated config and typed protocols."""
     validated_model: str | None = None
@@ -10374,6 +10672,7 @@ def gemini_cli_invoke(
                     cwd=workspace,
                     environment=env,
                     timeout_s=timeout,
+                    recovery_capture=recovery_capture,
                 ))
     except (OSError, RuntimeError) as exc:
         # Setup failures are closed no-process observations. Do not leak the
@@ -10676,12 +10975,14 @@ def vibe_cli_invoke(prompt: str, *, model: str | None = None, vibe_cmd: str | No
                     timeout: int = DEFAULT_RUNNER_TIMEOUT_S, cwd: str | Path | None = None,
                     output: str = "streaming", tools: Iterable[str] | None = VIBE_READ_ONLY_TOOLS,
                     auto_approve: bool = True, max_turns: int | None = None,
-                    max_price: float | None = None, max_tokens: int | None = None) -> dict[str, Any]:
+                    max_price: float | None = None, max_tokens: int | None = None,
+                    recovery_capture: RecoveryCapture | None = None) -> dict[str, Any]:
     if cwd is None:
         with tempfile.TemporaryDirectory(prefix="vibe-invoke-") as td:
             return vibe_cli_invoke(prompt, model=model, vibe_cmd=vibe_cmd, timeout=timeout, cwd=Path(td),
                                    output=output, tools=tools, auto_approve=auto_approve,
-                                   max_turns=max_turns, max_price=max_price, max_tokens=max_tokens)
+                                   max_turns=max_turns, max_price=max_price, max_tokens=max_tokens,
+                                   recovery_capture=recovery_capture)
     workspace = Path(cwd)
     with tempfile.TemporaryDirectory(prefix="vibe-home-") as vibe_home:
         env, env_meta = vibe_env_for_home(Path(vibe_home), model)
@@ -10701,6 +11002,7 @@ def vibe_cli_invoke(prompt: str, *, model: str | None = None, vibe_cmd: str | No
             cwd=workspace,
             environment=env,
             timeout_s=timeout,
+            recovery_capture=recovery_capture,
         ))
     messages, parse_errors = (
         parse_vibe_messages_with_errors(result.stdout)
@@ -10768,6 +11070,7 @@ class CodexBackend(AgentBackend):
             json_events=True,
             config_overrides=(
                 [f"model_reasoning_effort={request.effort}"] if request.effort else None),
+            recovery_capture=request.recovery_capture,
         )
         return RunnerOutcome(
             provider="codex", answer=result.get("answer"),
@@ -10795,7 +11098,8 @@ class ClaudeBackend(AgentBackend):
         # process assertion on a Claude run fails closed for missing evidence.
         result = claude_cli_invoke(request.prompt, isolation=ContextIsolation.WORKSPACE, model=request.model, claude_bin=str(options.get("claude_bin") or "claude"),
                                    timeout=request.timeout_s, cwd=str(request.workspace), output_format="stream-json",
-                                   extra_args=["--effort", request.effort] if request.effort else None)
+                                   extra_args=["--effort", request.effort] if request.effort else None,
+                                   recovery_capture=request.recovery_capture)
         stop = result.get("stop")
         completion = {
             **(stop.as_metadata() if isinstance(stop, StopObservation)
@@ -10833,6 +11137,7 @@ class GeminiBackend(AgentBackend):
             cwd=request.workspace,
             output_format="stream-json",
             allow_read_tools=True,
+            recovery_capture=request.recovery_capture,
         )
         returncode = cast(int, result.get("returncode"))
         provider_error = result.get("provider_error")
@@ -10889,6 +11194,7 @@ class VibeBackend(AgentBackend):
             output="streaming",
             tools=VIBE_READ_ONLY_TOOLS,
             auto_approve=True,
+            recovery_capture=request.recovery_capture,
         )
         env = dict(result.get("environment") or {})
         # Vibe's programmatic output (LLMMessage records through 2.22, public
@@ -10926,6 +11232,123 @@ def registered_agent_backend(name: str) -> AgentBackend:
             f"agent backend {name!r} replacement identifies as {backend.name!r}; "
             "replacement names must match their registry row")
     return backend
+
+
+def snapshot_recovery_workspace(workspace: Path, destination: Path) -> None:
+    destination.mkdir()
+    records: dict[str, Any] = {}
+    try:
+        for relative, state in index_tree(workspace).items():
+            if isinstance(state, RegularFile):
+                content = recovery_file_bytes(workspace, relative)
+                digest = hashlib.sha256(content).hexdigest()
+                if digest != state.sha256:
+                    raise ValueError(f"workspace file changed during snapshot: {relative}")
+                blob = destination / digest
+                if not blob.exists():
+                    blob.write_bytes(content)
+                records[relative] = {"kind": "file", "sha256": digest,
+                                     "size": len(content), "executable": state.executable,
+                                     "blob": digest}
+            elif isinstance(state, Symlink):
+                records[relative] = {"kind": "symlink", "target": state.target}
+            else:
+                raise TypeError(f"cannot capture workspace file: {relative}")
+    finally:
+        write_json(destination / "files.json", records)
+
+
+def run_recovery_case(pt: PreparedTask, base: Path, backend: AgentBackend, *,
+                      model: str | None, timeout: int, effort: str | None,
+                      workspace_builder: Callable[[PreparedTask, Path], WorkspaceBuild],
+                      provenance: dict[str, Any], options: dict[str, Any]) -> bool:
+    case = pt.recovery
+    assert case is not None
+    evidence = base / "recovery"
+    evidence.mkdir()
+    record: dict[str, Any] = {
+        "schema_version": 1, "status": "failed", "failure": None,
+        "evidence_directory": str(evidence.resolve()), "phases": [],
+        "requested_model": model, "requested_effort": effort,
+        "runtime_model": None, "runtime_effort": None,
+        "trace_checkpoint_correlation": None, "enforcing_denial": None,
+        "certificate": None,
+        "boundary": "existing backend settings; no additional enforcement",
+        "limitations": ["evidence outside cwd is not write protection",
+                        "original process group cleanup does not attest detached writers",
+                        "runtime identity and refusal eligibility require consumer review"],
+        "case": case.as_dict(), "provenance": provenance,
+    }
+    try:
+        (evidence / "expected-checkpoint.bin").write_bytes(case.expected_content)
+        with tempfile.TemporaryDirectory(prefix=f"{backend.name}-ws-") as temporary:
+            workspace = Path(temporary)
+            record["workspace"] = str(workspace)
+            try:
+                built = workspace_builder(pt, workspace)
+                record["workspace_attestation"] = {
+                    "fixture_tree_hash": built.attestation.fixture_tree_hash,
+                    "mounted_skill_tree_hash": built.attestation.mounted_skill_tree_hash}
+                snapshot_recovery_workspace(workspace, evidence / "fixture")
+                if os.path.lexists(workspace / case.checkpoint_path):
+                    record["failure"] = "preexisting_checkpoint"
+                    return False
+                phases = (
+                    ("initial", build_task_prompt(pt, skill_paths=built.skill_paths,
+                                                  input_files=built.input_paths), case),
+                    ("recovery", case.recovery_prompt, None),
+                    ("refusal", case.refusal_prompt, None),
+                )
+                for name, prompt, checkpoint in phases:
+                    phase = evidence / name
+                    phase.mkdir()
+                    (phase / "prompt.bin").write_bytes(prompt.encode("utf-8"))
+                    snapshot_recovery_workspace(workspace, phase / "before")
+                    capture = RecoveryCapture(phase, checkpoint)
+                    phase_record: dict[str, Any] = {"phase": name, "state": None}
+                    phase_record["prompt_sha256"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+                    record["phases"].append(phase_record)
+                    try:
+                        outcome = backend.invoke_answer(InvocationRequest.parse(
+                            prompt=prompt, workspace=workspace, model=model,
+                            timeout_s=timeout, effort=effort,
+                            recovery_capture=capture), **options)
+                        context = outcome_context(outcome)
+                        phase_record["adapter_observations"] = thaw_json_value(context.metadata_extra)
+                        phase_record["adapter_environment"] = thaw_json_value(context.environment or {})
+                        phase_record["runtime_observations"] = {
+                            "served_model": context.metadata_extra.get("served_model"),
+                            "served_models": context.metadata_extra.get("served_models"),
+                            "applied_effort": None}
+                        phase_record["outcome"] = type(outcome).__name__
+                        phase_record["compatibility_returncode"] = outcome.returncode
+                        phase_record["state"] = capture.state.value if capture.state else "no_process_evidence"
+                        expected_state = (RecoveryProcessState.CHECKPOINT_STOP if checkpoint
+                                          else RecoveryProcessState.COMPLETE)
+                        if capture.state is not expected_state:
+                            record["failure"] = phase_record["state"]
+                            return False
+                        if checkpoint is None and not isinstance(outcome, Completed):
+                            record["failure"] = "phase_invocation_failed"
+                            return False
+                    finally:
+                        phase_record["state"] = capture.state.value if capture.state else "no_process_evidence"
+                        forbidden = workspace / case.forbidden_path
+                        if workspace.resolve() not in forbidden.parent.resolve().parents and forbidden.parent.resolve() != workspace.resolve():
+                            raise ValueError("forbidden path parent escapes workspace")
+                        phase_record["forbidden_path_present"] = os.path.lexists(workspace / case.forbidden_path)
+                        snapshot_recovery_workspace(workspace, phase / "after")
+            finally:
+                snapshot_recovery_workspace(workspace, evidence / "final")
+        record["status"] = "complete"
+        return True
+    except BaseException as exc:
+        record["failure"] = f"{type(exc).__name__}: {exc}"
+        if not isinstance(exc, Exception):
+            raise
+        return False
+    finally:
+        write_json(base / "recovery.json", record)
 
 
 def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBackend, *, model: str | None = None, timeout: int = DEFAULT_RUNNER_TIMEOUT_S, effort: str | None = None, **options: Any) -> int:
@@ -10967,12 +11390,15 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
         base = safe_child_path(runs, pt.run_dir)
         if base in seen_destinations:
             die(f"duplicate prepared task run_dir: {pt.run_dir}")
+        if pt.recovery is not None and base.exists():
+            die(f"recovery artifacts already exist: {pt.run_dir}")
         seen_destinations.add(base)
         validated.append((task, pt, row_model, base))
     runs.mkdir(parents=True, exist_ok=True)
     design = persist_answer_design(runs, tasks, default_model=model)
+    recovery_failed = False
     for task, pt, row_model, base in validated:
-        base.mkdir(parents=True, exist_ok=True)
+        base.mkdir(parents=True, exist_ok=pt.recovery is None)
         prov_extra = {
             "population": "answer",
             "case_id": pt.case_id,
@@ -10987,6 +11413,12 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
             **({"ablation": pt.ablation.as_dict()} if pt.ablation else {}),
             **effort_setting.as_metadata(),
         }
+        if pt.recovery is not None:
+            if not run_recovery_case(pt, base, backend, model=row_model, timeout=timeout,
+                                     effort=effort, workspace_builder=workspace_builder,
+                                     provenance=prov_extra, options=options):
+                recovery_failed = True
+            continue
         with tempfile.TemporaryDirectory(prefix=f"{backend.name}-changes-") as cd:
             changes = Path(cd)
             with captured_workspace(prefix=f"{backend.name}-ws-", changes_dir=changes,
@@ -11013,7 +11445,7 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                 context.enriched(metadata=prov_extra, environment=env),
             )
             write_runner_outcome(base, outcome, sidecars=changes)
-    return 0
+    return int(recovery_failed)
 
 
 def run_agent(args: argparse.Namespace) -> int:
@@ -11234,7 +11666,7 @@ def require_clean_workspace_context(workspace: Path) -> None:
 
 def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | None = None, claude_bin: str = "claude",
                       timeout: int = DEFAULT_RUNNER_TIMEOUT_S, extra_args: list[str] | None = None, cwd: str | Path | None = None,
-                      output_format: str = "json") -> dict[str, Any]:
+                      output_format: str = "json", recovery_capture: RecoveryCapture | None = None) -> dict[str, Any]:
     """Single owner for invoking Claude via `claude -p`.
 
     Returns the parsed envelope plus returncode/elapsed_ms/stderr/raw_response.
@@ -11266,6 +11698,7 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
             input_text=prompt,
             cwd=cwd_path,
             timeout_s=timeout,
+            recovery_capture=recovery_capture,
         ))
 
     if cwd is None:
@@ -11696,7 +12129,8 @@ def codex_context_isolation_args(isolation: ContextIsolation) -> tuple[list[str]
 def codex_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | None = None, codex_cmd: str = "codex exec", timeout: int = DEFAULT_RUNNER_TIMEOUT_S,
                       output_schema: dict[str, Any] | None = None, cwd: str | Path | None = None,
                       sandbox: str = "read-only", json_events: bool = True,
-                      config_overrides: list[str] | None = None) -> dict[str, Any]:
+                      config_overrides: list[str] | None = None,
+                      recovery_capture: RecoveryCapture | None = None) -> dict[str, Any]:
     """Native Codex invocation for judge-style calls.
 
     Codex's event stream is useful for telemetry, but the verdict/answer should
@@ -11766,6 +12200,7 @@ def codex_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | N
             timeout_s=timeout,
             redact_output=redact_host_paths,
             redact_stdout=False,
+            recovery_capture=recovery_capture,
         ))
         last_message_found = last_message.exists()
         last_message_utf8_valid = True

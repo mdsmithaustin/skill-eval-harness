@@ -116,6 +116,15 @@ record the sandbox/auth transport decision, installed `gemini --version`, and
 pinned wire-fixture revision. Token stats are normalized when the CLI returns
 them; missing token stats and unsupported dollar cost remain explicit `missing`.
 
+## Run fixed recovery cases
+
+`run-agent` accepts an optional `recovery` object on a prepared row.
+The fixed initial, recovery, and refusal phases use fresh processes in one fixture workspace.
+Rows without `recovery` stay one-shot. No new command or permission configuration is required.
+Recovery rows retain raw evidence and `recovery.json` instead of an ordinary answer grade.
+The [recovery reference](recovery.md) defines the fields, failure states, artifact layout, and evidence limits.
+Existing effort forwarding and backend restrictions apply unchanged.
+
 ## Run Claude tasks (with cost capture)
 
 `run-claude` is a compatibility wrapper for `run-agent --agent claude`: it executes prepared rows through `claude -p --output-format stream-json --verbose`, extracts the answer from the stream's terminal `result` event into `output.md` (the stream must carry exactly one `result` and no session content after it, meaning no `assistant`, `user`, `result` or `stream_event` record and no record with a `message` object; any other record after it, such as `system` or `rate_limit_event`, is metadata, and the trace dialect, the Claude judge and the Claude trigger adapter apply the same rule), records real per-run `total_cost_usd` + token usage into `metrics.json`, and keeps the full stream as the run's raw trace — `trace.jsonl` verbatim, normalized tool-use events in `events.json` (a `tool_use` block opens a call, its `tool_result` completes it; an orphaned call counts zero), so process and efficiency assertions have evidence on Claude answer runs. Each run also records the model's workspace edits in `workspace-changes.json`, `candidate.patch`, and `candidate-files/`, captured before the workspace is deleted. The benchmark report then totals `cost_usd_total` per arm (over scorable runs), so a paired eval reports actual dollars:

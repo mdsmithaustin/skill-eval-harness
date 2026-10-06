@@ -7,6 +7,13 @@ right, and what to send back when it does not.
 
 ## Before you start
 
+Fixed prepared recovery rows have a separate [capability and evidence contract](recovery.md).
+Their model-free process tests do not establish live provider eligibility.
+Before any consumer certification, inspect actual checkpoint write and active-turn traces, wrapper/runtime identity, evidence protection, and enforcing refusal.
+Existing read-only backend restrictions remain unchanged and may block the checkpoint write.
+Do not relax permissions or infer denial from an absent file to make a recovery case pass.
+Live recovery eligibility is deferred to consumer integration and is not a release claim of this runner feature.
+
 - Check out the branch under test, then `python3 -m pip install -e ".[test]"` and
   `python3 -m unittest discover tests` (it must pass before any live run).
 - Record the versions you run against: `claude --version`, `codex --version`, `pi --version`,
