@@ -39,7 +39,7 @@ Run the uninstall in any virtualenv that ever held an editable `skill-eval-harne
 
 The `test` extra pins the linters CI runs, `ruff==0.16.0` and `ty==0.0.65`; run those versions, because another release can report different findings.
 
-This fork publishes no release artifact, so CI is the only gate. `tests/test_gate_integrity.py` fails when a gate of CI's test job runs conditionally, can fail green, or is missing. `tests/test_consolidation_guards.py` parses every `.yml` and `.yaml` file under `.github/`. It fails when a file does not parse, when `permissions` is `write-all` or grants `id-token: write`, or when a step `uses` a `pypa/gh-action-pypi-publish` action.
+This fork publishes no release artifact, so CI is the only gate. `tests/test_gate_integrity.py` fails when a gate of CI's test job runs conditionally, can fail green, or is missing. `tests/test_consolidation_guards.py` parses every `.yml` and `.yaml` file under `.github/`. It fails when a file is not a single YAML document (a parse error or a multi-document file), when `permissions` is `write-all` or grants `id-token: write`, or when a step `uses` a `pypa/gh-action-pypi-publish` action.
 
 (`pytest tests/` also works — `pyproject.toml` carries the pythonpath config — but CI runs `unittest discover`, so keep tests compatible with both. `scripts/check_test_collection_parity.py` fails when either collector sees a test the other cannot, so a pytest-only test cannot hide from CI. `scripts/check_installed_wheel.py` builds the wheel, installs it into a clean environment, imports every module from there and runs each console script, so a module missing from `py-modules` fails that check.)
 

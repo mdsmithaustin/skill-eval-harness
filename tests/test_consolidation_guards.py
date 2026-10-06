@@ -1111,7 +1111,9 @@ def _publish_grants(node: object) -> Iterator[str]:
 
 
 def pypi_publish_grants(github: Path) -> list[str]:
-    """Every YAML file under `github` that can publish to PyPI or does not parse, as `relative/path: finding`."""
+    """Findings as `relative/path: finding` for each YAML file under `github` that grants
+    `id-token: write` or `permissions: write-all`, uses `pypa/gh-action-pypi-publish`, or is
+    not a single YAML document."""
     findings = []
     for path in sorted(github.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in {".yml", ".yaml"}:
@@ -1120,7 +1122,7 @@ def pypi_publish_grants(github: Path) -> list[str]:
         try:
             document = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (yaml.YAMLError, UnicodeDecodeError):
-            findings.append(f"{relative}: not valid YAML")
+            findings.append(f"{relative}: not a single YAML document")
             continue
         findings.extend(f"{relative}: {grant}" for grant in sorted(set(_publish_grants(document))))
     return findings
@@ -1132,10 +1134,10 @@ class PackagingWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(match, "pyproject.toml [project] has no name")
         self.assertEqual(match.group(1), "skill-eval-harness-ext")
 
-    def test_nothing_under_github_can_publish_to_pypi(self):
+    def test_github_yaml_parses_and_has_no_id_token_or_write_all_grant_or_pypi_publish_action(self):
         self.assertEqual(pypi_publish_grants(ROOT / ".github"), [])
 
-    def test_a_file_that_can_publish_to_pypi_is_reported(self):
+    def test_id_token_and_write_all_grants_and_pypi_publish_action_are_reported(self):
         job = "on: push\njobs:\n  ship:\n    runs-on: ubuntu-latest\n"
         files = {
             "workflows/release.yaml": (
@@ -1170,7 +1172,15 @@ class PackagingWorkflowTests(unittest.TestCase):
                 target = github / relative
                 target.parent.mkdir(parents=True)
                 target.write_text("jobs: [unclosed\n  run: {\n", encoding="utf-8")
-                self.assertEqual(pypi_publish_grants(github), [f"{relative}: not valid YAML"])
+                self.assertEqual(pypi_publish_grants(github), [f"{relative}: not a single YAML document"])
+
+    def test_a_valid_multi_document_yaml_file_is_reported_not_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            github = Path(tmp) / ".github"
+            (github / "workflows").mkdir(parents=True)
+            (github / "workflows" / "two.yml").write_text(
+                "on: push\n---\npermissions:\n  id-token: write\n", encoding="utf-8")
+            self.assertEqual(pypi_publish_grants(github), ["workflows/two.yml: not a single YAML document"])
 
     def test_read_only_permissions_and_a_comment_are_not_a_grant(self):
         with tempfile.TemporaryDirectory() as tmp:
