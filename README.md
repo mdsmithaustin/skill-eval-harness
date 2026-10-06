@@ -392,7 +392,12 @@ runs/<case_id>/<variant>/run-1/candidate-files/<sha256> # content copies the pat
 runs/answer-design.json                          # exact expected answer experiment and eval-contract digest
 ```
 
-Answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
+Prepared `run-agent` rows can optionally carry a fixed [recovery case](docs/recovery.md).
+Those rows retain one fixture across an intentional checkpoint stop, fresh recovery, and fresh refusal.
+They write `recovery.json` and raw process evidence rather than an ordinary answer grade.
+Completed phases establish runner capability, not provider eligibility or permission enforcement.
+
+Ordinary answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
 temporary workspace and delete it afterwards. Before deletion they diff it against a copy taken
 right after the harness built it, for every outcome including a timeout, so partial edits from a
 killed run are kept. `workspace-changes.json` lists each changed path with its before and after state
@@ -441,13 +446,14 @@ counted in `parse_errors`. Everything the harness authors or validates (manifest
 prepared tasks, `events.json`, `metrics.json`, `metadata.json`, judge rows, reports, the
 Codex session rollout) is read with the strict rule, where a repeated key is rejected.
 
-Current answer and Jetty writers record independent process, provider-response, trace,
+Current ordinary answer and Jetty writers record independent process, provider-response, trace,
 and artifact-set evidence. Tool/command/file/retry/skill measurements are available only
 when the first three channels are complete; readers derive artifact completeness by
 verifying `artifact-commit.json`. Legacy directories without a marker remain readable but
-cannot acquire committed-artifact provenance. Current runners also attest every run to
+cannot acquire committed-artifact provenance. Current runners also attest ordinary answer runs to
 `answer-design.json`; reports with missing, extra, duplicated, or stale task identities remain
 partial and expose any surviving calculations only under explicitly labelled observed fields.
+Recovery rows use [raw phase evidence](docs/recovery.md#run-artifacts) instead of this artifact-marker and answer-report contract.
 
 `metadata.json` is optional, but include what your runner can capture:
 
@@ -461,7 +467,7 @@ partial and expose any surviving calculations only under explicitly labelled obs
 }
 ```
 
-The native runners also record how each run ended: `stop_class` beside the raw `stop_reason` and its `stop_source`; `requested_model`, `served_model`, `served_models`, and `served_model_check`; and `effort`, which is `{"requested": null, "applied_by": "backend_default"}` unless `--effort` pinned it. A `truncated` or `turn_limit` stop, or a served-model `mismatch`, makes the run unscorable and blocks its pair; a refusal stays graded. The values are defined in [`docs/vocabulary.md`](docs/vocabulary.md#run-artifacts). A custom runner may write the same fields. Which backends observe what is in [`docs/commands.md`](docs/commands.md#effort-and-how-answer-runs-ended).
+For ordinary answer rows, the native runners also record how each run ended: `stop_class` beside the raw `stop_reason` and its `stop_source`; `requested_model`, `served_model`, `served_models`, and `served_model_check`; and `effort`, which is `{"requested": null, "applied_by": "backend_default"}` unless `--effort` pinned it. A `truncated` or `turn_limit` stop, or a served-model `mismatch`, makes the run unscorable and blocks its pair; a refusal stays graded. The values are defined in [`docs/vocabulary.md`](docs/vocabulary.md#run-artifacts). A custom runner may write the same fields. Which backends observe what is in [`docs/commands.md`](docs/commands.md#effort-and-how-answer-runs-ended). Recovery rows retain [requested settings and phase observations](docs/recovery.md#run-artifacts), with unknown runtime facts left unknown.
 
 ## Ablations
 

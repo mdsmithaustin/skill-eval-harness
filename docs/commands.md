@@ -69,6 +69,9 @@ skill-benchmark import-trace \
 
 ## Run Codex JSONL tasks
 
+The artifact descriptions in this section apply to ordinary answer rows.
+`run-codex` also accepts [recovery rows](#run-fixed-recovery-cases) through the shared runner.
+
 `run-codex` is a compatibility wrapper for `run-agent --agent codex`. It executes prepared rows through a command compatible with `codex exec --json`, adds `--output-last-message <file>` for final-answer capture, saves JSONL as `trace.jsonl`, normalizes events/metrics, runs with isolated `CODEX_HOME` outside the model workdir, and records nonzero/timeouts as failed run artifacts. The shared subprocess owner observes CLI-leader exit independently of inherited capture-pipe EOF, then terminates remaining members of the original process group on POSIX before bounded retry/backoff removes the isolated home. An escaped process cannot make pipe draining unbounded: POSIX capture descriptors are closed after a short grace period, while non-POSIX reader threads are abandoned and reported. Cleanup recovery or fallback is recorded in stderr and `environment.json` without replacing an already captured answer. Non-POSIX runs report process-group cleanup as unsupported while retaining bounded, non-throwing home cleanup. Each run also records the model's workspace edits in `workspace-changes.json`, `candidate.patch`, and `candidate-files/` (see the run-output layout in the README); under the default `--sandbox read-only` that change set is empty.
 
 Every invocation also appends `-c skills.bundled.enabled=false`, a `-c skills.config=[...]` entry disabling each `SKILL.md` under `~/.agents/skills` by path, and `--disable apps`, the flags trigger runs use. `environment.json` records them as `context_isolation`, with `skills.config=<N host skill(s) disabled>` in place of the paths, and host skill paths are redacted from the saved command and stderr. The trace (`trace.jsonl`, Codex's stdout) is saved as captured, because it is the run's evidence: a `tool_sequence` assertion reads the paths the model opened from it. So an answer run is not shown host or bundled skills and has no `codex_apps` connector, even inside the isolated `CODEX_HOME`, while skills the run mounts in its workspace's `.agents/skills` stay listed. The flags change what the model is given, not what it can reach: a run that lists `~/.agents/skills` with a shell command still sees the files, because the read-only sandbox allows reads outside the workspace. Auth, `--model`, Codex's built-in tools, and its own `--sandbox`/permission flags keep working as documented by `codex exec --help`. A `--codex-cmd` wrapper still receives the isolation flags, appended after the wrapper's own argv, so a custom Codex launcher cannot silently opt back into host skills or apps:
@@ -89,7 +92,9 @@ skill-benchmark run-codex \
 
 ## Run native agent tasks
 
-`run-agent` is the provider-neutral native runner. It dispatches prepared rows through a registered backend and writes the same run contract as the compatibility wrappers:
+`run-agent` is the provider-neutral native runner. It dispatches prepared rows through a registered backend.
+Ordinary rows use the answer-output contract. [Recovery rows](#run-fixed-recovery-cases) use a separate evidence contract.
+The compatibility wrappers share both routes:
 
 ```bash
 skill-benchmark prepare ../repo/evals/shared-benchmark.json --split tune --out tasks.jsonl
@@ -113,10 +118,26 @@ loads a deny-all policy with a higher-priority allowlist for the five read-only
 tools used by answer runs. `--gemini-cmd` accepts exactly one caller-trusted
 executable path; free-form launcher/prefix arguments are rejected. Artifacts
 record the sandbox/auth transport decision, installed `gemini --version`, and
-pinned wire-fixture revision. Token stats are normalized when the CLI returns
+pinned wire-fixture revision. For ordinary answer rows, token stats are normalized when the CLI returns
 them; missing token stats and unsupported dollar cost remain explicit `missing`.
 
+## Run fixed recovery cases
+
+`run-agent` and its `run-codex` and `run-claude` wrappers accept an optional `recovery` object on a prepared row.
+Recovery execution requires a POSIX host with process-group signals and `O_DIRECTORY`, `O_NOFOLLOW`, and `O_NONBLOCK`.
+Windows recovery execution is unsupported.
+Missing required facilities fail the run with exit code 1 and block later phases.
+The runner records the failure when it can write `recovery.json`, and evidence may be partial.
+The fixed initial, recovery, and refusal phases use fresh processes in one fixture workspace.
+Rows without `recovery` stay one-shot. No new command or permission configuration is required.
+Recovery rows retain raw evidence and `recovery.json` instead of ordinary answer artifacts, workspace diffs, grades, or normalized paired telemetry.
+The [recovery reference](recovery.md) defines the fields, failure states, artifact layout, and evidence limits.
+Existing effort forwarding and backend restrictions apply unchanged.
+
 ## Run Claude tasks (with cost capture)
+
+The artifact descriptions in this section apply to ordinary answer rows.
+`run-claude` also accepts [recovery rows](#run-fixed-recovery-cases) through the shared runner.
 
 `run-claude` is a compatibility wrapper for `run-agent --agent claude`: it executes prepared rows through `claude -p --output-format stream-json --verbose`, extracts the answer from the stream's terminal `result` event into `output.md` (the stream must carry exactly one `result` and no session content after it, meaning no `assistant`, `user`, `result` or `stream_event` record and no record with a `message` object; any other record after it, such as `system` or `rate_limit_event`, is metadata, and the trace dialect, the Claude judge and the Claude trigger adapter apply the same rule), records real per-run `total_cost_usd` + token usage into `metrics.json`, and keeps the full stream as the run's raw trace — `trace.jsonl` verbatim, normalized tool-use events in `events.json` (a `tool_use` block opens a call, its `tool_result` completes it; an orphaned call counts zero), so process and efficiency assertions have evidence on Claude answer runs. Each run also records the model's workspace edits in `workspace-changes.json`, `candidate.patch`, and `candidate-files/`, captured before the workspace is deleted. The benchmark report then totals `cost_usd_total` per arm (over scorable runs), so a paired eval reports actual dollars:
 
@@ -139,7 +160,10 @@ skill-benchmark run-agent --agent codex --tasks tasks.jsonl --runs ../repo/eval-
   --effort high
 ```
 
-Every run records `effort: {requested, applied_by}`; the Codex run above records `{"requested": "high", "applied_by": "codex -c model_reasoning_effort"}`, and `run-claude` records `"applied_by": "claude --effort"`. Without `--effort` it records `{"requested": null, "applied_by": "backend_default"}`, because defaults differ by model and CLI version: the claude-api skill lists Claude Opus 5.5's API default effort as `medium` and Claude Opus 5's as `high`.
+The metadata and pairing rules below apply to ordinary answer rows.
+Recovery rows retain requested settings and phase observations in `recovery.json` for consumer review.
+
+Each ordinary answer run records `effort: {requested, applied_by}`; the Codex run above records `{"requested": "high", "applied_by": "codex -c model_reasoning_effort"}`, and `run-claude` records `"applied_by": "claude --effort"`. Without `--effort` it records `{"requested": null, "applied_by": "backend_default"}`, because defaults differ by model and CLI version: the claude-api skill lists Claude Opus 5.5's API default effort as `medium` and Claude Opus 5's as `high`.
 
 The same `metadata.json` records how the run stopped and which model answered:
 
@@ -566,7 +590,10 @@ Probes a judge's stability before you trust its verdicts (model-touching; opt-in
 
 ## Cost telemetry (tokens and dollars)
 
-Cost is a first-class eval signal. Every runner path — Pi smoke, Pi trigger, `run-codex`, `run-claude`, `run-subagent`, the judge wrapper, and the Jetty importer — writes legacy-compatible normalized blocks beside raw provider fields **and** an availability-aware telemetry v3 envelope into both `metadata.json` and `metrics.json`.
+For ordinary answer rows, trigger runs, and judge runs, runner paths write legacy-compatible normalized blocks beside raw provider fields and an availability-aware telemetry v3 envelope.
+These paths include Pi smoke, Pi trigger, `run-agent`, `run-codex`, `run-claude`, `run-subagent`, the judge wrapper, and the Jetty importer.
+The envelope appears in both `metadata.json` and `metrics.json`.
+Recovery rows retain raw evidence and `recovery.json` for the consumer. They do not emit these normalized blocks or normalized paired telemetry.
 
 This section owns the three source lists; they come from `observation_contracts.py`, and the answer path and the trigger path validate against the same sets.
 
@@ -576,7 +603,7 @@ This section owns the three source lists; they come from `observation_contracts.
 
 Consumers of the blocks:
 
-- `benchmark`/`aggregate` emit `cost_summary`: availability-aware coverage and operational totals (**every run counts here, including execution errors — a timed-out run still cost money — while quality rates keep excluding them**). A mixed set renders a partial known subtotal, not a false total. Per-variant stats, per-case spend, paired deltas, ablation marginal cost, and judge spend retain their basis/provenance.
+- `benchmark`/`aggregate` emit `cost_summary` with availability-aware coverage and operational totals over ordinary answer attempts, including execution errors. Quality rates exclude those errors. A mixed set renders a partial known subtotal, not a false total. Per-variant stats, per-case spend, paired deltas, ablation marginal cost, and judge spend retain their basis/provenance.
 - `cost-summary` writes the standalone suite ledger (`--out cost-summary.json`, `--md cost-summary.md`): coverage, totals, by variant/case/runner, top expensive cases and ablation arms, and `cost_quality_findings` when a `--benchmark` report is joined.
 - `suite-run` projects spend **before any model call** from previous ledgers (`--cost-history <dir>`, per-run medians) or a static assumption (`--assumed-tokens-per-run`), and gates on `--max-estimated-tokens` / `--max-estimated-cost-usd` — failing closed when a dollar cap is set but no dollar estimate exists — unless `--allow-over-budget`.
 - `audit-manifest --runs` adds cost-quality findings above `--expensive-case-usd` (default $1): `expensive-saturated-case`, `expensive-no-lift-case`, `high-cost-judge-only-case`, `ablation-high-spend-no-structured-regression`, and `high-footprint-low-lift-skill`.

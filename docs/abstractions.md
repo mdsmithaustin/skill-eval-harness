@@ -159,7 +159,15 @@ only as explicitly observed diagnostics.
 
 ## Run-output contract
 
-The contract is the file boundary between any runner and the harness:
+`PreparedTask.recovery` optionally holds a typed `RecoveryCase` from `invocation_contracts.py`.
+`PreparedTask.from_row()` parses its external fields. Recovery content contributes to case and task fingerprints.
+The fixed `run-agent` lifecycle, also used by `run-codex` and `run-claude`, retains one workspace across fresh processes.
+Recovery rows write `recovery.json` and raw snapshots rather than ordinary answer artifacts, workspace diffs, grades, or normalized paired telemetry.
+`RecoveryCapture` passes capture destinations and the initial checkpoint condition directly through existing adapters to `invoke_argv_with_timeout`.
+That function remains the sole subprocess owner. Ordinary outcome factories and `captured_workspace` callers do not change.
+See the [recovery reference](recovery.md) for its output contract and limitations.
+
+The ordinary answer contract is the file boundary between an answer runner and the harness:
 
 ```
 runs/<case_id>/<variant>/[run-<n>/]output.md
@@ -196,7 +204,7 @@ rule for bytes an external agent CLI wrote (`codex exec --json` repeats `id`), r
 repeated names so a row can record them under `stream_duplicate_keys`. Both reject non-finite
 numbers. `iter_json_objects` and `parse_trace_jsonl_text` select the rule with `strict`.
 
-Answer runners and `run-subagent` also record what the model did to its temporary workspace.
+For ordinary rows, answer runners and `run-subagent` also record what the model did to its temporary workspace.
 `workspace_contracts.captured_workspace` owns that directory's lifetime: build, copy a baseline,
 run the provider, diff, delete. The diff is a sorted tuple of `Added | Modified | Deleted`
 changes; each side is a `RegularFile | Symlink | Special | Unreadable` read by `lstat`, so a
@@ -229,11 +237,11 @@ hashed paths are the paths an agent lists. The judge's explore-surface digest fr
 
 ## Runner / adapter
 
-An **answer runner** consumes prepared task rows and produces the run-output contract. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11041`), Claude (`run_claude:11313`, capturing real
+An **answer runner** consumes prepared task rows and produces the run-output contract for ordinary rows. The repo
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11492`), Claude (`run_claude:11769`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:14199`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4179` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:14657`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:4189` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -241,7 +249,8 @@ observations plus optional traces rather than answer grades.
 
 Native answer backends return the frozen `Completed | TimedOut | SpawnFailed | ProviderFailed`
 union from `runner_contracts.py`. `OutcomeContext` validates provider, telemetry, and elapsed-time
-fields; `write_runner_outcome` exhaustively writes the disk contract. A backend therefore cannot
+fields; `write_runner_outcome` exhaustively writes the ordinary disk contract.
+Recovery rows use the separate lifecycle described above. A backend therefore cannot
 independently set timeout, return code, answer, and failure into a contradictory bag. The harness
 calls no model during default grading; it reads what the runner left behind. The explicit
 `--allow-scripts` and `--embed-cmd` modes may invoke caller-supplied external oracle subprocesses.
@@ -261,7 +270,7 @@ code. `InvocationRequest.effort` carries a requested effort level; `run_agent_ta
 before any spend when the backend declares no `effort_control` or the level is not among its
 `effort_levels`.
 
-`completion_contracts.py` records how each answer run ended. `StopObservation` normalizes a
+`completion_contracts.py` records how each ordinary answer run ended. `StopObservation` normalizes a
 provider's stop reason into the closed `StopClass` (`completed`, `truncated`, `turn_limit`,
 `refused`, `other`, `unavailable`) and keeps the raw value beside it. `ServedModel` applies one rule
 to every backend: one reported model is credited and compared with the request (a dated snapshot
@@ -425,7 +434,7 @@ by domain, difficulty, trigger type, and success goal. Case flags mark saturated
 flaky, and with-skill-failed cases, and `effect_estimates.ceiling_or_floor` separates the two
 ways a case stops discriminating: both arms always pass (ceiling) or both always fail (floor, which
 `suggest-cases` never offers for hardening). These flags, the leakage lint
-(`prompt_assertion_leakage_findings:892`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:898`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as

@@ -162,7 +162,7 @@ A version-1 manifest keeps grading identically, so there is no rush.
 
 ## Step 3 — Run the pair (no Jetty required)
 
-`prepare` emits answer-key-safe task rows; a runner turns each row into the run-output contract
+`prepare` emits answer-key-safe task rows; a runner turns each ordinary answer row into the run-output contract
 on disk. Jetty is one optional adapter. Pi, Codex, a subagent, or a person all satisfy the
 same contract.
 

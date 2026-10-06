@@ -4,6 +4,10 @@ Status: implementation record for `spec/agent-backend-parity`.
 
 This spec captures the shared adapter shape now used by Claude, Codex, Gemini CLI, and Mistral Vibe, the capability gaps each registry row reports explicitly, and the requirements for adding future coding agents without one-off command paths.
 
+The answer-output, grading, and normalized telemetry descriptions below apply to ordinary answer rows.
+Optional recovery rows through `run-agent` or its `run-codex` and `run-claude` wrappers retain `recovery.json` and raw snapshots instead.
+The [recovery reference](recovery.md) defines their separate lifecycle and consumer evidence limits.
+
 ## Problem
 
 The harness already treats saved run directories as the stable grading contract, but model execution still leaks provider-specific assumptions into several places:
@@ -30,7 +34,7 @@ This split is deliberate. Type annotations and a frozen outer dataclass do not v
 2. State the Codex parity gap and how the newer Codex CLI flags reduce it.
 3. Record the first-class Gemini CLI and Mistral Vibe implementations and their honest capability gaps.
 4. Define a shared adapter interface that can support arbitrary agents across answer runs, trigger measurement, judging, trace normalization, cost telemetry, and tool replay.
-5. Keep the existing run-output contract stable: `output.md`, `metadata.json`, `events.json`, `metrics.json`, optional turn directories, and benchmark/judge result JSONL formats.
+5. Keep the existing ordinary run-output contract stable: `output.md`, `metadata.json`, `events.json`, `metrics.json`, optional turn directories, and benchmark/judge result JSONL formats.
 
 ## Non-goals
 
@@ -63,7 +67,7 @@ The point of the adapter work is not only feature parity. The refactor should ma
 | Answer runs | `skill-benchmark run-claude` runs prepared rows through `claude -p --output-format stream-json --verbose --no-session-persistence --setting-sources project --strict-mcp-config --settings '{"disableBundledSkills":true,"autoMemoryEnabled":false}'`. |
 | Workspace isolation | Each row runs in a temp workspace with only prepared skill/input files mounted. |
 | Variants | Supports `with_skill`, `without_skill`, `old_skill`, and materialized `ablation:<id>` via prepared rows. |
-| Output contract | Writes `output.md`, `metadata.json`, normalized `events.json`/`metrics.json` where available. |
+| Ordinary answer output contract | Writes `output.md`, `metadata.json`, normalized `events.json`/`metrics.json` where available. |
 | Cost/usage | Parses Claude CLI envelope for real token usage and `total_cost_usd`; normalized into the existing telemetry blocks. |
 | Failure semantics | Nonzero/timeout produces a failure body and metadata that `execution_valid` excludes from quality scoring while cost still counts. |
 | Native judge | `skill-benchmark judge --judge-model <claude-model>` invokes Claude directly and captures judge cost/usage. |
