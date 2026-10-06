@@ -211,6 +211,59 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
             record = json.loads((base / "recovery.json").read_text())
             self.assertEqual(len(record["phases"]), 1)
 
+    def test_checkpoint_directory_swap_cannot_read_external_bytes(self):
+        open_file = os.open
+        for swap_at in ("workspace", "file"):
+            with self.subTest(swap_at=swap_at), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                workspace = root / "workspace"
+                directory = workspace / "nested"
+                directory.mkdir(parents=True)
+                (directory / "checkpoint.json").write_bytes(b"inside")
+                outside = root / "outside"
+                outside.mkdir()
+                (outside / "checkpoint.json").write_bytes(b"outside")
+                self.assertEqual(sb.recovery_file_bytes(workspace, "nested/checkpoint.json"), b"inside")
+                descriptors = []
+                swapped = False
+
+                def replace_directory(path, flags, *arguments, swap_at=swap_at,
+                                      directory=directory, workspace=workspace,
+                                      outside=outside, descriptors=descriptors, **keywords):
+                    nonlocal swapped
+                    if not swapped and (swap_at == "workspace" or Path(path).name == "checkpoint.json"):
+                        directory.rename(workspace / "original")
+                        directory.symlink_to(outside, target_is_directory=True)
+                        swapped = True
+                    descriptor = open_file(path, flags, *arguments, **keywords)
+                    descriptors.append(descriptor)
+                    return descriptor
+
+                with mock.patch.object(sb.os, "open", side_effect=replace_directory):
+                    if swap_at == "workspace":
+                        with self.assertRaises((OSError, ValueError)):
+                            sb.recovery_file_bytes(workspace, "nested/checkpoint.json")
+                    else:
+                        self.assertEqual(sb.recovery_file_bytes(workspace, "nested/checkpoint.json"), b"inside")
+                self.assertTrue(swapped)
+                for descriptor in descriptors:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+    def test_checkpoint_reads_reject_symlink_components_and_nonregular_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            directory = workspace / "nested"
+            directory.mkdir()
+            (directory / "checkpoint.json").write_bytes(b"inside")
+            (workspace / "alias").symlink_to(directory, target_is_directory=True)
+            (workspace / "checkpoint.json").symlink_to(directory / "checkpoint.json")
+            os.mkfifo(workspace / "pipe")
+            self.assertEqual(sb.recovery_file_bytes(workspace, "nested/checkpoint.json"), b"inside")
+            for relative in ("alias/checkpoint.json", "checkpoint.json", "nested", "pipe"):
+                with self.subTest(relative=relative), self.assertRaises((OSError, ValueError)):
+                    sb.recovery_file_bytes(workspace, relative)
+
     def test_descendant_held_pipes_are_drained_and_group_stopped(self):
         with tempfile.TemporaryDirectory() as temporary:
             result, base = self.run_case(Path(temporary), mode="descendant")

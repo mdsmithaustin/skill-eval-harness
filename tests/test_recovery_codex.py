@@ -1,10 +1,19 @@
 import json
+import signal
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from helpers import claude_stream_records, run_cli, write_with_skill_task
+from helpers import (
+    claude_stream_records,
+    run_cli,
+    stub_claude_stream,
+    write_with_skill_task,
+)
+
+import skill_benchmark as sb
 
 
 class RecoveryCompatibilityTests(unittest.TestCase):
@@ -66,7 +75,109 @@ class RecoveryCompatibilityTests(unittest.TestCase):
                 self.assertEqual([call["phase"] for call in calls], ["INITIAL", "RECOVER", "REFUSE"])
                 self.assertEqual(len({call["pid"] for call in calls}), 3)
                 self.assertEqual(record["requested_effort"], "high")
+                for phase, returncode in zip(record["phases"], (-signal.SIGTERM, 0, 0)):
+                    facts = phase["adapter_environment"]["recovery_process"]
+                    self.assertEqual(facts, json.loads((base / "recovery" / phase["phase"] / "process.json").read_text()))
+                    self.assertEqual((facts["state"], facts["os_returncode"], facts["compatibility_returncode"]),
+                                     (phase["state"], returncode, returncode))
+                    self.assertEqual((facts["leader_reaped"], facts["pipes_drained"], facts["group_stopped"]),
+                                     (True, True, True))
+                    self.assertEqual(phase["adapter_environment"]["runner"], agent)
                 self.assertFalse(Path(record["workspace"]).exists())
+
+    def test_public_claude_capture_failures_preserve_process_and_timeout_facts(self):
+        write_json = sb.write_json
+        write_bytes = Path.write_bytes
+        for mode, os_returncode, compatibility_returncode in (
+                ("stop", -signal.SIGTERM, -signal.SIGTERM),
+                ("timeout", -signal.SIGKILL, 124), ("exit-124", 124, 124)):
+            for artifact in ("process.json", "stdout.bin"):
+                with self.subTest(mode=mode, artifact=artifact), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    _, tasks, relative = write_with_skill_task(root)
+                    row = json.loads(tasks.read_text())
+                    row["recovery"] = {
+                        "checkpoint_path": "checkpoint.json", "expected_content": '{"phase":1}',
+                        "recovery_prompt": "RECOVER", "refusal_prompt": "REFUSE",
+                        "forbidden_path": "forbidden.txt"}
+                    tasks.write_text(json.dumps(row) + "\n")
+                    script = root / "fake_claude.py"
+                    script.write_text(
+                        f"#!{sys.executable}\n"
+                        "import os, sys, time\n"
+                        "from pathlib import Path\n"
+                        "sys.stdin.read()\n"
+                        "os.write(1, b'{\"type\":\"system\",\"subtype\":\"init\"}\\n')\n"
+                        "os.write(2, b'raw-stderr\\xff')\n"
+                        f"mode = {mode!r}\n"
+                        "if mode == 'exit-124':\n"
+                        "    raise SystemExit(124)\n"
+                        "if mode == 'stop':\n"
+                        "    Path('checkpoint.json').write_bytes(b'{\"phase\":1}')\n"
+                        "time.sleep(60)\n")
+                    script.chmod(0o755)
+
+                    def fail_process(path, content, artifact=artifact):
+                        if path.name == artifact:
+                            raise OSError("capture storage failed")
+                        return write_json(path, content)
+
+                    def fail_raw(path, content, artifact=artifact):
+                        if path.name == artifact:
+                            raise OSError("capture storage failed")
+                        return write_bytes(path, content)
+
+                    with mock.patch.object(sb, "write_json", side_effect=fail_process), \
+                            mock.patch.object(Path, "write_bytes", autospec=True, side_effect=fail_raw):
+                        code, _, stderr = run_cli(
+                            "run-agent", "--agent", "claude", "--tasks", tasks, "--runs", root / "runs",
+                            "--claude-bin", script, "--model", "fake-model", "--timeout", "1")
+                    self.assertEqual(code, 1, stderr)
+                    base = root / "runs" / relative
+                    record = json.loads((base / "recovery.json").read_text())
+                    self.assertEqual((record["status"], record["failure"], len(record["phases"])),
+                                     ("failed", "capture_failed", 1))
+                    phase = record["phases"][0]
+                    facts = phase["adapter_environment"]["recovery_process"]
+                    self.assertEqual((phase["state"], facts["state"], facts["error"]),
+                                     ("capture_failed", "capture_failed", "OSError: capture storage failed"))
+                    self.assertEqual((facts["os_returncode"], facts["compatibility_returncode"],
+                                      phase["compatibility_returncode"]),
+                                     (os_returncode, compatibility_returncode, compatibility_returncode))
+                    self.assertEqual(phase["outcome"], "TimedOut" if mode == "timeout" else "ProviderFailed")
+                    self.assertEqual((facts["leader_reaped"], facts["pipes_drained"], facts["group_stopped"]),
+                                     (True, True, True))
+                    process = base / "recovery/initial/process.json"
+                    if artifact == "process.json":
+                        self.assertFalse(process.exists())
+                    else:
+                        self.assertEqual(json.loads(process.read_text()), facts)
+                    self.assertEqual((base / "recovery/initial/stderr.bin").read_bytes(), b"raw-stderr\xff")
+                    self.assertIsNone(record["certificate"])
+                    self.assertFalse(Path(record["workspace"]).exists())
+
+    def test_public_ordinary_claude_row_preserves_environment_and_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, tasks, relative = write_with_skill_task(root)
+            script = stub_claude_stream(root / "claude", answer="ordinary answer", served_model="fake-model")
+            code, _, stderr = run_cli(
+                "run-agent", "--agent", "claude", "--tasks", tasks, "--runs", root / "runs",
+                "--claude-bin", script, "--model", "fake-model", "--effort", "high", "--timeout", "4")
+            self.assertEqual(code, 0, stderr)
+            base = root / "runs" / relative
+            metadata = json.loads((base / "metadata.json").read_text())
+            self.assertEqual(metadata["returncode"], 0)
+            self.assertEqual(metadata["effort"], {"requested": "high", "applied_by": "claude --effort"})
+            self.assertEqual((base / "output.md").read_text().strip(), "ordinary answer")
+            environment = json.loads((base / "environment.json").read_text())
+            self.assertEqual(set(environment), {"runner", "command", "context_isolation", "cwd", "stdout_utf8_valid", "variant"})
+            self.assertEqual((environment["runner"], environment["cwd"], environment["stdout_utf8_valid"]),
+                             ("claude", "<isolated workspace>", True))
+            self.assertIn("--effort high", environment["command"])
+            self.assertTrue((base / "metrics.json").is_file())
+            self.assertTrue((base / "artifact-commit.json").is_file())
+            self.assertFalse((base / "recovery.json").exists())
 
     def test_public_ordinary_codex_row_preserves_effort_argv_and_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:

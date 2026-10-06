@@ -238,9 +238,9 @@ hashed paths are the paths an agent lists. The judge's explore-surface digest fr
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract for ordinary rows. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11478`), Claude (`run_claude:11751`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11490`), Claude (`run_claude:11767`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:14639`, which hosts record/replay tool I/O via `ToolReplayStore`),
+subagent runner (`run_subagent:14655`, which hosts record/replay tool I/O via `ToolReplayStore`),
 Jetty (`JettyClient:4189` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they

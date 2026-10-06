@@ -6759,11 +6759,22 @@ def recovery_file_bytes(workspace: Path, relative: str) -> bytes:
     resolved = path.resolve()
     if workspace.resolve() not in resolved.parents:
         raise ValueError(f"recovery path escapes workspace: {relative}")
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    with os.fdopen(descriptor, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            raise ValueError(f"recovery path is not a regular file: {relative}")
-        return handle.read()
+    parts = Path(relative).parts
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptors = [os.open(workspace, directory_flags)]
+    try:
+        for part in parts[:-1]:
+            descriptors.append(os.open(part, directory_flags, dir_fd=descriptors[-1]))
+        descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=descriptors[-1])
+        descriptors.append(descriptor)
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError(f"recovery path is not a regular file: {relative}")
+            return handle.read()
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def recovery_group_stopped(pgid: int) -> tuple[bool, str]:
@@ -11122,6 +11133,7 @@ class ClaudeBackend(AgentBackend):
             trace_utf8_valid=(result.get("trace_utf8_valid") is not False),
             usage=result.get("usage"), cost_usd=result.get("cost_usd"), model=request.model,
             environment={
+                **dict(result.get("environment") or {}),
                 "runner": "claude",
                 "command": result.get("command") or "claude -p",
                 "context_isolation": result.get("context_isolation"),
@@ -11718,7 +11730,9 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
                 "stderr": result.stderr, "raw_response": result.stdout, "command": command,
                 "context_isolation": list(isolation_args),
                 "invocation_state": result.invocation_state.value,
-                "trace_utf8_valid": result.stdout_utf8_valid}
+                "trace_utf8_valid": result.stdout_utf8_valid,
+                **({"environment": dict(result.adapter_metadata or {})}
+                   if recovery_capture is not None else {})}
     parsed = (
         parse_claude_cli_json(result.stdout)
         if result.stdout_utf8_valid
@@ -11744,6 +11758,8 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
         "raw_response": result.stdout,
         "command": command,
         "context_isolation": list(isolation_args),
+        **({"environment": dict(result.adapter_metadata or {})}
+           if recovery_capture is not None else {}),
     })
     return parsed
 
