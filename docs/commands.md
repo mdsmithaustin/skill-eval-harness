@@ -124,6 +124,10 @@ them; missing token stats and unsupported dollar cost remain explicit `missing`.
 ## Run fixed recovery cases
 
 `run-agent` and its `run-codex` and `run-claude` wrappers accept an optional `recovery` object on a prepared row.
+Recovery execution requires a POSIX host with process-group signals and `O_DIRECTORY`, `O_NOFOLLOW`, and `O_NONBLOCK`.
+Windows recovery execution is unsupported.
+Missing required facilities fail the run with exit code 1 and block later phases.
+The runner records the failure when it can write `recovery.json`, and evidence may be partial.
 The fixed initial, recovery, and refusal phases use fresh processes in one fixture workspace.
 Rows without `recovery` stay one-shot. No new command or permission configuration is required.
 Recovery rows retain raw evidence and `recovery.json` instead of ordinary answer artifacts, workspace diffs, grades, or normalized paired telemetry.

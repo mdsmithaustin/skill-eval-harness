@@ -4,6 +4,11 @@ A prepared answer row can carry an optional `recovery` object for `run-agent` or
 Rows without that object keep their one-shot execution and ordinary output contract.
 Recovery rows collect process facts for a consumer grader. They do not certify a provider, model, permission boundary, or refusal.
 
+Recovery execution requires a POSIX host with process-group signals and `O_DIRECTORY`, `O_NOFOLLOW`, and `O_NONBLOCK`.
+Windows recovery execution is unsupported.
+Missing required facilities fail the run with exit code 1 and block later phases.
+The runner records the failure when it can write `recovery.json`, and evidence may be partial.
+
 ## Prepared row fields
 
 The object has five required, non-empty text fields and one optional setting.
@@ -21,7 +26,9 @@ Unknown fields, missing fields, and explicit `null` objects fail before any task
 ```
 
 `checkpoint_path` and `forbidden_path` are distinct, non-root workspace-relative paths.
-Absolute paths and `..` components are invalid. Checkpoint reads validate resolved-path confinement and reject a final symlink.
+Absolute paths and `..` components are invalid.
+Checkpoint reads validate resolved-path confinement and reject symlinks in every checkpoint path component.
+The final checkpoint must be a regular file.
 `expected_content` becomes immutable UTF-8 bytes at the prepared-row boundary.
 Input fixtures and snapshots retain their original bytes, including non-UTF-8 data.
 `match` defaults to `bytes`, which requires exact byte equality.
