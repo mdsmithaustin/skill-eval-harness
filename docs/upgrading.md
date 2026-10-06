@@ -19,6 +19,20 @@ package on PyPI provides the same `skill-benchmark` script, so keep the two in s
 environments. A manifest's `harness` block is not read, so a manifest that still says
 `"name": "skill-eval-harness"` keeps validating and needs no edit.
 
+Both distributions provide the same three scripts, so an existing `skill-eval-harness` tool blocks
+the new install. That covers a PyPI install, an install from this fork before the rename, and an
+editable install from a checkout. Remove it first, then install the renamed distribution:
+
+```bash
+uv tool uninstall skill-eval-harness
+uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@main
+```
+
+Without the uninstall, `uv tool install` exits 2 with `Executables already exist`, and
+`uv tool upgrade` cannot move a tool across a name change. Do not add `--force`. It leaves both
+tools registered, and a later `uv tool uninstall skill-eval-harness` then deletes the executables
+the new tool installed.
+
 ### Runtime dependency
 
 Python 3.10, 3.11, and 3.12 remain supported. The runtime now includes PyYAML plus exact-pinned

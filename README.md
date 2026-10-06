@@ -66,6 +66,8 @@ General eval frameworks (openai/evals, vitest-evals, viteval) score one output a
 >
 > For exact reproducibility, pin a commit: `uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@<commit-sha>`.
 > The distribution is named `skill-eval-harness-ext`. The `skill-eval-harness` package on PyPI is the upstream project, not this fork.
+>
+> Already have a `skill-eval-harness` tool installed? Run `uv tool uninstall skill-eval-harness` first, or the install exits 2. See [Installation](#installation).
 
 Run these from a skill repo that has `evals/shared-benchmark.json`:
 
@@ -114,9 +116,12 @@ Each paired lift also carries an `interval` (the sign-flip test inverted into a 
 
 ### From GitHub
 
-The fork publishes no PyPI package. Install a commit or branch from its git URL:
+The fork publishes no PyPI package. Install a commit or branch from its git URL.
+
+If `uv tool list` already shows `skill-eval-harness`, remove it first. That covers the upstream PyPI package, an install from this fork before the rename, and an editable install. Both distributions provide the same scripts, so `uv tool install` exits 2 with `Executables already exist` while the old tool is present. Do not use `--force`: it leaves both tools registered, and a later `uv tool uninstall skill-eval-harness` deletes the new tool's executables.
 
 ```bash
+uv tool uninstall skill-eval-harness   # skip when it is not installed
 uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@main
 skill-benchmark --help
 skill-pi-trigger-eval --help
@@ -147,6 +152,7 @@ The installed commands are:
 ```bash
 git clone https://github.com/mdsmithaustin/skill-eval-harness.git
 cd skill-eval-harness
+uv tool uninstall skill-eval-harness   # skip when it is not installed
 uv tool install --editable .
 skill-benchmark --help
 ```

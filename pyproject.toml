@@ -29,7 +29,6 @@ test = ["pytest>=8", "hypothesis>=6", "ruff==0.16.0", "ty==0.0.65"]
 [project.urls]
 Homepage = "https://github.com/mdsmithaustin/skill-eval-harness"
 Repository = "https://github.com/mdsmithaustin/skill-eval-harness"
-Issues = "https://github.com/mdsmithaustin/skill-eval-harness/issues"
 Changelog = "https://github.com/mdsmithaustin/skill-eval-harness/blob/main/CHANGELOG.md"
 Documentation = "https://github.com/mdsmithaustin/skill-eval-harness#readme"
 
