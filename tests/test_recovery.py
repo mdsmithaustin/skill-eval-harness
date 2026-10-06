@@ -250,6 +250,18 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
                     with self.assertRaises(OSError):
                         os.fstat(descriptor)
 
+    def test_checkpoint_reads_require_posix_flags_before_opening_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            (workspace / "checkpoint.json").write_bytes(b"inside")
+            for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK"):
+                with self.subTest(flag=flag), mock.patch.object(sb.os, flag), mock.patch.object(
+                        sb.os, "open", side_effect=AssertionError("opened before resolving required flags")) as open_file:
+                    delattr(sb.os, flag)
+                    with self.assertRaisesRegex(AttributeError, flag):
+                        sb.recovery_file_bytes(workspace, "checkpoint.json")
+                    open_file.assert_not_called()
+
     def test_checkpoint_reads_reject_symlink_components_and_nonregular_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)

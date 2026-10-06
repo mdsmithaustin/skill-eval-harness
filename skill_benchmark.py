@@ -6760,13 +6760,15 @@ def recovery_file_bytes(workspace: Path, relative: str) -> bytes:
     if workspace.resolve() not in resolved.parents:
         raise ValueError(f"recovery path escapes workspace: {relative}")
     parts = Path(relative).parts
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_flag, nofollow_flag, nonblock_flag = (
+        getattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK"))
+    directory_flags = os.O_RDONLY | directory_flag | nofollow_flag
+    file_flags = os.O_RDONLY | nofollow_flag | nonblock_flag
     descriptors = [os.open(workspace, directory_flags)]
     try:
         for part in parts[:-1]:
             descriptors.append(os.open(part, directory_flags, dir_fd=descriptors[-1]))
-        descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                             dir_fd=descriptors[-1])
+        descriptor = os.open(parts[-1], file_flags, dir_fd=descriptors[-1])
         descriptors.append(descriptor)
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
