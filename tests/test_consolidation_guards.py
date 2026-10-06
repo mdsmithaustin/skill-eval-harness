@@ -1103,7 +1103,8 @@ class PackagingWorkflowTests(unittest.TestCase):
         for workflow in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
             with self.subTest(workflow=workflow.name):
                 self.assertNotIn(
-                    "pypa/gh-action-pypi-publish", workflow.read_text(encoding="utf-8"))
+                    "pypa/gh-action-pypi-publish",
+                    workflow.read_text(encoding="utf-8").lower())
 
 
 class DocSyncTests(unittest.TestCase):
