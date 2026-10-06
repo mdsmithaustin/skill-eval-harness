@@ -1094,10 +1094,19 @@ class TimeoutConventionTests(unittest.TestCase):
         self.assertEqual(outcome, {"answer": "", "returncode": 124, "timed_out": True})
 
 
+def _publish_command(tool: str, subcommand: str) -> re.Pattern[str]:
+    """`tool subcommand`, allowing option tokens (and one value after each) between them."""
+    return re.compile(rf"\b{tool}(?:\s+-\S*(?:\s+[^\s-]\S*)?)*\s+{subcommand}\b", re.IGNORECASE)
+
+
 PUBLISH_ROUTES = {
     "pypa/gh-action-pypi-publish": re.compile(r"pypa/gh-action-pypi-publish", re.IGNORECASE),
-    "uv publish": re.compile(r"\buv\s+publish\b", re.IGNORECASE),
-    "twine upload": re.compile(r"\btwine\s+upload\b", re.IGNORECASE),
+    "uv publish": _publish_command("uv", "publish"),
+    "twine upload": _publish_command("twine", "upload"),
+    "hatch publish": _publish_command("hatch", "publish"),
+    "poetry publish": _publish_command("poetry", "publish"),
+    "flit publish": _publish_command("flit", "publish"),
+    "pdm publish": _publish_command("pdm", "publish"),
 }
 
 
@@ -1166,7 +1175,44 @@ class PackagingWorkflowTests(unittest.TestCase):
                 target.write_text(text, encoding="utf-8")
                 self.assertEqual(publish_routes(github), [f"{relative}: {route}"])
 
-    def test_a_comment_that_names_a_publish_route_is_not_a_route(self):
+    def test_option_tokens_before_the_subcommand_do_not_hide_a_route(self):
+        steps = {
+            "uv --quiet publish": "uv publish",
+            "uv -v publish": "uv publish",
+            "uv --directory sub publish dist/*": "uv publish",
+            "python -m twine --no-color upload dist/*": "twine upload",
+            "twine -r pypi upload dist/*": "twine upload",
+            "hatch publish": "hatch publish",
+            "hatch -v publish": "hatch publish",
+            "poetry publish --build": "poetry publish",
+            "poetry --no-ansi publish": "poetry publish",
+            "python -m flit publish": "flit publish",
+            "flit --debug publish": "flit publish",
+            "pdm publish": "pdm publish",
+            "pdm -v publish": "pdm publish",
+        }
+        for step, route in steps.items():
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as tmp:
+                github = Path(tmp) / ".github"
+                (github / "workflows").mkdir(parents=True)
+                (github / "workflows" / "release.yml").write_text(
+                    "on: push\njobs:\n  ship:\n    runs-on: ubuntu-latest\n"
+                    f"    steps:\n      - run: {step}\n", encoding="utf-8")
+                self.assertEqual(publish_routes(github), [f"workflows/release.yml: {route}"])
+
+    def test_a_command_that_only_looks_like_a_route_is_not_one(self):
+        for step in ("uv sync --frozen", "uv run publish", "uv pip install twine",
+                     "twine check dist/*", "hatch build", "poetry install", "pdm install",
+                     "flit build"):
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as tmp:
+                github = Path(tmp) / ".github"
+                (github / "workflows").mkdir(parents=True)
+                (github / "workflows" / "ci.yml").write_text(
+                    "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                    f"    steps:\n      - run: {step}\n", encoding="utf-8")
+                self.assertEqual(publish_routes(github), [])
+
+    def test_a_yaml_comment_that_names_a_publish_route_is_not_a_route(self):
         with tempfile.TemporaryDirectory() as tmp:
             github = Path(tmp) / ".github"
             (github / "workflows").mkdir(parents=True)
