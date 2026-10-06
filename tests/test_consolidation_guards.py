@@ -1113,8 +1113,8 @@ def _publish_grants(node: object) -> Iterator[str]:
 def pypi_publish_grants(github: Path) -> list[str]:
     """Findings as `relative/path: finding` for each YAML file under `github` that grants
     `id-token: write` or `permissions: write-all`, uses `pypa/gh-action-pypi-publish`, or that
-    `yaml.safe_load` cannot load (a parse error, more than one document, an unknown tag, or a
-    non-UTF-8 encoding)."""
+    cannot be read as UTF-8 and loaded with `yaml.safe_load`. A file that cannot be loaded is
+    reported with the type name of the error."""
     findings = []
     for path in sorted(github.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in {".yml", ".yaml"}:
@@ -1122,8 +1122,8 @@ def pypi_publish_grants(github: Path) -> list[str]:
         relative = path.relative_to(github).as_posix()
         try:
             document = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (yaml.YAMLError, UnicodeDecodeError):
-            findings.append(f"{relative}: yaml.safe_load cannot load the file")
+        except Exception as error:
+            findings.append(f"{relative}: could not load as YAML ({type(error).__name__})")
             continue
         findings.extend(f"{relative}: {grant}" for grant in sorted(set(_publish_grants(document))))
     return findings
@@ -1173,7 +1173,22 @@ class PackagingWorkflowTests(unittest.TestCase):
                 target = github / relative
                 target.parent.mkdir(parents=True)
                 target.write_text("jobs: [unclosed\n  run: {\n", encoding="utf-8")
-                self.assertEqual(pypi_publish_grants(github), [f"{relative}: yaml.safe_load cannot load the file"])
+                self.assertEqual(pypi_publish_grants(github), [f"{relative}: could not load as YAML (ParserError)"])
+
+    def test_a_file_that_cannot_be_read_as_utf8_or_loaded_is_reported_with_its_error_type(self):
+        cases = {
+            "utf16-bom.yml": ("x: 1\n".encode("utf-16"), "UnicodeDecodeError"),
+            "impossible-date.yml": (b"x: 2024-02-30\n", "ValueError"),
+            "deeply-nested.yml": (b"[" * 5000 + b"]" * 5000, "RecursionError"),
+            "unknown-tag.yml": (b"x: !!python/object:os.system {}\n", "ConstructorError"),
+        }
+        for name, (data, error_type) in cases.items():
+            with self.subTest(file=name), tempfile.TemporaryDirectory() as tmp:
+                github = Path(tmp) / ".github"
+                (github / "workflows").mkdir(parents=True)
+                (github / "workflows" / name).write_bytes(data)
+                self.assertEqual(
+                    pypi_publish_grants(github), [f"workflows/{name}: could not load as YAML ({error_type})"])
 
     def test_a_valid_multi_document_yaml_file_is_reported_not_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1181,7 +1196,7 @@ class PackagingWorkflowTests(unittest.TestCase):
             (github / "workflows").mkdir(parents=True)
             (github / "workflows" / "two.yml").write_text(
                 "on: push\n---\npermissions:\n  id-token: write\n", encoding="utf-8")
-            self.assertEqual(pypi_publish_grants(github), ["workflows/two.yml: yaml.safe_load cannot load the file"])
+            self.assertEqual(pypi_publish_grants(github), ["workflows/two.yml: could not load as YAML (ComposerError)"])
 
     def test_read_only_permissions_and_a_comment_are_not_a_grant(self):
         with tempfile.TemporaryDirectory() as tmp:
