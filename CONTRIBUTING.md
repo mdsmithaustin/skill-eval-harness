@@ -25,6 +25,7 @@ deliberately and with compatibility/timeout evidence. Install test dependencies 
 Run these before opening a PR:
 
 ```sh
+pip uninstall -y skill-eval-harness   # prints a warning and exits 0 when it is not installed
 pip install -e ".[test]"
 python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py examples/edited-file-demo/*.py examples/edited-file-demo/evals/fixtures/*.py examples/edited-file-demo/evals/oracles/*.py type_tests/*.py tests/*.py
 ruff check .
@@ -34,11 +35,13 @@ python3 scripts/check_test_collection_parity.py
 python3 scripts/check_installed_wheel.py
 ```
 
+Run the uninstall in any virtualenv that ever held an editable `skill-eval-harness`. The install does not replace that distribution, so the environment keeps both, and a later `pip uninstall skill-eval-harness` deletes the `skill-*` scripts that `skill-eval-harness-ext` needs.
+
 The `test` extra pins the linters CI runs, `ruff==0.16.0` and `ty==0.0.65`; run those versions, because another release can report different findings.
 
-This fork publishes no release artifact, so CI is the only gate. `tests/test_gate_integrity.py` fails when a gate of CI's test job runs conditionally, can fail green, or is missing. `tests/test_consolidation_guards.py` fails when any file under `.github/` runs the PyPI publish action, `uv publish`, or `twine upload`.
+This fork publishes no release artifact, so CI is the only gate. `tests/test_gate_integrity.py` fails when a gate of CI's test job runs conditionally, can fail green, or is missing. `tests/test_consolidation_guards.py` fails when a file under `.github/` runs `pypa/gh-action-pypi-publish`, or runs `uv`, `hatch`, `poetry`, `flit`, or `pdm` with the `publish` subcommand, or `twine` with `upload`. Option flags may sit between the tool and the subcommand. The guard reads YAML files without their comments and every other file in full. It does not read files outside `.github/`.
 
-(`pytest tests/` also works — `pyproject.toml` carries the pythonpath config — but CI runs `unittest discover`, so keep tests compatible with both. `scripts/check_test_collection_parity.py` fails when either collector sees a test the other cannot, so a pytest-only test cannot hide from CI. `scripts/check_installed_wheel.py` builds the wheel, installs it into a clean environment, imports every module from there and runs each console script, so a module missing from `py-modules` fails before a release does.)
+(`pytest tests/` also works — `pyproject.toml` carries the pythonpath config — but CI runs `unittest discover`, so keep tests compatible with both. `scripts/check_test_collection_parity.py` fails when either collector sees a test the other cannot, so a pytest-only test cannot hide from CI. `scripts/check_installed_wheel.py` builds the wheel, installs it into a clean environment, imports every module from there and runs each console script, so a module missing from `py-modules` fails that check.)
 
 `ty check` automatically covers every packaged top-level Python module, repository script,
 shipped example, and the static contracts under `type_tests/`. A new runtime boundary module
