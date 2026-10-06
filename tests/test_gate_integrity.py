@@ -123,7 +123,8 @@ SCRIPT_STATUS_SHELLS = ("python", "python3")
 
 def load_workflows() -> dict[str, dict]:
     return {path.name: yaml.safe_load(path.read_text(encoding="utf-8"))
-            for path in sorted(WORKFLOWS.glob("*.yml"))}
+            for path in sorted(WORKFLOWS.iterdir())
+            if path.suffix in {".yml", ".yaml"}}
 
 
 def run_lines(step: dict) -> list[str]:
@@ -248,6 +249,13 @@ class WorkflowGateTests(unittest.TestCase):
     def setUp(self):
         self.workflows = load_workflows()
         self.pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    def test_a_workflow_with_the_yaml_extension_is_loaded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("ci.yml", "release.yaml"):
+                (Path(tmp) / name).write_text("name: x\n", encoding="utf-8")
+            with mock.patch.dict(globals(), {"WORKFLOWS": Path(tmp)}):
+                self.assertEqual(set(load_workflows()), {"ci.yml", "release.yaml"})
 
     def test_every_gate_runs_unconditionally_and_can_fail(self):
         self.assertEqual(set(self.workflows), {"ci.yml"})

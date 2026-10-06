@@ -31,6 +31,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+import yaml
 from helpers import (
     attest_answer_design,
     make_eval_repo,
@@ -1093,18 +1094,88 @@ class TimeoutConventionTests(unittest.TestCase):
         self.assertEqual(outcome, {"answer": "", "returncode": 124, "timed_out": True})
 
 
+PUBLISH_ROUTES = {
+    "pypa/gh-action-pypi-publish": re.compile(r"pypa/gh-action-pypi-publish", re.IGNORECASE),
+    "uv publish": re.compile(r"\buv\s+publish\b", re.IGNORECASE),
+    "twine upload": re.compile(r"\btwine\s+upload\b", re.IGNORECASE),
+}
+
+
+def _yaml_strings(node: object) -> list[str]:
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [s for pair in node.items() for part in pair for s in _yaml_strings(part)]
+    if isinstance(node, list):
+        return [s for item in node for s in _yaml_strings(item)]
+    return []
+
+
+def _executable_text(path: Path) -> str:
+    """A file's text without YAML comments; an unparsable YAML file keeps all of it."""
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    if path.suffix.lower() not in {".yml", ".yaml"}:
+        return raw
+    try:
+        return "\n".join(_yaml_strings(yaml.safe_load(raw)))
+    except yaml.YAMLError:
+        return raw
+
+
+def publish_routes(github: Path) -> list[str]:
+    """Every file under `github` that can publish to PyPI, as `relative/path: route`."""
+    return [f"{path.relative_to(github).as_posix()}: {route}"
+            for path in sorted(github.rglob("*")) if path.is_file()
+            for route, pattern in PUBLISH_ROUTES.items()
+            if pattern.search(_executable_text(path))]
+
+
 class PackagingWorkflowTests(unittest.TestCase):
     def test_distribution_is_named_skill_eval_harness_ext(self):
         match = re.search(r'(?m)^\[project\]\s*\nname\s*=\s*"([^"]*)"', PYPROJECT)
         self.assertIsNotNone(match, "pyproject.toml [project] has no name")
         self.assertEqual(match.group(1), "skill-eval-harness-ext")
 
-    def test_no_workflow_publishes_to_pypi(self):
-        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
-            with self.subTest(workflow=workflow.name):
-                self.assertNotIn(
-                    "pypa/gh-action-pypi-publish",
-                    workflow.read_text(encoding="utf-8").lower())
+    def test_nothing_under_github_publishes_to_pypi(self):
+        self.assertEqual(publish_routes(ROOT / ".github"), [])
+
+    def test_every_publish_route_is_reported(self):
+        def workflow(step: str) -> str:
+            return f"on: push\njobs:\n  ship:\n    runs-on: ubuntu-latest\n    steps:\n      - {step}\n"
+
+        def action(step: str) -> str:
+            return f"name: Release\nruns:\n  using: composite\n  steps:\n    - {step}\n"
+
+        routes = {
+            "workflows/release.yaml": (workflow("run: uv publish"), "uv publish"),
+            "workflows/ci.yml": (
+                workflow("run: |\n          python -m build\n          twine upload dist/*"),
+                "twine upload"),
+            "actions/release/action.yml": (
+                action("uses: PyPA/GH-Action-PyPI-Publish@release/v1"),
+                "pypa/gh-action-pypi-publish"),
+            "actions/release/action.yaml": (
+                action("uses: pypa/gh-action-pypi-publish@release/v1"),
+                "pypa/gh-action-pypi-publish"),
+        }
+        for relative, (text, route) in routes.items():
+            with self.subTest(file=relative), tempfile.TemporaryDirectory() as tmp:
+                github = Path(tmp) / ".github"
+                target = github / relative
+                target.parent.mkdir(parents=True)
+                target.write_text(text, encoding="utf-8")
+                self.assertEqual(publish_routes(github), [f"{relative}: {route}"])
+
+    def test_a_comment_that_names_a_publish_route_is_not_a_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            github = Path(tmp) / ".github"
+            (github / "workflows").mkdir(parents=True)
+            (github / "workflows" / "ci.yml").write_text(
+                "# The fork never runs pypa/gh-action-pypi-publish, uv publish or twine upload.\n"
+                "name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: echo ok  # not twine upload\n",
+                encoding="utf-8")
+            self.assertEqual(publish_routes(github), [])
 
 
 class DocSyncTests(unittest.TestCase):
