@@ -505,10 +505,13 @@ skill changed. They often explain a smaller denominator or a missing ratio direc
 
 Keep `eval-runs/latest-v0.5.1`, `benchmark-v0.5.1.json`, and the old environment until
 the 0.6.0 report has been accepted. Rolling back the executable is then just using the
-old environment or reinstalling the pinned release:
+old environment or reinstalling the pinned commit. That commit predates the rename, so it
+installs the `skill-eval-harness` distribution, which provides the same scripts as
+`skill-eval-harness-ext`. If you installed `skill-eval-harness-ext` as a tool, remove it first:
 
 ```bash
-uv tool install --force git+https://github.com/mdsmithaustin/skill-eval-harness.git@0f18a30209f7f5f10230a144fa96851c250e3364
+uv tool uninstall skill-eval-harness-ext
+uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@0f18a30209f7f5f10230a144fa96851c250e3364
 ```
 
 Do not convert a migrated tree back by deleting selected telemetry keys. Restore the
