@@ -33,6 +33,8 @@ Without the uninstall, `uv tool install` exits 2 with `Executables already exist
 tools registered, and a later `uv tool uninstall skill-eval-harness` then deletes the executables
 the new tool installed.
 
+In a pip virtualenv that holds the pre-rename package, run `pip uninstall -y skill-eval-harness` before you install the fork, or start a fresh virtualenv. A later `pip uninstall skill-eval-harness` otherwise deletes the scripts and shared modules that `skill-eval-harness-ext` needs.
+
 ### Runtime dependency
 
 Python 3.10, 3.11, and 3.12 remain supported. The runtime now includes PyYAML plus exact-pinned

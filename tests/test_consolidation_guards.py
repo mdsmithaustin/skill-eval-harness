@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
@@ -1094,53 +1095,35 @@ class TimeoutConventionTests(unittest.TestCase):
         self.assertEqual(outcome, {"answer": "", "returncode": 124, "timed_out": True})
 
 
-_SEP = r"(?:[ \t]|\\\n)+"
-
-
-def _publish_command(tool: str, subcommand: str) -> re.Pattern[str]:
-    """`tool subcommand` on one logical shell line, with option tokens (and one value after each) between."""
-    option = rf"{_SEP}-\S*(?:{_SEP}(?!run\b)[^\s-]\S*)?"
-    return re.compile(rf"\b{tool}(?:{option})*{_SEP}{subcommand}\b", re.IGNORECASE)
-
-
-PUBLISH_ROUTES = {
-    "pypa/gh-action-pypi-publish": re.compile(r"pypa/gh-action-pypi-publish", re.IGNORECASE),
-    "uv publish": _publish_command("uv", "publish"),
-    "twine upload": _publish_command("twine", "upload"),
-    "hatch publish": _publish_command("hatch", "publish"),
-    "poetry publish": _publish_command("poetry", "publish"),
-    "flit publish": _publish_command("flit", "publish"),
-    "pdm publish": _publish_command("pdm", "publish"),
-}
-
-
-def _yaml_strings(node: object) -> list[str]:
-    if isinstance(node, str):
-        return [node]
+def _publish_grants(node: object) -> Iterator[str]:
     if isinstance(node, dict):
-        return [s for pair in node.items() for part in pair for s in _yaml_strings(part)]
-    if isinstance(node, list):
-        return [s for item in node for s in _yaml_strings(item)]
-    return []
+        for key, value in node.items():
+            if key == "permissions" and isinstance(value, str) and value.lower() == "write-all":
+                yield "permissions: write-all"
+            elif key == "permissions" and isinstance(value, dict) and str(value.get("id-token")).lower() == "write":
+                yield "id-token: write"
+            elif key == "uses" and isinstance(value, str) and value.lower().startswith("pypa/gh-action-pypi-publish"):
+                yield "uses: pypa/gh-action-pypi-publish"
+            yield from _publish_grants(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _publish_grants(item)
 
 
-def _executable_text(path: Path) -> str:
-    """A file's text without YAML comments; an unparsable YAML file keeps all of it."""
-    raw = path.read_text(encoding="utf-8", errors="replace")
-    if path.suffix.lower() not in {".yml", ".yaml"}:
-        return raw
-    try:
-        return "\n".join(_yaml_strings(yaml.safe_load(raw)))
-    except yaml.YAMLError:
-        return raw
-
-
-def publish_routes(github: Path) -> list[str]:
-    """Every file under `github` that can publish to PyPI, as `relative/path: route`."""
-    return [f"{path.relative_to(github).as_posix()}: {route}"
-            for path in sorted(github.rglob("*")) if path.is_file()
-            for route, pattern in PUBLISH_ROUTES.items()
-            if pattern.search(_executable_text(path))]
+def pypi_publish_grants(github: Path) -> list[str]:
+    """Every YAML file under `github` that can publish to PyPI or does not parse, as `relative/path: finding`."""
+    findings = []
+    for path in sorted(github.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in {".yml", ".yaml"}:
+            continue
+        relative = path.relative_to(github).as_posix()
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, UnicodeDecodeError):
+            findings.append(f"{relative}: not valid YAML")
+            continue
+        findings.extend(f"{relative}: {grant}" for grant in sorted(set(_publish_grants(document))))
+    return findings
 
 
 class PackagingWorkflowTests(unittest.TestCase):
@@ -1149,111 +1132,58 @@ class PackagingWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(match, "pyproject.toml [project] has no name")
         self.assertEqual(match.group(1), "skill-eval-harness-ext")
 
-    def test_nothing_under_github_publishes_to_pypi(self):
-        self.assertEqual(publish_routes(ROOT / ".github"), [])
+    def test_nothing_under_github_can_publish_to_pypi(self):
+        self.assertEqual(pypi_publish_grants(ROOT / ".github"), [])
 
-    def test_every_publish_route_is_reported(self):
-        def workflow(step: str) -> str:
-            return f"on: push\njobs:\n  ship:\n    runs-on: ubuntu-latest\n    steps:\n      - {step}\n"
-
-        def action(step: str) -> str:
-            return f"name: Release\nruns:\n  using: composite\n  steps:\n    - {step}\n"
-
-        routes = {
-            "workflows/release.yaml": (workflow("run: uv publish"), "uv publish"),
+    def test_a_file_that_can_publish_to_pypi_is_reported(self):
+        job = "on: push\njobs:\n  ship:\n    runs-on: ubuntu-latest\n"
+        files = {
+            "workflows/release.yaml": (
+                job + "    permissions:\n      contents: read\n      id-token: write\n"
+                "    steps:\n      - run: echo ok\n",
+                "workflows/release.yaml: id-token: write"),
             "workflows/ci.yml": (
-                workflow("run: |\n          python -m build\n          twine upload dist/*"),
-                "twine upload"),
-            "actions/release/action.yml": (
-                action("uses: PyPA/GH-Action-PyPI-Publish@release/v1"),
-                "pypa/gh-action-pypi-publish"),
+                "on: push\npermissions:\n  id-token: write\njobs:\n  test:\n"
+                + "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+                "workflows/ci.yml: id-token: write"),
+            "workflows/all.yml": (
+                "on: push\npermissions: write-all\n" + job.split("\n", 1)[1]
+                + "    steps:\n      - run: echo ok\n",
+                "workflows/all.yml: permissions: write-all"),
             "actions/release/action.yaml": (
-                action("uses: pypa/gh-action-pypi-publish@release/v1"),
-                "pypa/gh-action-pypi-publish"),
+                "name: Release\nruns:\n  using: composite\n  steps:\n"
+                + "    - uses: PyPA/GH-Action-PyPI-Publish@release/v1\n",
+                "actions/release/action.yaml: uses: pypa/gh-action-pypi-publish"),
         }
-        for relative, (text, route) in routes.items():
+        for relative, (text, finding) in files.items():
             with self.subTest(file=relative), tempfile.TemporaryDirectory() as tmp:
                 github = Path(tmp) / ".github"
                 target = github / relative
                 target.parent.mkdir(parents=True)
                 target.write_text(text, encoding="utf-8")
-                self.assertEqual(publish_routes(github), [f"{relative}: {route}"])
+                self.assertEqual(pypi_publish_grants(github), [finding])
 
-    def test_option_tokens_before_the_subcommand_do_not_hide_a_route(self):
-        steps = {
-            "uv --quiet publish": "uv publish",
-            "uv -v publish": "uv publish",
-            "uv --directory sub publish dist/*": "uv publish",
-            "python -m twine --no-color upload dist/*": "twine upload",
-            "twine -r pypi upload dist/*": "twine upload",
-            "hatch publish": "hatch publish",
-            "hatch -v publish": "hatch publish",
-            "poetry publish --build": "poetry publish",
-            "poetry --no-ansi publish": "poetry publish",
-            "python -m flit publish": "flit publish",
-            "flit --debug publish": "flit publish",
-            "pdm publish": "pdm publish",
-            "pdm -v publish": "pdm publish",
-        }
-        for step, route in steps.items():
-            with self.subTest(step=step), tempfile.TemporaryDirectory() as tmp:
+    def test_a_yaml_file_that_does_not_parse_is_reported(self):
+        for relative in ("workflows/broken.yml", "actions/broken/action.yaml"):
+            with self.subTest(file=relative), tempfile.TemporaryDirectory() as tmp:
                 github = Path(tmp) / ".github"
-                (github / "workflows").mkdir(parents=True)
-                (github / "workflows" / "release.yml").write_text(
-                    "on: push\njobs:\n  ship:\n    runs-on: ubuntu-latest\n"
-                    f"    steps:\n      - run: {step}\n", encoding="utf-8")
-                self.assertEqual(publish_routes(github), [f"workflows/release.yml: {route}"])
+                target = github / relative
+                target.parent.mkdir(parents=True)
+                target.write_text("jobs: [unclosed\n  run: {\n", encoding="utf-8")
+                self.assertEqual(pypi_publish_grants(github), [f"{relative}: not valid YAML"])
 
-    def test_a_command_that_only_looks_like_a_route_is_not_one(self):
-        for step in ("uv sync --frozen", "uv run publish", "uv pip install twine",
-                     "twine check dist/*", "hatch build", "poetry install", "pdm install",
-                     "flit build", "uv -q run publish", "pdm -v run publish",
-                     "poetry -q run publish"):
-            with self.subTest(step=step), tempfile.TemporaryDirectory() as tmp:
-                github = Path(tmp) / ".github"
-                (github / "workflows").mkdir(parents=True)
-                (github / "workflows" / "ci.yml").write_text(
-                    "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
-                    f"    steps:\n      - run: {step}\n", encoding="utf-8")
-                self.assertEqual(publish_routes(github), [])
-
-    def test_a_route_spread_over_continuation_lines_is_reported(self):
-        blocks = {
-            "uv \\\n            --directory sub \\\n            publish": "uv publish",
-            "python -m twine \\\n            --no-color \\\n            upload dist/*": "twine upload",
-        }
-        for block, route in blocks.items():
-            with self.subTest(route=route), tempfile.TemporaryDirectory() as tmp:
-                github = Path(tmp) / ".github"
-                (github / "workflows").mkdir(parents=True)
-                (github / "workflows" / "release.yml").write_text(
-                    "on: push\njobs:\n  ship:\n    runs-on: ubuntu-latest\n"
-                    f"    steps:\n      - run: |\n          {block}\n", encoding="utf-8")
-                self.assertEqual(publish_routes(github), [f"workflows/release.yml: {route}"])
-
-    def test_a_tool_and_a_subcommand_in_different_steps_are_not_a_route(self):
-        pairs = (("uv --version", "Publish coverage report"),
-                 ("pip install twine --upgrade", "Upload coverage"))
-        for command, next_step in pairs:
-            with self.subTest(command=command), tempfile.TemporaryDirectory() as tmp:
-                github = Path(tmp) / ".github"
-                (github / "workflows").mkdir(parents=True)
-                (github / "workflows" / "ci.yml").write_text(
-                    "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
-                    f"      - run: {command}\n      - name: {next_step}\n        run: echo ok\n",
-                    encoding="utf-8")
-                self.assertEqual(publish_routes(github), [])
-
-    def test_a_yaml_comment_that_names_a_publish_route_is_not_a_route(self):
+    def test_read_only_permissions_and_a_comment_are_not_a_grant(self):
         with tempfile.TemporaryDirectory() as tmp:
             github = Path(tmp) / ".github"
             (github / "workflows").mkdir(parents=True)
             (github / "workflows" / "ci.yml").write_text(
-                "# The fork never runs pypa/gh-action-pypi-publish, uv publish or twine upload.\n"
-                "name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n      - run: echo ok  # not twine upload\n",
+                "# id-token: write and pypa/gh-action-pypi-publish are banned here.\n"
+                "on: push\npermissions: read-all\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                "    permissions:\n      contents: read\n      id-token: none\n"
+                "    steps:\n      - uses: actions/checkout@v7\n"
+                "      - run: \"echo 'id-token: write'\"\n",
                 encoding="utf-8")
-            self.assertEqual(publish_routes(github), [])
+            self.assertEqual(pypi_publish_grants(github), [])
 
 
 class DocSyncTests(unittest.TestCase):
