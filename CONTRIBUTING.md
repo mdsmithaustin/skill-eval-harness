@@ -5,7 +5,7 @@ Thanks for improving Skill Eval Harness. Keep changes small and evidence-backed:
 ## Local setup
 
 ```sh
-git clone https://github.com/adewale/skill-eval-harness.git
+git clone https://github.com/mdsmithaustin/skill-eval-harness.git
 cd skill-eval-harness
 uv tool install --editable .
 skill-benchmark --help
@@ -33,7 +33,7 @@ python3 scripts/check_installed_wheel.py
 
 The `test` extra pins the linters CI runs, `ruff==0.16.0` and `ty==0.0.65`; run those versions, because another release can report different findings.
 
-A release tag can name a commit CI never ran, so the release workflow (`.github/workflows/publish.yml`) runs these same gates on the tag, with the same pins, before it builds the wheel; it then checks the exact wheel it uploads (`scripts/check_installed_wheel.py --wheel dist/*.whl`) and runs each console script from it. `tests/test_gate_integrity.py` fails when a gate of CI's test job has no counterpart in the release.
+This fork publishes no release artifact, so CI is the only gate. `tests/test_gate_integrity.py` fails when a gate of CI's test job runs conditionally, can fail green, or is missing.
 
 (`pytest tests/` also works — `pyproject.toml` carries the pythonpath config — but CI runs `unittest discover`, so keep tests compatible with both. `scripts/check_test_collection_parity.py` fails when either collector sees a test the other cannot, so a pytest-only test cannot hide from CI. `scripts/check_installed_wheel.py` builds the wheel, installs it into a clean environment, imports every module from there and runs each console script, so a module missing from `py-modules` fails before a release does.)
 

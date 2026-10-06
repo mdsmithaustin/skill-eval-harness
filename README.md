@@ -58,13 +58,14 @@ General eval frameworks (openai/evals, vitest-evals, viteval) score one output a
 
 ## Quick start
 
-> Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/). Install from PyPI:
+> Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/). This fork is not published to PyPI. Install it from GitHub:
 >
 > ```bash
-> uv tool install skill-eval-harness
+> uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@main
 > ```
 >
-> For exact reproducibility, pin the current release: `uv tool install skill-eval-harness==0.6.0`.
+> For exact reproducibility, pin a commit: `uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@<commit-sha>`.
+> The distribution is named `skill-eval-harness-ext`. The `skill-eval-harness` package on PyPI is the upstream project, not this fork.
 
 Run these from a skill repo that has `evals/shared-benchmark.json`:
 
@@ -111,30 +112,25 @@ Each paired lift also carries an `interval` (the sign-flip test inverted into a 
 
 ## Installation
 
-### From PyPI
+### From GitHub
+
+The fork publishes no PyPI package. Install a commit or branch from its git URL:
 
 ```bash
-uv tool install skill-eval-harness
+uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@main
 skill-benchmark --help
 skill-pi-trigger-eval --help
 
-# Pin a release exactly:
-uv tool install skill-eval-harness==0.6.0
+# Pin a commit exactly:
+uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@<commit-sha>
 
 # One-shot without installing globally:
-uvx --from skill-eval-harness skill-benchmark --help
+uvx --from git+https://github.com/mdsmithaustin/skill-eval-harness.git@main skill-benchmark --help
 ```
 
-### From GitHub
+The distribution name is `skill-eval-harness-ext`, so `importlib.metadata.version("skill-eval-harness-ext")` reads its version. Module names and console scripts keep their names.
 
-Use this for development snapshots before the next PyPI release:
-
-```bash
-uv tool install git+https://github.com/adewale/skill-eval-harness.git@main
-uvx --from git+https://github.com/adewale/skill-eval-harness.git@main skill-benchmark --help
-```
-
-Upgrading a saved run tree requires more than changing the package pin. Follow the
+Upgrading a saved run tree requires more than changing the pin. Follow the
 relevant release boundary in [`docs/upgrading.md`](docs/upgrading.md) before regenerating
 reports; manifest migration and telemetry migration are separate commands.
 
@@ -149,7 +145,7 @@ The installed commands are:
 ### Local development
 
 ```bash
-git clone https://github.com/adewale/skill-eval-harness.git
+git clone https://github.com/mdsmithaustin/skill-eval-harness.git
 cd skill-eval-harness
 uv tool install --editable .
 skill-benchmark --help
@@ -183,8 +179,8 @@ Each skill repo owns a `shared-benchmark.json` manifest in one of two places. Th
   "version": 1,
   "skill_name": "good-pr",
   "harness": {
-    "name": "skill-eval-harness",
-    "url": "https://github.com/adewale/skill-eval-harness",
+    "name": "skill-eval-harness-ext",
+    "url": "https://github.com/mdsmithaustin/skill-eval-harness",
     "version": ">=0.6.0"
   },
   "skill_paths": ["skills/good-pr/SKILL.md"],

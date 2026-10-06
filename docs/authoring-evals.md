@@ -123,7 +123,7 @@ The smallest useful `evals/shared-benchmark.json`:
 {
   "version": 1,
   "skill_name": "my-skill",
-  "harness": { "name": "skill-eval-harness", "url": "https://github.com/adewale/skill-eval-harness", "version": ">=0.6.0" },
+  "harness": { "name": "skill-eval-harness-ext", "url": "https://github.com/mdsmithaustin/skill-eval-harness", "version": ">=0.6.0" },
   "skill_paths": ["skills/my-skill/SKILL.md"],
   "variants": ["with_skill", "without_skill"],
   "split_policy": {

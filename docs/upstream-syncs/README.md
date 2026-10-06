@@ -108,9 +108,7 @@ Keep a dated record of each sync and an annotated checkpoint tag after acceptanc
 
 The tag records an accepted checkpoint. Creating the tag does not approve code.
 The `sync-upstream-YYYY-MM-DD` namespace is distinct from version tags such as
-`v0.6.0`. Do not create a GitHub release or invoke the publisher for a sync.
-The [publish workflow](../../.github/workflows/publish.yml) runs on
-`release.published` or `workflow_dispatch`. A plain tag push is a different event.
+`v0.6.0`. Do not create a GitHub release for a sync.
 
 ## Dated records
 

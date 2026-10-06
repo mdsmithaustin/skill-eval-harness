@@ -1094,17 +1094,16 @@ class TimeoutConventionTests(unittest.TestCase):
 
 
 class PackagingWorkflowTests(unittest.TestCase):
-    def test_publish_workflow_smokes_the_built_wheel_before_upload(self):
-        text = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
-        publish_index = text.index("pypa/gh-action-pypi-publish")
-        pre_publish = text[:publish_index]
-        self.assertIn("pip install dist/*.whl", pre_publish)
-        self.assertIn("importlib.metadata.version", pre_publish)
-        self.assertIn("Verify release tag matches package version", pre_publish)
-        self.assertIn('tag != f"v{version}"', pre_publish)
-        self.assertIn("github.event.release.tag_name || github.ref", pre_publish)
-        for command in ("skill-benchmark --help", "skill-pi-trigger-eval --help", "skill-trigger-matrix --help"):
-            self.assertIn(command, pre_publish)
+    def test_distribution_is_named_skill_eval_harness_ext(self):
+        match = re.search(r'(?m)^\[project\]\s*\nname\s*=\s*"([^"]*)"', PYPROJECT)
+        self.assertIsNotNone(match, "pyproject.toml [project] has no name")
+        self.assertEqual(match.group(1), "skill-eval-harness-ext")
+
+    def test_no_workflow_publishes_to_pypi(self):
+        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
+            with self.subTest(workflow=workflow.name):
+                self.assertNotIn(
+                    "pypa/gh-action-pypi-publish", workflow.read_text(encoding="utf-8"))
 
 
 class DocSyncTests(unittest.TestCase):

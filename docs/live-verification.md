@@ -163,9 +163,3 @@ Right: each enabled smoke passes. A failure is a finding; report the CLI version
    after `grade`. `judge … --judge-cmd … --quorum 2` must exit 1.
 3. On a real suite with a judge-only case, `case_flags` entries read `signal: combined`, and
    `readiness.floor_cases` is a subset of the cases flagged `floor`.
-
-## 9. The release workflow
-
-On the next release, or a `workflow_dispatch` run of `publish.yml`, the job log must show the
-compile, Ruff, ty, unit-test and collection-parity steps passing before "Build distributions".
-If any fails, the release must stop before upload.
