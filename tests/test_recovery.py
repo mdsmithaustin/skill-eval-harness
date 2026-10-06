@@ -53,6 +53,8 @@ elif phase == "REFUSE":
     if mode == "forbidden":
         Path("forbidden.txt").write_bytes(b"not enforced")
 elif mode != "one-shot":
+    if mode == "exit-124":
+        raise SystemExit(124)
     if mode in {{"early", "terminal"}}:
         if mode == "terminal":
             Path("checkpoint.json").write_bytes(b'{{"phase":1}}')
@@ -352,6 +354,68 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
                              b"raw-secret\xff" + b"x" * 16000)
             record = json.loads((base / "recovery.json").read_text())
             self.assertEqual((record["failure"], len(record["phases"])), ("capture_failed", 1))
+
+    def test_artifact_failures_keep_process_facts_and_outcomes_consistent(self):
+        write_json = sb.write_json
+        write_bytes = Path.write_bytes
+        invoke = sb.invoke_argv_with_timeout
+        for mode, os_returncode, timed_out in (("stop", -signal.SIGTERM, False),
+                                              ("timeout", -signal.SIGKILL, True),
+                                              ("exit-124", 124, False)):
+            for artifact in ("process.json", "stdout.bin", None):
+                with self.subTest(mode=mode, artifact=artifact), tempfile.TemporaryDirectory() as temporary:
+                    outcomes = []
+                    def observe_outcome(plan, outcomes=outcomes):
+                        outcome = invoke(plan)
+                        outcomes.append(outcome)
+                        return outcome
+                    def fail_process(path, content, artifact=artifact):
+                        if path.name == artifact:
+                            raise OSError("process storage failed")
+                        return write_json(path, content)
+                    def fail_raw(path, content, artifact=artifact):
+                        if path.name == artifact:
+                            raise OSError("raw storage failed")
+                        return write_bytes(path, content)
+                    with mock.patch.object(sb, "write_json", side_effect=fail_process), \
+                            mock.patch.object(Path, "write_bytes", autospec=True, side_effect=fail_raw), \
+                            mock.patch.object(sb, "invoke_argv_with_timeout", side_effect=observe_outcome):
+                        result, base = self.run_case(Path(temporary), mode=mode, timeout=1)
+                    expected_state = ("capture_failed" if artifact else
+                                      {"stop": "checkpoint_stop", "timeout": "deadline",
+                                       "exit-124": "natural_completion"}[mode])
+                    record = json.loads((base / "recovery.json").read_text())
+                    phase = record["phases"][0]
+                    facts = phase["adapter_environment"]["recovery_process"]
+                    self.assertEqual(phase["state"], expected_state)
+                    self.assertEqual(facts["state"], expected_state)
+                    expected_error = ({"process.json": "OSError: process storage failed",
+                                       "stdout.bin": "OSError: raw storage failed"}.get(artifact))
+                    self.assertEqual(facts["error"], expected_error)
+                    self.assertEqual(facts["os_returncode"], os_returncode)
+                    compatibility_returncode = 124 if timed_out else os_returncode
+                    self.assertEqual(facts["compatibility_returncode"], compatibility_returncode)
+                    self.assertEqual(phase["compatibility_returncode"], compatibility_returncode)
+                    self.assertEqual(outcomes[0].returncode, compatibility_returncode)
+                    self.assertIs(outcomes[0].timed_out, timed_out)
+                    self.assertEqual(dict(outcomes[0].metadata["recovery_process"]), facts)
+                    self.assertEqual((facts["leader_reaped"], facts["pipes_drained"], facts["group_stopped"]),
+                                     (True, True, True))
+                    if artifact != "process.json":
+                        self.assertEqual(json.loads((base / "recovery/initial/process.json").read_text()), facts)
+                    else:
+                        self.assertFalse((base / "recovery/initial/process.json").exists())
+                    if artifact or mode != "stop":
+                        self.assertEqual(result[0], 1, result[2])
+                        self.assertEqual((record["status"], record["failure"], len(record["phases"])),
+                                         ("failed", expected_state, 1))
+                    else:
+                        self.assertEqual(result[0], 0, result[2])
+                        self.assertEqual(record["status"], "complete")
+                    if mode != "exit-124":
+                        self.assertEqual((base / "recovery/initial/stderr.bin").read_bytes(),
+                                         b"raw-secret\xff" + b"x" * 16000)
+                    self.assertFalse(Path(record["workspace"]).exists())
 
     def test_failed_signal_is_not_an_intentional_stop(self):
         killpg = os.killpg

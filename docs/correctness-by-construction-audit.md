@@ -206,6 +206,10 @@ doing so is not required to make the Gemini wire, answer, judge, or persisted bo
 
 ## Orthogonal run evidence and artifact commit
 
+This section describes ordinary answer artifacts.
+Recovery rows through `run-agent` or its `run-codex` and `run-claude` wrappers retain `recovery.json` and raw snapshots instead of the ordinary artifact commit, workspace-diff, grading, and normalized paired telemetry contracts.
+The [recovery reference](recovery.md) defines their separate evidence limits and consumer responsibilities.
+
 `telemetry.ObservationEvidence` is the product of four independent states:
 
 ```text
@@ -218,7 +222,7 @@ complete. Completing one axis never promotes another. `write_trace_artifacts` ow
 and rejects caller extras that collide with any derived evidence field. Provider adapters may retain
 usage/cost from a valid provider envelope independently of trace availability.
 
-New answer-runner and Jetty directories declare artifact contract version 1 and write
+New ordinary answer-runner and Jetty directories declare artifact contract version 1 and write
 `artifact-commit.json` last. The marker lists the required files plus a SHA-256 inventory. Readers
 verify the marker and inventory before deriving `artifact_set_complete`; an interrupted write,
 missing or changed committed file, unsafe inventory path, or stale marker remains incomplete and

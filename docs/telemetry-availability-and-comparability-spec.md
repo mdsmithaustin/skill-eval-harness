@@ -10,6 +10,10 @@
 > [`agent-backend-interface-spec.md`](agent-backend-interface-spec.md), and
 > [`agent-cli-control-plane.md`](agent-cli-control-plane.md).
 
+This contract covers ordinary answer rows, imports, trigger runs, and judge runs.
+Optional recovery rows through `run-agent`, `run-codex`, or `run-claude` retain `recovery.json` and raw snapshots instead of ordinary answer artifacts and normalized paired telemetry.
+The [recovery reference](recovery.md) defines their separate evidence contract and consumer responsibilities.
+
 ## Why this exists
 
 The earlier per-run normalizers distinguished a missing cost or token value from a measured
@@ -208,7 +212,7 @@ all-command telemetry surface registry.
 
 ### Artifacts
 
-New runs write `telemetry_schema_version: 3` and one canonical telemetry envelope into
+New runs covered by this contract write `telemetry_schema_version: 3` and one canonical telemetry envelope into
 both `metadata.json` and `metrics.json`; raw provider data remains preserved for audit.
 A writer records precedence and parser errors as data. Metadata/metrics must agree on
 the normalized envelope.
@@ -235,7 +239,7 @@ The phases below are complete; they are retained as the migration/audit record.
 
 ### Phase 2 — migrate every producer
 
-The following paths route through the canonical artifact writer:
+Within this contract's scope, the following paths route through the canonical artifact writer:
 
 - `run-agent`, `run-claude`, `run-codex`, `run-subagent`, and `run-jetty`;
 - `import-jetty-results` and `import-trace`;
@@ -277,7 +281,7 @@ available.
 
 | Surface | Result |
 |---|---|
-| Answer/import runners | Emit canonical availability, provenance, and basis data; no fabricated zero defaults. |
+| Ordinary answer/import runners | Emit canonical availability, provenance, and basis data; no fabricated zero defaults. |
 | Trigger runners | Record whether observation is complete; absence of a trace cannot become zero tokens, zero tools, or a false negative trigger result. |
 | Judge runners | Keep judge spend/population separate and expose unavailable shell-wrapper telemetry honestly. |
 | `benchmark`, `aggregate`, `cost-summary` | Emit complete/partial/unavailable compatible buckets rather than ambiguous totals. |

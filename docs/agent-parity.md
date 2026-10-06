@@ -4,6 +4,10 @@ The harness supports several agent surfaces, but not every agent supports every 
 
 Run `skill-benchmark agent-capabilities` for the machine-readable registry view.
 
+The answer artifact and telemetry entries below describe ordinary answer rows.
+Recovery rows share the native backend routes and restrictions but retain `recovery.json` and raw snapshots instead of ordinary answer artifacts and normalized paired telemetry.
+The [recovery reference](recovery.md) defines their separate evidence contract and consumer responsibilities.
+
 | Agent | Answer runs | Answer route | Autonomous trigger | Trigger ablation | Trace artifacts | Token usage | Dollar cost | Judge backend | Tool replay | Live smoke |
 |---|---:|---|---:|---:|---:|---:|---|---:|---:|---|
 | `claude` | yes (`run-claude`, `run-agent --agent claude`) | `native` | yes (`skill-trigger-matrix --agent claude`) | yes | yes | yes | `provider_reported` | yes (`judge --judge-backend claude` / `--judge-model`) | yes through `run-subagent` | `RUN_TRIGGER_SMOKE` |
@@ -17,7 +21,7 @@ Run `skill-benchmark agent-capabilities` for the machine-readable registry view.
 
 ## Effort control and stop evidence
 
-Two answer-run surfaces are not registry capabilities yet: effort is an `effort_control` attribute (with the `effort_levels` its CLI accepts) on the answer backend class, and stop and served-model evidence comes from each backend's parser. Both are recorded in run metadata ([fields](commands.md#effort-and-how-answer-runs-ended)):
+Two answer-run surfaces are not registry capabilities yet: effort is an `effort_control` attribute (with the `effort_levels` its CLI accepts) on the answer backend class, and stop and served-model evidence comes from each backend's parser. Both are recorded in ordinary answer run metadata ([fields](commands.md#effort-and-how-answer-runs-ended)):
 
 - `claude`: `--effort` passes `claude --effort <level>` for `low`, `medium`, `high`, `xhigh` or `max` (`minimal` is refused before any run); the stop reason comes from the stream-json terminal `result` event and the served model from assistant messages, skipping subagent turns.
 - `codex`: `--effort` passes `-c model_reasoning_effort=<level>` for every harness level; stop reason and served model are `unavailable`.

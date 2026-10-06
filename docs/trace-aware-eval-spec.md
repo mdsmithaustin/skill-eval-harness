@@ -17,7 +17,10 @@ Pi, Codex, OpenCode, Gemini CLI, Jetty, Claude Code, or custom scripts may execu
 - leakage/audit checks;
 - benchmark summaries, deltas, and failure flags.
 
-This mirrors the Jetty adapter principle: Jetty or any other runner supplies artifacts and trajectory evidence; the harness normalizes and grades them.
+For ordinary answer rows, Jetty or any other runner supplies artifacts and trajectory evidence that the harness normalizes and grades.
+Optional recovery rows use `run-agent` or its `run-codex` and `run-claude` wrappers and retain `recovery.json` plus raw snapshots.
+They bypass ordinary answer artifacts, workspace diffs, grades, and normalized paired telemetry.
+The [recovery reference](recovery.md) defines the evidence limits and consumer responsibilities.
 
 ## Trace-aware design scope
 
@@ -57,7 +60,7 @@ Trace support must not break these current contracts:
 
 ## Run artifact contract
 
-Current required/optional artifacts remain valid:
+For ordinary answer rows, the current required and optional artifacts remain valid:
 
 ```text
 runs/<case_id>/<variant>/run-1/output.md
@@ -301,7 +304,7 @@ skill-benchmark run-codex --tasks tasks.jsonl --runs eval-runs/codex-tune
 skill-benchmark benchmark evals/shared-benchmark.json --runs eval-runs/codex-tune
 ```
 
-Current behavior:
+Current behavior for ordinary answer rows:
 
 - execute each task with `codex exec --json`;
 - save raw stdout JSONL as `trace.jsonl`;

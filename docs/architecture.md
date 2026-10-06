@@ -16,6 +16,11 @@ tasks, autonomous-trigger work, and static checks. Commands can run on different
 days apart, and several commands call the same grading owner directly rather than
 consume another command's report.
 
+The answer paths in the diagrams below describe ordinary answer rows.
+Optional recovery rows use `run-agent` or its `run-codex` and `run-claude` wrappers and retain `recovery.json` plus raw snapshots.
+They bypass the ordinary answer-output, workspace-diff, grading, and normalized paired telemetry paths.
+The [recovery reference](recovery.md) defines the evidence the consumer must assess.
+
 Every `skill-benchmark` entrypoint crosses one typed boundary before entering this graph.
 `argparse.Namespace` is parsed into a frozen `ValidatedLegacyCLIInvocation`: the command is a closed
 `CLICommand`, paths are `Path` values, and split, variant, model, and numeric domains are
@@ -174,7 +179,7 @@ are in [`correctness-by-construction-audit.md`](correctness-by-construction-audi
 
 ## The runner boundary
 
-Runners disagree about everything except one thing: they all leave the same files on disk.
+For ordinary answer rows, runners share one on-disk run-output contract.
 That agreement is the contract, and it is why a new runner needs no change to grading.
 
 ```mermaid
@@ -216,7 +221,7 @@ one schema-versioned `events.json` and `metrics.json` so a process assertion lik
 into a closed event state first; only completed operations count as commands, tools, reads, writes,
 or skill invocation. Caller extras cannot overwrite the derived evidence fields. New runner and
 Jetty artifact sets write `artifact-commit.json` last with the required-file inventory and SHA-256
-digests; readers classify a missing or stale marker as an incomplete artifact set. Answer runners and `run-subagent`
+digests; readers classify a missing or stale marker as an incomplete artifact set. For ordinary rows, answer runners and `run-subagent`
 also diff the model's temporary workspace against its built baseline before deleting it and commit
 the result as `workspace-changes.json`, `candidate.patch`, and `candidate-files/`; readers derive
 `workspace_changes_captured` from those files separately from `artifact_set_complete`. When evidence is

@@ -2,7 +2,7 @@
 
 Claude Code, Codex CLI, Gemini CLI, and Mistral Vibe do not share one wire protocol. The harness treats them as four different control planes that can be adapted into one evaluation contract.
 
-The shared abstraction is therefore **not** “send prompt, get text.” It is:
+For ordinary answer rows, the shared abstraction has these steps:
 
 1. spawn a provider CLI with explicit process controls,
 2. isolate the provider's config/skill discovery surface,
@@ -11,13 +11,17 @@ The shared abstraction is therefore **not** “send prompt, get text.” It is:
 5. preserve raw trace telemetry when available,
 6. write the same run-output contract for every provider.
 
+Recovery rows use the same native backend routes and settings, including through the `run-codex` and `run-claude` wrappers.
+They retain `recovery.json` and raw snapshots instead of ordinary answer artifacts, workspace diffs, grades, or normalized paired telemetry.
+The [recovery reference](recovery.md) defines their separate lifecycle and consumer evidence limits.
+
 ## The common contract
 
 | Layer | Shared harness concept | Why it exists |
 |---|---|---|
 | Process boundary | `InvocationRequest` / `InvocationResult` | Every native backend must declare prompt, model, workspace, timeout, argv/env/cwd behavior, stdout/stderr/returncode, and timeout state. |
 | Answer result | `Completed | TimedOut | SpawnFailed | ProviderFailed` (`RunnerOutcome` is the strict compatibility factory) | Provider-specific code returns one frozen semantic state with validated context; timeout/return code/answer/error cannot contradict. |
-| Run artifacts | `write_runner_outcome()` | One exhaustive adapter consumes the outcome union and produces `output.md`, `metadata.json`, `events.json`, `metrics.json`, and optional `trace.jsonl`, so failure markers, timeout return code, and missing telemetry cannot drift by provider. |
+| Ordinary answer artifacts | `write_runner_outcome()` | One exhaustive adapter consumes the outcome union and produces `output.md`, `metadata.json`, `events.json`, `metrics.json`, and optional `trace.jsonl`, so failure markers, timeout return code, and missing telemetry cannot drift by provider. |
 | Capabilities and registration | `agent_capabilities.BACKENDS` (`AGENT_CAPABILITIES` is a compatibility projection) | One complete row owns which surfaces are real for each agent plus its routes, implementations, workspace, trace, provider CLI options, failure policy, and live-smoke gate. |
 | Trigger adapter | `AgentAdapter.mount/invoke/detect` | Autonomous trigger evals mount the same canonical/materialized skill tree, run raw user trigger prompts, and detect activation without forced-load answer scaffolding. |
 | Judge path | Unified `agent_capabilities.BACKENDS` judge binding or `--judge-cmd` | Native backends use provider-specific schema/final-answer channels where available; `--judge-cmd` remains the universal stdin→stdout JSON escape hatch. `JUDGE_BACKENDS` is a compatibility projection. |
@@ -57,9 +61,9 @@ This is intentionally a **control-plane abstraction**, not a lowest-common-denom
 
 ## What the abstraction hides well
 
-- Run-directory shape is provider-independent.
-- Failure bodies and timeout semantics are provider-independent.
-- Missing usage/cost is explicit and comparable across providers.
+- Ordinary answer run-directory shape is provider-independent.
+- Ordinary answer failure bodies and timeout semantics are provider-independent.
+- Missing usage/cost in ordinary answer telemetry is explicit and comparable across providers.
 - Answer-path variants and materialized ablations are provider-independent because prepared rows own the workspace contents.
 - Trigger evals compare agents fairly because each adapter mounts the same tree and returns activation evidence through the same matrix row shape.
 

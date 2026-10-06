@@ -1,6 +1,6 @@
 # Fixed recovery cases
 
-A prepared answer row can carry an optional `recovery` object for `run-agent`.
+A prepared answer row can carry an optional `recovery` object for `run-agent` or its `run-codex` and `run-claude` wrappers.
 Rows without that object keep their one-shot execution and ordinary output contract.
 Recovery rows collect process facts for a consumer grader. They do not certify a provider, model, permission boundary, or refusal.
 
@@ -57,17 +57,23 @@ The existing command selects the backend, model, effort, and provider options.
 skill-benchmark run-agent --agent codex --tasks recovery-tasks.jsonl --runs recovery-runs --effort high
 ```
 
-Recovery rows produce `recovery.json` and a `recovery/` evidence directory instead of an ordinary answer grade.
-Exit code 0 reports completed runner phases. Exit code 1 reports a capability failure.
+Recovery rows use `recovery.json` and a `recovery/` evidence directory instead of the ordinary answer-output and normalized telemetry contract.
+Exit code 0 reports completed runner phases and snapshots. Exit code 1 reports a failed recovery run.
+Failures include setup or backend capability limits, phase invocation or checkpoint failures, and observation, cleanup, or evidence-capture failures.
+A final-snapshot failure returns 1 even when all three processes completed their required phases.
 An occupied recovery run directory is rejected rather than overwritten.
 
-`recovery.json` records the case, requested settings, provenance, phase order, observations, failures, workspace location, and evidence location.
-Each phase retains `prompt.bin`, `invocation.json`, `process.json`, `stdout.bin`, `stderr.bin`, and before-and-after file snapshots.
-The evidence directory also retains the initial fixture, expected checkpoint, final files, and observed initial checkpoint.
+When the record write succeeds, `recovery.json` records the case, requested settings, provenance, phase order, observations, failures, workspace location, and evidence location.
+Successful process-backed phases retain `prompt.bin`, `invocation.json`, `process.json`, `stdout.bin`, `stderr.bin`, and before-and-after file snapshots.
+Successful capture also retains the initial fixture, `expected-checkpoint.bin`, and final file snapshots.
+The initial phase writes `checkpoint-observed.bin` only after observing a matching checkpoint.
+If no checkpoint matches, that file is absent. Its presence alone does not prove a verified checkpoint stop.
+If adapter preflight returns before reaching the task subprocess boundary, the phase records `no_process_evidence` without invocation, process, or raw-stream files.
+Setup, spawn, or capture failures can leave partial artifacts or prevent a phase directory from being created.
 Snapshot manifests map relative paths to content-addressed raw blobs. Symlinks are recorded without following them.
-Raw stdout and stderr are saved before decoding, redaction, or stderr capping. Their hashes identify the captured bytes.
-Capture failures retain every artifact that could be written and block later phases.
-`process.json` separates the actual OS return code from compatibility timeout status 124.
+When capture succeeds, raw stdout and stderr are saved before decoding, redaction, or stderr capping. Their hashes identify the captured bytes.
+Failures retain the artifacts that could be written and block later phases. A failed artifact write does not erase the other evidence.
+When present, `process.json` separates the actual OS return code from compatibility timeout status 124.
 It records signal delivery, leader reaping, pipe draining, and process-group observation.
 
 `invocation.json` records the exact argv at the existing client subprocess boundary, executable path and hash where readable, and cwd.
@@ -83,7 +89,7 @@ Evidence outside the fixture workspace is not necessarily protected from the chi
 Path confinement checks are not a sandbox or an attestation against a hostile writer.
 Executable and artifact hashes establish content identity, not write enforcement or cryptographic attestation.
 Raw provider traces remain available for the consumer to reconcile checkpoint writes, active turns, terminal events, runtime identity, and wrapper behavior.
-Unknown observations remain unknown. `certificate` and `enforcing_denial` remain `null` in runner output.
+Unknown observations remain unknown. `certificate`, `trace_checkpoint_correlation`, and `enforcing_denial` remain `null` in runner output.
 The refusal phase records its raw output and forbidden-path presence. Absence alone does not establish a denied write.
 The consumer must establish the prescribed attempted write, enforcing denial, and absent forbidden file for its own eligibility decision.
 

@@ -6930,9 +6930,12 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
             error = f"{type(exc).__name__}: {exc}"
             if not isinstance(exc, Exception):
                 interruption = exc
+        deadline_observed = (state is RecoveryProcessState.DEADLINE
+                             or (state is RecoveryProcessState.CHECKPOINT_STOP
+                                 and time.monotonic() >= deadline))
         try:
             if state is RecoveryProcessState.CHECKPOINT_STOP:
-                if time.monotonic() >= deadline:
+                if deadline_observed:
                     state = RecoveryProcessState.DEADLINE
                 elif process_leader_exited(proc):
                     state = RecoveryProcessState.NATURAL_COMPLETION
@@ -7041,7 +7044,7 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                  "process_group_cleanup": group_cleanup,
                  "checkpoint_observed_live": checkpoint_live,
                  "checkpoint_sha256": hashlib.sha256(observed).hexdigest() if observed is not None else None,
-                 "compatibility_returncode": 124 if state is RecoveryProcessState.DEADLINE else proc.returncode,
+                 "compatibility_returncode": 124 if deadline_observed else proc.returncode,
                  "error": error}
         for name, content in (("stdout.bin", out), ("stderr.bin", err)):
             try:
@@ -7056,8 +7059,10 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
             name: (capture.directory / name).is_file() for name in ("stdout.bin", "stderr.bin")}
         try:
             write_json(capture.directory / "process.json", facts)
-        except Exception:
+        except Exception as exc:
             state = RecoveryProcessState.CAPTURE_FAILED
+            facts["state"] = state.value
+            facts["error"] = f"{type(exc).__name__}: {exc}"
         capture.state = state
         if interruption is not None:
             raise interruption
@@ -7068,7 +7073,7 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
         metadata = {"recovery_process": facts, "process_group_cleanup": group_cleanup,
                     "stdout_utf8_valid": stdout_valid, "stderr_utf8_valid": stderr_valid}
         elapsed = int((time.time() - start) * 1000)
-        if state is RecoveryProcessState.DEADLINE:
+        if deadline_observed:
             return InvocationOutcome.from_timeout(stdout=stdout, stderr=stderr[:4000],
                                                   elapsed_ms=elapsed, metadata=metadata)
         return InvocationOutcome.from_process(stdout=stdout, stderr=stderr[:4000],
