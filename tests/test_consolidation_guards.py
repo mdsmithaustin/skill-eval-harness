@@ -1112,8 +1112,9 @@ def _publish_grants(node: object) -> Iterator[str]:
 
 def pypi_publish_grants(github: Path) -> list[str]:
     """Findings as `relative/path: finding` for each YAML file under `github` that grants
-    `id-token: write` or `permissions: write-all`, uses `pypa/gh-action-pypi-publish`, or is
-    not a single YAML document."""
+    `id-token: write` or `permissions: write-all`, uses `pypa/gh-action-pypi-publish`, or that
+    `yaml.safe_load` cannot load (a parse error, more than one document, an unknown tag, or a
+    non-UTF-8 encoding)."""
     findings = []
     for path in sorted(github.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in {".yml", ".yaml"}:
@@ -1122,7 +1123,7 @@ def pypi_publish_grants(github: Path) -> list[str]:
         try:
             document = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (yaml.YAMLError, UnicodeDecodeError):
-            findings.append(f"{relative}: not a single YAML document")
+            findings.append(f"{relative}: yaml.safe_load cannot load the file")
             continue
         findings.extend(f"{relative}: {grant}" for grant in sorted(set(_publish_grants(document))))
     return findings
@@ -1172,7 +1173,7 @@ class PackagingWorkflowTests(unittest.TestCase):
                 target = github / relative
                 target.parent.mkdir(parents=True)
                 target.write_text("jobs: [unclosed\n  run: {\n", encoding="utf-8")
-                self.assertEqual(pypi_publish_grants(github), [f"{relative}: not a single YAML document"])
+                self.assertEqual(pypi_publish_grants(github), [f"{relative}: yaml.safe_load cannot load the file"])
 
     def test_a_valid_multi_document_yaml_file_is_reported_not_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1180,7 +1181,7 @@ class PackagingWorkflowTests(unittest.TestCase):
             (github / "workflows").mkdir(parents=True)
             (github / "workflows" / "two.yml").write_text(
                 "on: push\n---\npermissions:\n  id-token: write\n", encoding="utf-8")
-            self.assertEqual(pypi_publish_grants(github), ["workflows/two.yml: not a single YAML document"])
+            self.assertEqual(pypi_publish_grants(github), ["workflows/two.yml: yaml.safe_load cannot load the file"])
 
     def test_read_only_permissions_and_a_comment_are_not_a_grant(self):
         with tempfile.TemporaryDirectory() as tmp:
