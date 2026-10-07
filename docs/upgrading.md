@@ -11,6 +11,30 @@ few report and audit fields read, which saved trigger reports a comparison accep
 internal Python names still exist. The changelog's [Unreleased](../CHANGELOG.md#unreleased)
 section lists every change.
 
+### Distribution rename
+
+This fork's distribution is now `skill-eval-harness-ext`, and it installs from the fork's git URL
+(see the README). Module names and console scripts are unchanged. The upstream `skill-eval-harness`
+package on PyPI provides the same `skill-benchmark` script, so keep the two in separate
+environments. A manifest's `harness` block is not read, so a manifest that still says
+`"name": "skill-eval-harness"` keeps validating and needs no edit.
+
+Both distributions provide the same three scripts, so an existing `skill-eval-harness` tool blocks
+the new install. That covers a PyPI install, an install from this fork before the rename, and an
+editable install from a checkout. Remove it first, then install the renamed distribution:
+
+```bash
+uv tool uninstall skill-eval-harness
+uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@main
+```
+
+Without the uninstall, `uv tool install` exits 2 with `Executables already exist`, and
+`uv tool upgrade` cannot move a tool across a name change. Do not add `--force`. It leaves both
+tools registered, and a later `uv tool uninstall skill-eval-harness` then deletes the executables
+the new tool installed.
+
+In a pip virtualenv that holds the pre-rename package, run `pip uninstall -y skill-eval-harness` before you install the fork, or start a fresh virtualenv. A later `pip uninstall skill-eval-harness` otherwise deletes the scripts and shared modules that `skill-eval-harness-ext` needs.
+
 ### Runtime dependency
 
 Python 3.10, 3.11, and 3.12 remain supported. The runtime now includes PyYAML plus exact-pinned
@@ -337,7 +361,7 @@ cp -R eval-runs/latest eval-runs/latest-v0.5.1
 cp benchmark.json benchmark-v0.5.1.json
 
 python -m venv .venv-0.6
-.venv-0.6/bin/python -m pip install skill-eval-harness==0.6.0
+.venv-0.6/bin/python -m pip install "git+https://github.com/mdsmithaustin/skill-eval-harness.git@abd8d7d57aae788658bc293abac1dab80dfb24ac"
 ```
 
 A fresh virtual environment keeps the old CLI usable while the new report is checked.
@@ -497,10 +521,13 @@ skill changed. They often explain a smaller denominator or a missing ratio direc
 
 Keep `eval-runs/latest-v0.5.1`, `benchmark-v0.5.1.json`, and the old environment until
 the 0.6.0 report has been accepted. Rolling back the executable is then just using the
-old environment or reinstalling the pinned release:
+old environment or reinstalling the pinned commit. That commit predates the rename, so it
+installs the `skill-eval-harness` distribution, which provides the same scripts as
+`skill-eval-harness-ext`. If you installed `skill-eval-harness-ext` as a tool, remove it first:
 
 ```bash
-uv tool install --force skill-eval-harness==0.5.1
+uv tool uninstall skill-eval-harness-ext
+uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@0f18a30209f7f5f10230a144fa96851c250e3364
 ```
 
 Do not convert a migrated tree back by deleting selected telemetry keys. Restore the

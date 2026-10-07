@@ -14,8 +14,10 @@ Existing read-only backend restrictions remain unchanged and may block the check
 Do not relax permissions or infer denial from an absent file to make a recovery case pass.
 Live recovery eligibility is deferred to consumer integration and is not a release claim of this runner feature.
 
-- Check out the branch under test, then `python3 -m pip install -e ".[test]"` and
-  `python3 -m unittest discover tests` (it must pass before any live run).
+- Check out the branch under test, run `python3 -m pip uninstall -y skill-eval-harness`
+  (it prints a warning and exits 0 when the old distribution is not installed), then
+  `python3 -m pip install -e ".[test]"` and `python3 -m unittest discover tests` (it must
+  pass before any live run).
 - Record the versions you run against: `claude --version`, `codex --version`, `pi --version`,
   `vibe --version`, `gemini --version`, and the OS. Put them in your report.
 - Use the cheapest model each CLI offers unless a check says otherwise. Every check below is a
@@ -163,9 +165,3 @@ Right: each enabled smoke passes. A failure is a finding; report the CLI version
    after `grade`. `judge … --judge-cmd … --quorum 2` must exit 1.
 3. On a real suite with a judge-only case, `case_flags` entries read `signal: combined`, and
    `readiness.floor_cases` is a subset of the cases flagged `floor`.
-
-## 9. The release workflow
-
-On the next release, or a `workflow_dispatch` run of `publish.yml`, the job log must show the
-compile, Ruff, ty, unit-test and collection-parity steps passing before "Build distributions".
-If any fails, the release must stop before upload.

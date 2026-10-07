@@ -5,11 +5,14 @@ Thanks for improving Skill Eval Harness. Keep changes small and evidence-backed:
 ## Local setup
 
 ```sh
-git clone https://github.com/adewale/skill-eval-harness.git
+git clone https://github.com/mdsmithaustin/skill-eval-harness.git
 cd skill-eval-harness
+uv tool uninstall skill-eval-harness   # skip when it is not installed
 uv tool install --editable .
 skill-benchmark --help
 ```
+
+The uninstall step matters because the old `skill-eval-harness` tool and the renamed `skill-eval-harness-ext` provide the same scripts, so the install exits 2 while the old tool is present. Do not use `--force`; see [Installation](README.md#installation).
 
 Runtime dependencies are PyYAML (used to parse skill frontmatter) and the exact-pinned
 `regex` engine (used to give every `rendered-v1` regex a single Unicode semantics and
@@ -22,6 +25,7 @@ deliberately and with compatibility/timeout evidence. Install test dependencies 
 Run these before opening a PR:
 
 ```sh
+pip uninstall -y skill-eval-harness   # prints a warning and exits 0 when it is not installed
 pip install -e ".[test]"
 python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py examples/edited-file-demo/*.py examples/edited-file-demo/evals/fixtures/*.py examples/edited-file-demo/evals/oracles/*.py type_tests/*.py tests/*.py
 ruff check .
@@ -31,11 +35,13 @@ python3 scripts/check_test_collection_parity.py
 python3 scripts/check_installed_wheel.py
 ```
 
+Run the uninstall in any virtualenv that ever held an editable `skill-eval-harness`. The install does not replace that distribution, so the environment keeps both, and a later `pip uninstall skill-eval-harness` deletes the `skill-*` scripts that `skill-eval-harness-ext` needs.
+
 The `test` extra pins the linters CI runs, `ruff==0.16.0` and `ty==0.0.65`; run those versions, because another release can report different findings.
 
-A release tag can name a commit CI never ran, so the release workflow (`.github/workflows/publish.yml`) runs these same gates on the tag, with the same pins, before it builds the wheel; it then checks the exact wheel it uploads (`scripts/check_installed_wheel.py --wheel dist/*.whl`) and runs each console script from it. `tests/test_gate_integrity.py` fails when a gate of CI's test job has no counterpart in the release.
+This fork publishes no release artifact, so CI is the only gate. `tests/test_gate_integrity.py` fails when a gate of CI's test job runs conditionally, can fail green, or is missing. `tests/test_consolidation_guards.py` parses every `.yml` and `.yaml` file under `.github/`. It fails, naming the error type, when it cannot read a file as UTF-8 and load it with `yaml.safe_load`. It also fails when `permissions` is `write-all` or grants `id-token: write`, or when a step `uses` a `pypa/gh-action-pypi-publish` action.
 
-(`pytest tests/` also works — `pyproject.toml` carries the pythonpath config — but CI runs `unittest discover`, so keep tests compatible with both. `scripts/check_test_collection_parity.py` fails when either collector sees a test the other cannot, so a pytest-only test cannot hide from CI. `scripts/check_installed_wheel.py` builds the wheel, installs it into a clean environment, imports every module from there and runs each console script, so a module missing from `py-modules` fails before a release does.)
+(`pytest tests/` also works — `pyproject.toml` carries the pythonpath config — but CI runs `unittest discover`, so keep tests compatible with both. `scripts/check_test_collection_parity.py` fails when either collector sees a test the other cannot, so a pytest-only test cannot hide from CI. `scripts/check_installed_wheel.py` builds the wheel, installs it into a clean environment, imports every module from there and runs each console script, so a module missing from `py-modules` fails that check.)
 
 `ty check` automatically covers every packaged top-level Python module, repository script,
 shipped example, and the static contracts under `type_tests/`. A new runtime boundary module

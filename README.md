@@ -58,13 +58,16 @@ General eval frameworks (openai/evals, vitest-evals, viteval) score one output a
 
 ## Quick start
 
-> Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/). Install from PyPI:
+> Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/). This fork is not published to PyPI. Install it from GitHub:
 >
 > ```bash
-> uv tool install skill-eval-harness
+> uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@main
 > ```
 >
-> For exact reproducibility, pin the current release: `uv tool install skill-eval-harness==0.6.0`.
+> For exact reproducibility, pin a commit: `uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@<commit-sha>`.
+> The distribution is named `skill-eval-harness-ext`. The `skill-eval-harness` package on PyPI is the upstream project, not this fork.
+>
+> Already have a `skill-eval-harness` tool installed? Run `uv tool uninstall skill-eval-harness` first, or the install exits 2. See [Installation](#installation).
 
 Run these from a skill repo that has `evals/shared-benchmark.json`:
 
@@ -111,30 +114,28 @@ Each paired lift also carries an `interval` (the sign-flip test inverted into a 
 
 ## Installation
 
-### From PyPI
+### From GitHub
+
+The fork publishes no PyPI package. Install a commit or branch from its git URL.
+
+If `uv tool list` already shows `skill-eval-harness`, remove it first. That covers the upstream PyPI package, an install from this fork before the rename, and an editable install. Both distributions provide the same scripts, so `uv tool install` exits 2 with `Executables already exist` while the old tool is present. Do not use `--force`: it leaves both tools registered, and a later `uv tool uninstall skill-eval-harness` deletes the new tool's executables.
 
 ```bash
-uv tool install skill-eval-harness
+uv tool uninstall skill-eval-harness   # skip when it is not installed
+uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@main
 skill-benchmark --help
 skill-pi-trigger-eval --help
 
-# Pin a release exactly:
-uv tool install skill-eval-harness==0.6.0
+# Pin a commit exactly:
+uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@<commit-sha>
 
 # One-shot without installing globally:
-uvx --from skill-eval-harness skill-benchmark --help
+uvx --from git+https://github.com/mdsmithaustin/skill-eval-harness.git@main skill-benchmark --help
 ```
 
-### From GitHub
+The distribution name is `skill-eval-harness-ext`, so `importlib.metadata.version("skill-eval-harness-ext")` reads its version. Module names and console scripts keep their names.
 
-Use this for development snapshots before the next PyPI release:
-
-```bash
-uv tool install git+https://github.com/adewale/skill-eval-harness.git@main
-uvx --from git+https://github.com/adewale/skill-eval-harness.git@main skill-benchmark --help
-```
-
-Upgrading a saved run tree requires more than changing the package pin. Follow the
+Upgrading a saved run tree requires more than changing the pin. Follow the
 relevant release boundary in [`docs/upgrading.md`](docs/upgrading.md) before regenerating
 reports; manifest migration and telemetry migration are separate commands.
 
@@ -149,8 +150,9 @@ The installed commands are:
 ### Local development
 
 ```bash
-git clone https://github.com/adewale/skill-eval-harness.git
+git clone https://github.com/mdsmithaustin/skill-eval-harness.git
 cd skill-eval-harness
+uv tool uninstall skill-eval-harness   # skip when it is not installed
 uv tool install --editable .
 skill-benchmark --help
 ```
@@ -183,8 +185,8 @@ Each skill repo owns a `shared-benchmark.json` manifest in one of two places. Th
   "version": 1,
   "skill_name": "good-pr",
   "harness": {
-    "name": "skill-eval-harness",
-    "url": "https://github.com/adewale/skill-eval-harness",
+    "name": "skill-eval-harness-ext",
+    "url": "https://github.com/mdsmithaustin/skill-eval-harness",
     "version": ">=0.6.0"
   },
   "skill_paths": ["skills/good-pr/SKILL.md"],
@@ -592,6 +594,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup, validation commands, and eval-safety rules. The short version:
 
 ```bash
+pip uninstall -y skill-eval-harness   # prints a warning and exits 0 when it is not installed
 pip install -e ".[test]"
 python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py examples/edited-file-demo/*.py examples/edited-file-demo/evals/fixtures/*.py examples/edited-file-demo/evals/oracles/*.py type_tests/*.py tests/*.py
 ruff check .
@@ -667,6 +670,7 @@ skill-eval-harness/
 ## Development
 
 ```bash
+pip uninstall -y skill-eval-harness   # prints a warning and exits 0 when it is not installed
 pip install -e ".[test]"
 python3 -m py_compile *.py scripts/*.py examples/adewale-workspace/*.py examples/demo-skill/*.py examples/edited-file-demo/*.py examples/edited-file-demo/evals/fixtures/*.py examples/edited-file-demo/evals/oracles/*.py type_tests/*.py tests/*.py
 ruff check .

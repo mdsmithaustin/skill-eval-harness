@@ -27,10 +27,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+import yaml
 from helpers import (
     attest_answer_design,
     make_eval_repo,
@@ -1093,18 +1095,121 @@ class TimeoutConventionTests(unittest.TestCase):
         self.assertEqual(outcome, {"answer": "", "returncode": 124, "timed_out": True})
 
 
+def _publish_grants(node: object) -> Iterator[str]:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "permissions" and isinstance(value, str) and value.lower() == "write-all":
+                yield "permissions: write-all"
+            elif key == "permissions" and isinstance(value, dict) and str(value.get("id-token")).lower() == "write":
+                yield "id-token: write"
+            elif key == "uses" and isinstance(value, str) and value.lower().startswith("pypa/gh-action-pypi-publish"):
+                yield "uses: pypa/gh-action-pypi-publish"
+            yield from _publish_grants(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _publish_grants(item)
+
+
+def pypi_publish_grants(github: Path) -> list[str]:
+    """Findings as `relative/path: finding` for each YAML file under `github` that grants
+    `id-token: write` or `permissions: write-all`, uses `pypa/gh-action-pypi-publish`, or that
+    cannot be read as UTF-8 and loaded with `yaml.safe_load`. A file that cannot be loaded is
+    reported with the type name of the error."""
+    findings = []
+    for path in sorted(github.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in {".yml", ".yaml"}:
+            continue
+        relative = path.relative_to(github).as_posix()
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception as error:
+            findings.append(f"{relative}: could not load as YAML ({type(error).__name__})")
+            continue
+        findings.extend(f"{relative}: {grant}" for grant in sorted(set(_publish_grants(document))))
+    return findings
+
+
 class PackagingWorkflowTests(unittest.TestCase):
-    def test_publish_workflow_smokes_the_built_wheel_before_upload(self):
-        text = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
-        publish_index = text.index("pypa/gh-action-pypi-publish")
-        pre_publish = text[:publish_index]
-        self.assertIn("pip install dist/*.whl", pre_publish)
-        self.assertIn("importlib.metadata.version", pre_publish)
-        self.assertIn("Verify release tag matches package version", pre_publish)
-        self.assertIn('tag != f"v{version}"', pre_publish)
-        self.assertIn("github.event.release.tag_name || github.ref", pre_publish)
-        for command in ("skill-benchmark --help", "skill-pi-trigger-eval --help", "skill-trigger-matrix --help"):
-            self.assertIn(command, pre_publish)
+    def test_distribution_is_named_skill_eval_harness_ext(self):
+        match = re.search(r'(?m)^\[project\]\s*\nname\s*=\s*"([^"]*)"', PYPROJECT)
+        self.assertIsNotNone(match, "pyproject.toml [project] has no name")
+        self.assertEqual(match.group(1), "skill-eval-harness-ext")
+
+    def test_github_yaml_parses_and_has_no_id_token_or_write_all_grant_or_pypi_publish_action(self):
+        self.assertEqual(pypi_publish_grants(ROOT / ".github"), [])
+
+    def test_id_token_and_write_all_grants_and_pypi_publish_action_are_reported(self):
+        job = "on: push\njobs:\n  ship:\n    runs-on: ubuntu-latest\n"
+        files = {
+            "workflows/release.yaml": (
+                job + "    permissions:\n      contents: read\n      id-token: write\n"
+                "    steps:\n      - run: echo ok\n",
+                "workflows/release.yaml: id-token: write"),
+            "workflows/ci.yml": (
+                "on: push\npermissions:\n  id-token: write\njobs:\n  test:\n"
+                + "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+                "workflows/ci.yml: id-token: write"),
+            "workflows/all.yml": (
+                "on: push\npermissions: write-all\n" + job.split("\n", 1)[1]
+                + "    steps:\n      - run: echo ok\n",
+                "workflows/all.yml: permissions: write-all"),
+            "actions/release/action.yaml": (
+                "name: Release\nruns:\n  using: composite\n  steps:\n"
+                + "    - uses: PyPA/GH-Action-PyPI-Publish@release/v1\n",
+                "actions/release/action.yaml: uses: pypa/gh-action-pypi-publish"),
+        }
+        for relative, (text, finding) in files.items():
+            with self.subTest(file=relative), tempfile.TemporaryDirectory() as tmp:
+                github = Path(tmp) / ".github"
+                target = github / relative
+                target.parent.mkdir(parents=True)
+                target.write_text(text, encoding="utf-8")
+                self.assertEqual(pypi_publish_grants(github), [finding])
+
+    def test_a_yaml_file_that_does_not_parse_is_reported(self):
+        for relative in ("workflows/broken.yml", "actions/broken/action.yaml"):
+            with self.subTest(file=relative), tempfile.TemporaryDirectory() as tmp:
+                github = Path(tmp) / ".github"
+                target = github / relative
+                target.parent.mkdir(parents=True)
+                target.write_text("jobs: [unclosed\n  run: {\n", encoding="utf-8")
+                self.assertEqual(pypi_publish_grants(github), [f"{relative}: could not load as YAML (ParserError)"])
+
+    def test_a_file_that_cannot_be_read_as_utf8_or_loaded_is_reported_with_its_error_type(self):
+        cases = {
+            "utf16-bom.yml": ("x: 1\n".encode("utf-16"), "UnicodeDecodeError"),
+            "impossible-date.yml": (b"x: 2024-02-30\n", "ValueError"),
+            "deeply-nested.yml": (b"[" * 5000 + b"]" * 5000, "RecursionError"),
+            "unknown-tag.yml": (b"x: !!python/object:os.system {}\n", "ConstructorError"),
+        }
+        for name, (data, error_type) in cases.items():
+            with self.subTest(file=name), tempfile.TemporaryDirectory() as tmp:
+                github = Path(tmp) / ".github"
+                (github / "workflows").mkdir(parents=True)
+                (github / "workflows" / name).write_bytes(data)
+                self.assertEqual(
+                    pypi_publish_grants(github), [f"workflows/{name}: could not load as YAML ({error_type})"])
+
+    def test_a_valid_multi_document_yaml_file_is_reported_not_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            github = Path(tmp) / ".github"
+            (github / "workflows").mkdir(parents=True)
+            (github / "workflows" / "two.yml").write_text(
+                "on: push\n---\npermissions:\n  id-token: write\n", encoding="utf-8")
+            self.assertEqual(pypi_publish_grants(github), ["workflows/two.yml: could not load as YAML (ComposerError)"])
+
+    def test_read_only_permissions_and_a_comment_are_not_a_grant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            github = Path(tmp) / ".github"
+            (github / "workflows").mkdir(parents=True)
+            (github / "workflows" / "ci.yml").write_text(
+                "# id-token: write and pypa/gh-action-pypi-publish are banned here.\n"
+                "on: push\npermissions: read-all\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                "    permissions:\n      contents: read\n      id-token: none\n"
+                "    steps:\n      - uses: actions/checkout@v7\n"
+                "      - run: \"echo 'id-token: write'\"\n",
+                encoding="utf-8")
+            self.assertEqual(pypi_publish_grants(github), [])
 
 
 class DocSyncTests(unittest.TestCase):

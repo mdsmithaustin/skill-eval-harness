@@ -3,7 +3,7 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "skill-eval-harness"
+name = "skill-eval-harness-ext"
 version = "0.6.0"
 description = "Repo-agnostic Agent Skill evaluation harness with paired variants, holdout splits, repeated-run stats, script assertions, judge command backends, Anthropic-compatible exports, Jetty adapter support, and static review output."
 requires-python = ">=3.10"
@@ -27,11 +27,10 @@ classifiers = [
 test = ["pytest>=8", "hypothesis>=6", "ruff==0.16.0", "ty==0.0.65"]
 
 [project.urls]
-Homepage = "https://github.com/adewale/skill-eval-harness"
-Repository = "https://github.com/adewale/skill-eval-harness"
-Issues = "https://github.com/adewale/skill-eval-harness/issues"
-Changelog = "https://github.com/adewale/skill-eval-harness/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/adewale/skill-eval-harness#readme"
+Homepage = "https://github.com/mdsmithaustin/skill-eval-harness"
+Repository = "https://github.com/mdsmithaustin/skill-eval-harness"
+Changelog = "https://github.com/mdsmithaustin/skill-eval-harness/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/mdsmithaustin/skill-eval-harness#readme"
 
 [project.scripts]
 skill-benchmark = "skill_benchmark:main"
