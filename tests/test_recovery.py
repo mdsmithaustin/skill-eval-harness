@@ -724,3 +724,38 @@ class NativeStopDecisionTests(unittest.TestCase):
             terminal = sb._codex_terminal_observation(content)
             self.assertTrue(getattr(terminal, field))
             self.assertFalse(terminal.readable)
+
+    def test_codex_unterminated_tail_is_unreadable_and_preserves_terminal_events(self):
+        identity = json.dumps({"type": "thread.started", "thread_id": "thread"}).encode()
+        for kind, completed, failed in ((None, False, False), ("turn.started", False, False),
+                                        ("turn.completed", True, False), ("turn.failed", False, True),
+                                        ("error", False, True)):
+            with self.subTest(kind=kind):
+                content = identity if kind is None else identity + b"\n" + json.dumps({"type": kind}).encode()
+                terminal = sb._codex_terminal_observation(content)
+                self.assertFalse(terminal.readable)
+                self.assertEqual((terminal.session_id, terminal.completion_seen, terminal.failure_seen),
+                                 ("thread", completed, failed))
+                self.assertTrue(sb._codex_terminal_observation(content + b"\n").readable)
+                if kind is not None:
+                    terminal = sb._codex_terminal_observation(content + b'\n{"type":"turn.started"}')
+                    self.assertFalse(terminal.readable)
+                    self.assertEqual((terminal.completion_seen, terminal.failure_seen), (completed, failed))
+
+    def test_claude_assistant_errors_are_safely_classified(self):
+        errors = ("authentication_failed", "billing_error", "rate_limit", "invalid_request",
+                  "server_error", "unknown", "ERROR_CANARY", {"detail": "ERROR_CANARY"},
+                  ["ERROR_CANARY"], False, 0, "", None)
+        for error in errors:
+            with self.subTest(error=error):
+                record = {"type": "assistant", "session_id": "session", "error": error,
+                          "error_detail": "ERROR_CANARY", "message": {
+                              "role": "assistant", "model": "model", "content": []}}
+                projected = sb._claude_project_frame(json.dumps(record).encode(), None, "closed")
+                retained = json.loads(projected.retained)
+                self.assertEqual(projected.failure_seen, error is not None)
+                self.assertFalse(projected.completion_seen)
+                self.assertNotIn(b"ERROR_CANARY", projected.retained)
+                if error is not None:
+                    expected = error if isinstance(error, str) and error in errors[:6] else "unknown"
+                    self.assertEqual(retained["error"], expected)

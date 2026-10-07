@@ -6878,7 +6878,7 @@ def _recovery_state(facts: _LifecycleFacts, terminal: _TerminalObservation, *,
 def _codex_terminal_observation(content: bytes) -> _TerminalObservation:
     identities: set[str] = set()
     identity_records = 0
-    readable = True
+    readable = content.endswith(b"\n")
     completed = failed = False
     for frame in content.splitlines():
         try:
@@ -7084,6 +7084,12 @@ def _claude_project_frame(frame: bytes, expected_id: str | None,
                 raise ValueError("native_model_invalid")
             served = model
     completion = failure = False
+    if kind == "assistant" and record.get("error") is not None:
+        error = record["error"]
+        safe["error"] = (error if isinstance(error, str) and error in {
+            "authentication_failed", "billing_error", "rate_limit", "invalid_request",
+            "server_error", "unknown"} else "unknown")
+        failure = True
     if kind == "result":
         if not isinstance(record.get("is_error"), bool) or identity is None:
             raise ValueError("native_result_invalid")
@@ -12540,13 +12546,13 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
     """Single owner for invoking Claude via `claude -p`.
 
     Returns the parsed envelope plus returncode/elapsed_ms/stderr/raw_response.
-    `claude_bin` is an executable path (tests inject a stub that emits a canned
-    envelope), NOT a shell string — so there is no shell-quoting seam between
-    the harness and the model. `output_format` selects `json` (one envelope; the
-    judge default) or `stream-json` (the full event stream the answer runner
-    keeps as the run's raw trace; `-p` requires `--verbose` with it). If no cwd
-    is supplied, run in an empty temporary directory rather than inheriting the
-    harness repo cwd."""
+    `claude_bin` is an executable path, not a shell string. Tests inject a stub
+    that emits a canned envelope. `output_format` selects `json` (one envelope,
+    the judge default) or `stream-json` (`-p` requires `--verbose` with it).
+    Ordinary stream mode retains the full raw event stream. Native recovery
+    returns transformed, allowlisted JSONL stdout and omits drained stderr.
+    If no cwd is supplied, run in an empty temporary directory rather than
+    inheriting the harness repo cwd."""
     if output_format not in {"json", "stream-json"}:
         raise ValueError(f"unsupported claude output_format {output_format!r}")
     if recovery_capture is not None:
@@ -12611,8 +12617,8 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
         "trace_utf8_valid": result.stdout_utf8_valid,
         "elapsed_ms": result.elapsed_ms,
         "stderr": result.stderr,
-        # The raw wire bytes always ride along: in stream mode they ARE the
-        # run's trace; in envelope mode they preserve the failure diagnostics.
+        # Captured stdout is raw outside native recovery. Native recovery
+        # supplies transformed, allowlisted JSONL stdout.
         "raw_response": result.stdout,
         "command": command,
         "context_isolation": list(isolation_args),

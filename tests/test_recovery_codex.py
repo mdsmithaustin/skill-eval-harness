@@ -301,7 +301,8 @@ def handle(number, frame):
     if mode == "malformed-after-complete":
         print(json.dumps({{"type":"turn.completed"}}), flush=True)
         print("{{bad", flush=True)
-    print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":"handler-ready"}}}}), flush=True)
+    print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":"handler-ready"}}}}),
+          end="" if mode == "unterminated" else "\\n", flush=True)
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, handle)
 print(json.dumps({{"type":"turn.started"}}), flush=True)
@@ -328,7 +329,8 @@ time.sleep(60)
         for mode, expected in (("stop", "checkpoint_stop"), ("changed", "checkpoint_mismatch"),
                                ("equivalent", "checkpoint_mismatch"), ("removed", "checkpoint_mismatch"),
                                ("handler-complete", "natural_completion"), ("before-complete", "natural_completion"),
-                               ("failure", "process_failed"), ("malformed-after-complete", "natural_completion")):
+                               ("failure", "process_failed"), ("malformed-after-complete", "natural_completion"),
+                               ("unterminated", "capture_failed")):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
                 processes = []
                 def spawn(*args, processes=processes, **kwargs):
@@ -424,6 +426,11 @@ if mode == "ambiguous-session":
 print(json.dumps({{"type":"assistant","session_id":session,"message":{{"role":"assistant","model":"served-model","content":[{{"type":"text","text":"task"}}]}}}}), flush=True)
 if prompt not in {{"RECOVER", "REFUSE"}}:
     def handle(number, frame):
+        if mode in {{"assistant-error", "unknown-assistant-error", "malformed-after-assistant-error"}}:
+            error = {{"detail":"SETTINGS_CANARY"}} if mode == "unknown-assistant-error" else "authentication_failed"
+            print(json.dumps({{"type":"assistant","session_id":session,"error":error,
+                "error_detail":"SETTINGS_CANARY","message":{{"role":"assistant","model":"served-model","content":[]}}}}), flush=True)
+            if mode == "malformed-after-assistant-error": os.write(1, b'{{"secret":"SETTINGS_CANARY"}}invalid\\n')
         if mode == "handler-complete":
             print(json.dumps({{"type":"result","session_id":session,"is_error":False,"result":"done"}}), flush=True)
             os.write(1, b'{{"secret":"SETTINGS_CANARY"}}invalid\\n')
@@ -440,7 +447,8 @@ print(json.dumps({{"type":"result","session_id":session,"is_error":False,"result
 
     def test_public_controls_filter_secrets_and_preserve_unknown_effort(self):
         for mode in ("safe", "settings-error", "event-controls", "invalid-event", "wrong-id", "malformed", "invalid-effort",
-                     "duplicate", "oversized", "truncated", "incoming-control", "default-session", "ambiguous-session", "handler-complete"):
+                     "duplicate", "oversized", "truncated", "incoming-control", "default-session", "ambiguous-session", "handler-complete",
+                     "assistant-error", "unknown-assistant-error", "malformed-after-assistant-error"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
                 result, base = self.run_protocol_case(Path(temporary), mode)
                 self.assertEqual(result[0], 0 if mode in {"safe", "settings-error", "event-controls"} else 1, result[2])
@@ -465,6 +473,14 @@ print(json.dumps({{"type":"result","session_id":session,"is_error":False,"result
                 if mode == "handler-complete":
                     self.assertTrue(facts["terminal"]["completion_seen"])
                     self.assertFalse(facts["terminal"]["readable"])
+                if mode in {"assistant-error", "unknown-assistant-error", "malformed-after-assistant-error"}:
+                    self.assertTrue(facts["terminal"]["failure_seen"])
+                    self.assertFalse(facts["terminal"]["completion_seen"])
+                    self.assertEqual(facts["state"], "capture_failed" if mode == "malformed-after-assistant-error" else "process_failed")
+                    self.assertEqual(len(json.loads((base / "recovery.json").read_text())["phases"]), 1)
+                    errors = [frame["error"] for frame in map(json.loads, (base / "recovery/initial/stdout.bin").read_text().splitlines())
+                              if "error" in frame]
+                    self.assertEqual(errors, ["unknown" if mode == "unknown-assistant-error" else "authentication_failed"])
 
     def test_partial_writes_backpressure_multiplexing_and_eof(self):
         write = sb.os.write
