@@ -11,7 +11,7 @@ a field widened to ``Any``.
 from argparse import Namespace
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 from typing_extensions import assert_type
 
@@ -41,6 +41,7 @@ from grading_contracts import (
 from invocation_contracts import (
     InvocationRequest,
     InvocationResult,
+    NativeRecoveryConfig,
     ProcessInvocationPlan,
     TimeoutSeconds,
 )
@@ -180,6 +181,10 @@ def provider_invocation_types_are_precise(
     assert_type(request.timeout_s, TimeoutSeconds)
     assert_type(plan.argv, tuple[str, ...])
     assert_type(plan.environment, Mapping[str, str] | None)
+    assert_type(plan.native_recovery, NativeRecoveryConfig | None)
+    if plan.native_recovery is not None:
+        assert_type(plan.native_recovery, NativeRecoveryConfig)
+        assert_type(plan.native_recovery.provider, Literal["codex", "claude"])
     assert_type(result.invocation_state, InvocationState)
 
 
