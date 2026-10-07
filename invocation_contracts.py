@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from json_contracts import freeze_json_mapping, strict_json_loads, validate_json_text
 from manifest_contracts import ModelId
@@ -107,6 +107,15 @@ class RecoveryCapture:
     directory: Path
     checkpoint: RecoveryCase | None = None
     state: RecoveryProcessState | None = field(default=None, init=False)
+
+
+@dataclass(frozen=True)
+class NativeRecoveryConfig:
+    provider: Literal["codex", "claude"]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.provider, str) or self.provider not in {"codex", "claude"}:
+            raise ValueError("native recovery provider must be codex or claude")
 
 
 class InvocationState(str, Enum):
@@ -280,6 +289,7 @@ class ProcessInvocationPlan:
     # False leaves stdout as captured when it is the run's evidence.
     redact_stdout: bool = True
     recovery_capture: RecoveryCapture | None = field(default=None, repr=False)
+    native_recovery: NativeRecoveryConfig | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.argv, tuple):
@@ -316,6 +326,22 @@ class ProcessInvocationPlan:
             raise TypeError("process redact_output must be callable or None")
         if not isinstance(self.redact_stdout, bool):
             raise TypeError("process redact_stdout must be boolean")
+        if self.native_recovery is not None:
+            if not isinstance(self.native_recovery, NativeRecoveryConfig):
+                raise TypeError("native recovery must be NativeRecoveryConfig")
+            if not isinstance(self.recovery_capture, RecoveryCapture) or not self.input_text:
+                raise ValueError("native recovery requires a capture and prompt")
+            if self.native_recovery.provider == "claude":
+                for flag in ("--input-format", "--output-format"):
+                    positions = [i for i, arg in enumerate(self.argv) if arg == flag]
+                    if (len(positions) != 1 or positions[0] + 1 >= len(self.argv)
+                            or self.argv[positions[0] + 1] != "stream-json"
+                            or any(arg.startswith(flag + "=") for arg in self.argv)):
+                        raise ValueError("native Claude recovery requires stream-json input and output")
+                if any(arg.split("=", 1)[0] in {
+                        "--permission-prompt-tool", "--sdk-url"} for arg in self.argv):
+                    raise ValueError("native Claude recovery cannot serve bidirectional requests")
+
 
     @classmethod
     def from_values(
@@ -329,6 +355,7 @@ class ProcessInvocationPlan:
         redact_output: Callable[[str], str] | None = None,
         redact_stdout: bool = True,
         recovery_capture: RecoveryCapture | None = None,
+        native_recovery: NativeRecoveryConfig | None = None,
     ) -> ProcessInvocationPlan:
         if isinstance(argv, (str, bytes)):
             raise TypeError("process argv must be a sequence of argument strings")
@@ -341,6 +368,7 @@ class ProcessInvocationPlan:
             redact_output=redact_output,
             redact_stdout=redact_stdout,
             recovery_capture=recovery_capture,
+            native_recovery=native_recovery,
         )
 
 

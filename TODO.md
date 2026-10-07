@@ -71,7 +71,7 @@ Jetty runbooks emit a standardized machine-readable `validation_report.json` per
 (`jettyio/jettyio-skills`, `skills/create-runbook/SKILL.md`). Rubric evaluation scores 3-7
 dimensions on a 1-5 scale; programmatic evaluation returns `PASS` / `PARTIAL` / `FAIL`. The
 items below map that report onto the harness judge-result row `{judge_task_id, passed, score,
-threshold, evidence}` (`load_judge_results:12890`, merged in `grade_case_variant:15761`).
+threshold, evidence}` (`load_judge_results:13747`, merged in `grade_case_variant:16618`).
 
 - [ ] Export qualitative judge tasks to Jetty workflows using `simple_judge` where useful.
       Carry `judge_task_id` (`case::variant::run-n::assertion`) into the Jetty task so the
@@ -350,7 +350,7 @@ All of the audit's deferred items landed in the follow-up pass:
 
 # User journeys the code supports but the docs don't walk
 
-- [ ] How do I inspect an interrupted agent and its fresh recovery without treating runner completion as a certificate? `run-agent` prepared recovery rows retain raw phase evidence and file snapshots. The [recovery reference](docs/recovery.md) defines the contract. A bundled offline walkthrough remains to be written.
+- [ ] How do I inspect an interrupted agent and its fresh recovery without treating runner completion as a certificate? `run-agent` prepared recovery rows retain phase evidence and file snapshots. The [recovery reference](docs/recovery.md) defines the stream contracts. A bundled offline walkthrough remains to be written.
 
 A 2026-07 docs review found a pattern: the machinery for a user journey exists (commands,
 report blocks, tests) but no doc walks someone from their actual question to a decision, so

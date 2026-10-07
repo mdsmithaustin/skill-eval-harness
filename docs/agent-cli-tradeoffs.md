@@ -10,6 +10,13 @@ Related docs:
 
 ## Summary
 
+The table describes ordinary routes. Native recovery V2 has separate [transport and evidence limits](recovery.md#native-observations).
+Codex omits only the adapter-added `--ephemeral`, extracts scoped rollout context before isolated-home cleanup, and preserves a supplied `--ephemeral` with native context metadata unavailable.
+Claude retains `--no-session-persistence` but uses correlated `initialize` and `get_settings`, one original-user envelope, and EOF through `stream-json` stdin.
+It filters stdout before retention and omits stderr. Next-request settings do not establish the served model or every inference request's effort.
+The adapter selects this prototype automatically for recovery capture, without a runtime adoption gate.
+Permission parity remains unverified. Independent source and control review is required before adoption for real task input.
+
 | Dimension | Claude Code | Codex CLI | Gemini CLI | Mistral Vibe | What it means for us |
 |---|---|---|---|---|---|
 | Final answer | Strong: JSON result envelope | Strong: `--output-last-message` sidecar | Strong after strict lifecycle validation: final assistant segment / JSON `response` | Adequate: last assistant `LLMMessage.content` (2.22 and earlier) or the last `message` entry's text blocks (2.23 and later) | Every stream-like provider needs a tested terminal-answer rule; raw trace bytes are never answer text. |

@@ -130,9 +130,13 @@ Missing required facilities fail the run with exit code 1 and block later phases
 The runner records the failure when it can write `recovery.json`, and evidence may be partial.
 The fixed initial, recovery, and refusal phases use fresh processes in one fixture workspace.
 Rows without `recovery` stay one-shot. No new command or permission configuration is required.
-Recovery rows retain raw evidence and `recovery.json` instead of ordinary answer artifacts, workspace diffs, grades, or normalized paired telemetry.
+Recovery rows retain phase evidence and `recovery.json` instead of ordinary answer artifacts, workspace diffs, grades, or normalized paired telemetry.
+Native V2 preserves raw Codex streams, but filters Claude stdout and omits Claude stderr.
 The [recovery reference](recovery.md) defines the fields, failure states, artifact layout, and evidence limits.
-Existing effort forwarding and backend restrictions apply unchanged.
+Existing effort forwarding and backend restriction arguments remain in place.
+Claude native V2 changes stdin to `stream-json`; permission parity remains unverified.
+The adapter selects this prototype automatically for recovery capture, without a runtime adoption gate.
+Independent source and control review is required before adoption for real task input.
 
 ## Run Claude tasks (with cost capture)
 
@@ -593,7 +597,7 @@ Probes a judge's stability before you trust its verdicts (model-touching; opt-in
 For ordinary answer rows, trigger runs, and judge runs, runner paths write legacy-compatible normalized blocks beside raw provider fields and an availability-aware telemetry v3 envelope.
 These paths include Pi smoke, Pi trigger, `run-agent`, `run-codex`, `run-claude`, `run-subagent`, the judge wrapper, and the Jetty importer.
 The envelope appears in both `metadata.json` and `metrics.json`.
-Recovery rows retain raw evidence and `recovery.json` for the consumer. They do not emit these normalized blocks or normalized paired telemetry.
+Recovery rows retain [phase evidence and its stream contracts](recovery.md#run-artifacts) and `recovery.json` for the consumer. They do not emit these normalized blocks or normalized paired telemetry.
 
 This section owns the three source lists; they come from `observation_contracts.py`, and the answer path and the trigger path validate against the same sets.
 

@@ -396,7 +396,8 @@ runs/answer-design.json                          # exact expected answer experim
 
 Prepared `run-agent` rows can optionally carry a fixed [recovery case](docs/recovery.md).
 Those rows retain one fixture across an intentional checkpoint stop, fresh recovery, and fresh refusal.
-They write `recovery.json` and raw process evidence rather than an ordinary answer grade.
+They write `recovery.json` and phase evidence rather than an ordinary answer grade.
+Native V2 preserves raw Codex streams, but filters Claude stdout and omits Claude stderr.
 Completed phases establish runner capability, not provider eligibility or permission enforcement.
 
 Ordinary answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
@@ -455,7 +456,7 @@ verifying `artifact-commit.json`. Legacy directories without a marker remain rea
 cannot acquire committed-artifact provenance. Current runners also attest ordinary answer runs to
 `answer-design.json`; reports with missing, extra, duplicated, or stale task identities remain
 partial and expose any surviving calculations only under explicitly labelled observed fields.
-Recovery rows use [raw phase evidence](docs/recovery.md#run-artifacts) instead of this artifact-marker and answer-report contract.
+Recovery rows use [phase evidence and its stream contracts](docs/recovery.md#run-artifacts) instead of this artifact-marker and answer-report contract.
 
 `metadata.json` is optional, but include what your runner can capture:
 

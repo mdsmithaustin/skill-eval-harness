@@ -11,8 +11,9 @@ For ordinary answer rows, the shared abstraction has these steps:
 5. preserve raw trace telemetry when available,
 6. write the same run-output contract for every provider.
 
-Recovery rows use the same native backend routes and settings, including through the `run-codex` and `run-claude` wrappers.
+Recovery rows use the existing native backend owners and restriction arguments, including through the `run-codex` and `run-claude` wrappers.
 They retain `recovery.json` and raw snapshots instead of ordinary answer artifacts, workspace diffs, grades, or normalized paired telemetry.
+Native V2 preserves raw Codex streams, but filters Claude stdout and omits Claude stderr.
 The [recovery reference](recovery.md) defines their separate lifecycle and consumer evidence limits.
 
 ## The common contract
@@ -29,6 +30,14 @@ The [recovery reference](recovery.md) defines their separate lifecycle and consu
 This is intentionally a **control-plane abstraction**, not a lowest-common-denominator CLI wrapper. Prompt transport, tool controls, schema enforcement, config isolation, and telemetry differ per CLI and stay in thin provider adapters.
 
 ## Provider control surfaces
+
+The table describes ordinary routes. Native recovery V2 changes two controls.
+Codex omits only the adapter-added `--ephemeral` and extracts scoped context from the isolated home before cleanup.
+A supplied `--ephemeral` stays present and leaves native context metadata unavailable.
+Claude retains `--no-session-persistence` but uses `stream-json` stdin for correlated `initialize`, `get_settings`, one original-user envelope, and EOF.
+The adapter selects this prototype automatically for recovery capture. No runtime gate enforces adoption review.
+Permission parity remains unverified and requires independent source and control review before adoption for real task input.
+The [native observation reference](recovery.md#native-observations) distinguishes next-request settings, served model observations, and CLI context.
 
 | Concern | Claude Code | Codex CLI | Gemini CLI | Mistral Vibe |
 |---|---|---|---|---|

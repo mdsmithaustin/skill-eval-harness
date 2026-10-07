@@ -21,6 +21,7 @@ import errno
 import functools
 import hashlib
 import html
+import importlib.metadata
 import io
 import itertools
 import json
@@ -28,6 +29,7 @@ import math
 import os
 import random
 import re
+import selectors
 import shlex
 import shutil
 import signal
@@ -43,12 +45,13 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import asdict, replace
 from dataclasses import dataclass as _dataclass
 from decimal import ROUND_CEILING, Decimal
 from enum import Enum
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
-from typing import Any, NoReturn, Protocol, cast
+from typing import Any, Literal, NoReturn, Protocol, cast
 
 # Direct ``python skill_benchmark.py`` execution must share the canonical module
 # identity used by lazy backend references. Otherwise importing
@@ -180,6 +183,7 @@ from invocation_contracts import (
     InvocationRequest,
     InvocationResult,
     InvocationState,
+    NativeRecoveryConfig,
     ProcessInvocationPlan,
     RecoveryCapture,
     RecoveryCase,
@@ -6754,7 +6758,7 @@ def mount_skill_tree(tree_dir: Path, skills_dir: Path) -> list[Path]:
     return copied
 
 
-def recovery_file_bytes(workspace: Path, relative: str) -> bytes:
+def recovery_file_bytes(workspace: Path, relative: str, *, max_bytes: int | None = None) -> bytes:
     path = workspace / relative
     resolved = path.resolve()
     if workspace.resolve() not in resolved.parents:
@@ -6773,7 +6777,10 @@ def recovery_file_bytes(workspace: Path, relative: str) -> bytes:
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise ValueError(f"recovery path is not a regular file: {relative}")
-            return handle.read()
+            content = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+            if max_bytes is not None and len(content) > max_bytes:
+                raise ValueError("recovery file exceeds capture limit")
+            return content
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
@@ -6799,6 +6806,433 @@ def recovery_group_stopped(pgid: int) -> tuple[bool, str]:
     except ProcessLookupError:
         return True, "killpg_no_members"
     return False, "killpg_members_remain"
+
+
+
+@_dataclass
+class _LifecycleFacts:
+    first_blocker: RecoveryProcessState | None = None
+    checkpoint_observed: bytes | None = None
+    checkpoint_final: bytes | None = None
+    live_after_capture: bool = False
+    live_before_term: bool = False
+    before_deadline_after_capture: bool = False
+    before_deadline_before_term: bool = False
+    term_requested: bool = False
+    leader_reaped: bool = False
+    stdout_eof: bool = False
+    stderr_eof: bool = False
+    group_stopped: bool = False
+    artifacts_ready: bool = True
+    input_delivered: bool = False
+    os_returncode: int | None = None
+
+
+@_dataclass(frozen=True)
+class _TerminalObservation:
+    session_id: str | None = None
+    readable: bool = False
+    completion_seen: bool = False
+    failure_seen: bool = False
+
+
+def _recovery_state(facts: _LifecycleFacts, terminal: _TerminalObservation, *,
+                    checkpoint: RecoveryCase | None,
+                    native: NativeRecoveryConfig | None) -> RecoveryProcessState:
+    if not facts.artifacts_ready:
+        return RecoveryProcessState.CAPTURE_FAILED
+    if facts.first_blocker is not None:
+        return (RecoveryProcessState.OBSERVER_FAILED
+                if facts.first_blocker in {RecoveryProcessState.COMPLETE, RecoveryProcessState.CHECKPOINT_STOP}
+                else facts.first_blocker)
+    if not facts.leader_reaped or not facts.group_stopped or facts.os_returncode is None:
+        return RecoveryProcessState.CLEANUP_FAILED
+    if not facts.stdout_eof or not facts.stderr_eof:
+        return RecoveryProcessState.CAPTURE_FAILED
+    if native is not None:
+        if not facts.input_delivered:
+            return RecoveryProcessState.CAPTURE_FAILED
+        if checkpoint is not None and terminal.completion_seen:
+            return RecoveryProcessState.NATURAL_COMPLETION
+        if terminal.failure_seen:
+            return RecoveryProcessState.PROCESS_FAILED
+        if not terminal.readable or terminal.session_id is None:
+            return RecoveryProcessState.CAPTURE_FAILED
+    if checkpoint is None:
+        if facts.checkpoint_observed is not None or facts.checkpoint_final is not None or facts.term_requested:
+            return RecoveryProcessState.OBSERVER_FAILED
+        return (RecoveryProcessState.COMPLETE if facts.os_returncode == 0
+                else RecoveryProcessState.PROCESS_FAILED)
+    if not (facts.checkpoint_observed is not None and facts.live_after_capture
+            and facts.live_before_term and facts.before_deadline_after_capture
+            and facts.before_deadline_before_term and facts.term_requested):
+        return RecoveryProcessState.OBSERVER_FAILED
+    if facts.checkpoint_final != facts.checkpoint_observed:
+        return RecoveryProcessState.CHECKPOINT_MISMATCH
+    signal_exits = {-int(signal.SIGTERM), -int(signal.SIGKILL)}
+    if facts.os_returncode in signal_exits or (native is not None and facts.os_returncode == 0):
+        return RecoveryProcessState.CHECKPOINT_STOP
+    return RecoveryProcessState.NATURAL_COMPLETION
+
+
+def _codex_terminal_observation(content: bytes) -> _TerminalObservation:
+    identities: set[str] = set()
+    identity_records = 0
+    readable = True
+    completed = failed = False
+    for frame in content.splitlines():
+        try:
+            record = strict_json_loads(frame)
+            if not isinstance(record, dict) or not isinstance(record.get("type"), str):
+                raise TypeError("invalid native record")
+            kind = record["type"]
+            if kind not in {"thread.started", "turn.started", "turn.completed", "turn.failed",
+                            "item.started", "item.updated", "item.completed", "error"}:
+                readable = False
+            completed |= kind == "turn.completed"
+            failed |= kind in {"turn.failed", "error"}
+            if kind == "thread.started":
+                identity_records += 1
+                identity = record.get("thread_id")
+                if not isinstance(identity, str) or not identity.strip():
+                    raise ValueError("invalid native identity")
+                identities.add(identity)
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            readable = False
+    return _TerminalObservation(next(iter(identities)) if len(identities) == 1 else None,
+                                readable and len(identities) == 1 and identity_records == 1, completed, failed)
+
+
+
+NATIVE_FRAME_LIMIT = 1024 * 1024
+NATIVE_CAPTURE_LIMIT = 16 * 1024 * 1024
+
+
+@_dataclass(frozen=True)
+class _ClaudeSettingsObservation:
+    request_id: str
+    availability: str
+    model: str | None
+    effort: str | None
+    effort_available: bool
+    scope: str = "next_request"
+    source: str = "get_settings.applied"
+    line: int = 0
+    retained_sha256: str | None = None
+
+
+@_dataclass(frozen=True)
+class _ServedModelObservation:
+    session_id: str
+    model: str
+    line: int
+    retained_sha256: str
+    scope: str = "main_session"
+    source: str = "assistant.message.model"
+
+
+@_dataclass(frozen=True)
+class _ClaudeFrame:
+    retained: bytes
+    session_id: str | None = None
+    completion_seen: bool = False
+    failure_seen: bool = False
+    control_status: str | None = None
+    settings: _ClaudeSettingsObservation | None = None
+    served_model: str | None = None
+
+
+def _claude_control_bytes(kind: Literal["initialize", "get_settings"], request_id: str) -> bytes:
+    request: dict[str, Any] = {"subtype": kind}
+    if kind == "initialize":
+        request["hooks"] = None
+    return (json.dumps({"type": "control_request", "request_id": request_id,
+                        "request": request}, allow_nan=False) + "\n").encode("utf-8")
+
+
+def _claude_user_bytes(prompt: str) -> bytes:
+    return (json.dumps({"type": "user", "message": {"role": "user", "content": prompt},
+                        "parent_tool_use_id": None, "session_id": "default"},
+                       allow_nan=False) + "\n").encode("utf-8")
+
+
+def _claude_project_frame(frame: bytes, expected_id: str | None,
+                          stage: str) -> _ClaudeFrame:
+    record = strict_json_loads(frame)
+    if not isinstance(record, dict):
+        raise TypeError("native_frame_invalid")
+    kind = record.get("type")
+    if not isinstance(kind, str):
+        raise TypeError("native_frame_invalid")
+    if kind == "control_response":
+        response = record.get("response")
+        if (not isinstance(response, dict) or expected_id is None
+                or response.get("request_id") != expected_id
+                or not isinstance(response.get("subtype"), str)
+                or response.get("subtype") not in {"success", "error"}):
+            raise ValueError("native_control_invalid")
+        status = response["subtype"]
+        if stage == "initialize" and status != "success":
+            raise ValueError("native_initialize_failed")
+        safe: dict[str, Any] = {"subtype": status, "request_id": expected_id}
+        settings = None
+        if stage == "settings":
+            model = effort = None
+            effort_available = False
+            availability = "unavailable"
+            if status == "success":
+                body = response.get("response")
+                if not isinstance(body, dict):
+                    raise ValueError("native_settings_invalid")
+                applied = body.get("applied")
+                if applied is not None:
+                    if not isinstance(applied, dict):
+                        raise ValueError("native_settings_invalid")
+                    model = applied.get("model")
+                    effort = applied.get("effort")
+                    if (not isinstance(model, str) or not model.strip()
+                            or effort is not None and (not isinstance(effort, str)
+                                or effort not in {"low", "medium", "high", "xhigh", "max"})):
+                        raise ValueError("native_settings_invalid")
+                    effort_available = "effort" in applied
+                    availability = "complete" if effort_available else "partial"
+                    safe["response"] = {"applied": {"model": model}}
+                    if effort_available:
+                        safe["response"]["applied"]["effort"] = effort
+            settings = _ClaudeSettingsObservation(expected_id, availability, model, effort, effort_available)
+        elif stage != "initialize":
+            raise ValueError("native_control_invalid")
+        projected = {"type": "control_response", "response": safe}
+        return _ClaudeFrame((json.dumps(projected, allow_nan=False) + "\n").encode(),
+                            control_status=status, settings=settings)
+    if kind not in {"system", "assistant", "user", "result", "stream_event", "rate_limit_event"}:
+        raise ValueError("native_frame_unsupported")
+    identity = record.get("session_id")
+    if identity is not None and (not isinstance(identity, str) or not identity.strip() or identity == "default"):
+        raise ValueError("native_identity_invalid")
+    safe = {key: record[key] for key in (
+        "type", "subtype", "session_id", "parent_tool_use_id", "uuid", "message", "event",
+        "result", "is_error", "stop_reason", "usage", "total_cost_usd", "api_error_status",
+        "model", "cwd", "permissionMode", "claude_code_version", "duration_ms", "duration_api_ms",
+        "num_turns", "modelUsage", "permission_denials") if key in record}
+    if kind == "system":
+        if record.get("subtype") not in {"init", "task_started", "task_progress", "task_notification", "task_summary", "compact_boundary"}:
+            raise ValueError("native_frame_unsupported")
+        safe.pop("message", None)
+        safe.pop("event", None)
+    for key in ("model", "cwd", "permissionMode", "claude_code_version"):
+        if key in safe and not isinstance(safe[key], str):
+            raise TypeError("native_field_invalid")
+    if kind == "stream_event":
+        event = record.get("event")
+        if (not isinstance(event, dict) or not isinstance(event.get("type"), str)
+                or event["type"] not in {"message_start", "message_delta", "message_stop",
+                                         "content_block_start", "content_block_delta", "content_block_stop"}):
+            raise ValueError("native_event_invalid")
+        safe["event"] = {key: event[key] for key in (
+            "type", "index", "message", "delta", "content_block", "usage") if key in event}
+        event_projection = safe["event"]
+        if "message" in event:
+            event_message = event["message"]
+            if (not isinstance(event_message, dict) or event_message.get("role") != "assistant"
+                    or event_message.get("content") != []
+                    or "model" in event_message and not isinstance(event_message["model"], str)):
+                raise ValueError("native_event_message_invalid")
+            event_projection["message"] = {key: event_message[key] for key in (
+                "type", "id", "role", "model", "content", "usage", "stop_reason", "stop_sequence") if key in event_message}
+        if "content_block" in event:
+            content_block = event["content_block"]
+            if (not isinstance(content_block, dict) or not isinstance(content_block.get("type"), str)
+                    or content_block["type"] not in {"text", "tool_use", "thinking", "redacted_thinking"}):
+                raise ValueError("native_event_block_invalid")
+            event_projection["content_block"] = {key: content_block[key] for key in (
+                "type", "text", "id", "name", "input", "thinking", "signature", "data") if key in content_block}
+        if "delta" in event:
+            delta = event["delta"]
+            if not isinstance(delta, dict):
+                raise TypeError("native_event_delta_invalid")
+            if event["type"] == "content_block_delta" and delta.get("type") not in (
+                    "text_delta", "input_json_delta", "thinking_delta", "signature_delta"):
+                raise ValueError("native_event_delta_invalid")
+            event_projection["delta"] = {key: delta[key] for key in (
+                "type", "text", "partial_json", "thinking", "signature", "stop_reason", "stop_sequence") if key in delta}
+
+    served = None
+    if kind in {"assistant", "user"}:
+        message = record.get("message")
+        if not isinstance(message, dict) or message.get("role") != kind:
+            raise ValueError("native_message_invalid")
+        safe["message"] = {key: message[key] for key in (
+            "role", "id", "model", "content", "usage", "stop_reason", "stop_sequence", "type") if key in message}
+        content = message.get("content")
+        if isinstance(content, list):
+            blocks = []
+            for item in content:
+                if not isinstance(item, dict) or not isinstance(item.get("type"), str):
+                    raise TypeError("native_content_invalid")
+                if item["type"] not in {"text", "tool_use", "tool_result", "thinking", "redacted_thinking", "image"}:
+                    raise ValueError("native_content_unsupported")
+                blocks.append({key: item[key] for key in (
+                    "type", "text", "id", "name", "input", "tool_use_id", "content", "is_error",
+                    "thinking", "signature", "data", "source") if key in item})
+            safe["message"]["content"] = blocks
+        elif not isinstance(content, str):
+            raise TypeError("native_content_invalid")
+        if kind == "assistant" and record.get("parent_tool_use_id") is None:
+            model = message.get("model")
+            if model is not None and (not isinstance(model, str) or not model.strip()):
+                raise ValueError("native_model_invalid")
+            served = model
+    completion = failure = False
+    if kind == "result":
+        if not isinstance(record.get("is_error"), bool) or identity is None:
+            raise ValueError("native_result_invalid")
+        failure = record["is_error"]
+        if not failure and not isinstance(record.get("result"), str):
+            raise ValueError("native_result_invalid")
+        completion = not failure
+    main_session = record.get("parent_tool_use_id") is None
+    return _ClaudeFrame((json.dumps(safe, allow_nan=False) + "\n").encode("utf-8"),
+                        identity if main_session else None, completion and main_session,
+                        failure and main_session, served_model=served)
+
+
+
+@_dataclass(frozen=True)
+class _CodexContextObservation:
+    model: str
+    effort: str | None
+    effort_available: bool
+    cwd: str
+    workspace_roots: tuple[str, ...] | None
+    turn_id: str | None
+    approval_policy: str | None
+    sandbox_type: str | None
+    network_access: bool | None
+    writable_roots: tuple[str, ...] | None
+    exclude_tmpdir_env_var: bool | None
+    exclude_slash_tmp: bool | None
+    line: int
+    scope: str
+    source_line: int
+    retained_sha256: str | None = None
+    artifact: str = "codex-context.jsonl"
+    availability: str = "partial"
+    source: str = "turn_context"
+
+
+@_dataclass(frozen=True)
+class _CodexProjection:
+    availability: str
+    reason: str | None = None
+    thread_id: str | None = None
+    root_session_id: str | None = None
+    cli_version: str | None = None
+    session_cwd: str | None = None
+    contexts: tuple[_CodexContextObservation, ...] = ()
+    retained: tuple[bytes, ...] = ()
+
+
+def _collect_codex_context(home: Path, thread_id: str | None) -> _CodexProjection:
+    if thread_id is None or re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", thread_id) is None:
+        return _CodexProjection("unavailable", "missing_thread_identity")
+    if home.is_symlink() or (home / "sessions").is_symlink():
+        return _CodexProjection("unavailable", "symlinked_rollout_root", thread_id)
+    candidates: list[Path] = []
+    for directory, directories, files in os.walk(home / "sessions", followlinks=False):
+        directories[:] = [name for name in directories if not (Path(directory) / name).is_symlink()]
+        candidates.extend(Path(directory) / name for name in files
+                          if name.endswith(f"-{thread_id}.jsonl"))
+    if len(candidates) != 1:
+        return _CodexProjection("unavailable", "ambiguous_rollout" if candidates else "missing_rollout", thread_id)
+    try:
+        content = recovery_file_bytes(home, str(candidates[0].relative_to(home)), max_bytes=NATIVE_CAPTURE_LIMIT)
+        if not content.endswith(b"\n"):
+            raise ValueError("unflushed_rollout")
+        meta: dict[str, Any] | None = None
+        contexts: list[_CodexContextObservation] = []
+        retained: list[bytes] = []
+        for line, frame in enumerate(content.splitlines(), 1):
+            if len(frame) > NATIVE_FRAME_LIMIT:
+                raise ValueError("oversized_rollout")
+            record = strict_json_loads(frame)
+            if (not isinstance(record, dict) or not isinstance(record.get("timestamp"), str)
+                    or not isinstance(record.get("type"), str)
+                    or "ordinal" in record and (type(record["ordinal"]) is not int or record["ordinal"] < 0)):
+                raise ValueError("unsupported_rollout")
+            kind = record["type"]
+            if kind not in {"session_meta", "turn_context"}:
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                raise TypeError("invalid_rollout")
+            if kind == "session_meta":
+                if meta is not None or payload.get("id") != thread_id:
+                    raise ValueError("mismatched_session")
+                if payload.get("cli_version") != "0.160.1":
+                    raise ValueError("unsupported_version")
+                if (not isinstance(payload.get("session_id"), str) or not payload["session_id"]
+                        or not isinstance(payload.get("cwd"), str) or not Path(payload["cwd"]).is_absolute()):
+                    raise ValueError("invalid_session")
+                meta = {key: payload[key] for key in ("id", "session_id", "cli_version", "cwd")}
+                retained.append((json.dumps({"type": "session_meta", "payload": meta},
+                                            allow_nan=False) + "\n").encode("utf-8"))
+                continue
+            if meta is None:
+                raise ValueError("context_without_session")
+            model, cwd_value = payload.get("model"), payload.get("cwd")
+            turn = payload.get("turn_id")
+            if (not isinstance(model, str) or not model.strip() or not isinstance(cwd_value, str)
+                    or not Path(cwd_value).is_absolute() or turn is not None and (not isinstance(turn, str) or not turn)):
+                raise ValueError("invalid_context")
+            roots = payload.get("workspace_roots")
+            if roots is not None and (not isinstance(roots, list)
+                    or any(not isinstance(root, str) or not Path(root).is_absolute() for root in roots)):
+                raise ValueError("invalid_roots")
+            effort = payload.get("effort")
+            effort_available = "effort" in payload and (effort is None or isinstance(effort, str))
+            approval = payload.get("approval_policy")
+            if not isinstance(approval, str) or approval not in {"untrusted", "on-request", "on-failure", "never"}:
+                approval = None
+            sandbox = payload.get("sandbox_policy")
+            sandbox_type = network = writable = exclude_tmp = exclude_slash = None
+            if isinstance(sandbox, dict):
+                kind = sandbox.get("type")
+                if isinstance(kind, str) and kind in {"read-only", "workspace-write", "danger-full-access", "external-sandbox"}:
+                    sandbox_type = kind
+                    raw_network = sandbox.get("network_access")
+                    if kind in {"read-only", "workspace-write"} and isinstance(raw_network, bool):
+                        network = raw_network
+                    if kind == "external-sandbox" and isinstance(raw_network, str) and raw_network in {"enabled", "restricted"}:
+                        network = raw_network == "enabled"
+                    raw_writable = sandbox.get("writable_roots")
+                    if kind == "workspace-write" and isinstance(raw_writable, list) and all(
+                            isinstance(root, str) and Path(root).is_absolute() for root in raw_writable):
+                        writable = tuple(raw_writable)
+                    if kind == "workspace-write":
+                        exclude_tmp = sandbox.get("exclude_tmpdir_env_var")
+                        exclude_slash = sandbox.get("exclude_slash_tmp")
+                        if not isinstance(exclude_tmp, bool):
+                            exclude_tmp = None
+                        if not isinstance(exclude_slash, bool):
+                            exclude_slash = None
+            context = _CodexContextObservation(
+                model, effort if isinstance(effort, str) else None, effort_available,
+                cwd_value, tuple(roots) if roots is not None else None, turn, approval,
+                sandbox_type, network, writable, exclude_tmp, exclude_slash, len(retained) + 1,
+                "turn" if turn is not None else "session_unknown_turn", line)
+            projected = (json.dumps({"type": "recovery.codex_context", "observation": asdict(context)},
+                                    allow_nan=False) + "\n").encode("utf-8")
+            retained.append(projected)
+            contexts.append(replace(context, retained_sha256=hashlib.sha256(projected).hexdigest()))
+        if meta is None:
+            raise ValueError("missing_session")
+        return _CodexProjection("partial" if contexts else "unavailable",
+                                None if contexts else "missing_context", thread_id,
+                                meta["session_id"], meta["cli_version"], meta["cwd"], tuple(contexts), tuple(retained))
+    except (OSError, TypeError, ValueError, UnicodeError, RecursionError):
+        return _CodexProjection("unavailable", "unreadable_or_unsupported_rollout", thread_id)
+
 
 
 def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
@@ -6875,7 +7309,7 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                 return status is not None
         return proc.poll() is not None
 
-    def observe_recovery_process(proc: subprocess.Popen[bytes], capture: RecoveryCapture,
+    def observe_fixed_recovery_process(proc: subprocess.Popen[bytes], capture: RecoveryCapture,
                                  input_bytes: bytes | None, start: float) -> InvocationOutcome:
         deadline = time.monotonic() + timeout
         state = RecoveryProcessState.COMPLETE
@@ -7093,12 +7527,391 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                                               returncode=proc.returncode,
                                               elapsed_ms=elapsed, metadata=metadata)
 
+    def observe_recovery_process(proc: subprocess.Popen[bytes], capture: RecoveryCapture,
+                                 input_bytes: bytes | None, start: float) -> InvocationOutcome:
+        deadline = phase_deadline
+        lifecycle = _LifecycleFacts()
+        error: str | None = None
+        out, err = bytearray(), bytearray()
+        signal_sent: int | None = None
+        deadline_observed = False
+        interruption: BaseException | None = None
+        native = plan.native_recovery
+        assert native is not None
+        selector = selectors.DefaultSelector()
+        claude = native.provider == "claude"
+        stage = "initialize" if claude else "prompt"
+        request_id = "recovery-init-" + os.urandom(16).hex() if claude else None
+        assert input_bytes is not None
+        pending = _claude_control_bytes("initialize", request_id) if request_id is not None else input_bytes
+        frame_buffer = bytearray()
+        poisoned = False
+        completion_seen = failure_seen = False
+        identities: set[str] = set()
+        settings: list[_ClaudeSettingsObservation] = []
+        served_models: list[_ServedModelObservation] = []
+        retained_lines = 0
+        omitted_stderr_bytes = 0
+        offset = 0
+        stdin = proc.stdin
+
+        def block(state: RecoveryProcessState, detail: str | None = None) -> None:
+            nonlocal error
+            if lifecycle.first_blocker is None:
+                lifecycle.first_blocker = state
+                error = detail
+
+        def pump(wait: float) -> None:
+            nonlocal offset, stdin, pending, stage, request_id, poisoned
+            nonlocal completion_seen, failure_seen, retained_lines, omitted_stderr_bytes
+            for key, _ in selector.select(max(0, wait)):
+                pipe = stdin if key.data == "stdin" else (proc.stdout if key.data == "stdout" else proc.stderr)
+                assert pipe is not None
+                if key.data == "stdin":
+                    try:
+                        written = os.write(pipe.fileno(), pending[offset:offset + 65536])
+                    except BlockingIOError:
+                        continue
+                    if written <= 0:
+                        raise OSError("stdin made no progress")
+                    offset += written
+                    if offset == len(pending):
+                        selector.unregister(pipe)
+                        if stage == "prompt":
+                            pipe.close()
+                            stdin = None
+                            stage = "closed"
+                else:
+                    try:
+                        chunk = os.read(pipe.fileno(), 65536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(pipe)
+                        pipe.close()
+                        if key.data == "stdout":
+                            lifecycle.stdout_eof = True
+                        else:
+                            lifecycle.stderr_eof = True
+                    elif key.data == "stdout":
+                        if not claude:
+                            out.extend(chunk)
+                            continue
+                        if poisoned:
+                            continue
+                        frame_buffer.extend(chunk)
+                        while b"\n" in frame_buffer:
+                            frame, _, rest = frame_buffer.partition(b"\n")
+                            frame_buffer[:] = rest
+                            if len(frame) > NATIVE_FRAME_LIMIT:
+                                poisoned = True
+                                block(RecoveryProcessState.CAPTURE_FAILED, "native_frame_oversized")
+                                break
+                            try:
+                                projected = _claude_project_frame(bytes(frame), request_id, stage)
+                            except (TypeError, ValueError, UnicodeError, RecursionError):
+                                poisoned = True
+                                block(RecoveryProcessState.CAPTURE_FAILED, "native_frame_invalid")
+                                break
+                            completion_seen |= projected.completion_seen
+                            failure_seen |= projected.failure_seen
+                            if projected.session_id is not None:
+                                identities.add(projected.session_id)
+                            if len(identities) > 1 or len(out) + len(projected.retained) > NATIVE_CAPTURE_LIMIT:
+                                poisoned = True
+                                block(RecoveryProcessState.CAPTURE_FAILED, "native_capture_invalid")
+                                break
+                            retained_lines += 1
+                            out.extend(projected.retained)
+                            if projected.settings is not None:
+                                settings.append(replace(projected.settings, line=retained_lines,
+                                                        retained_sha256=hashlib.sha256(projected.retained).hexdigest()))
+                            if projected.served_model is not None and projected.session_id is not None:
+                                served_models.append(_ServedModelObservation(
+                                    projected.session_id, projected.served_model, retained_lines,
+                                    hashlib.sha256(projected.retained).hexdigest()))
+                            if projected.control_status is not None:
+                                if offset != len(pending):
+                                    poisoned = True
+                                    block(RecoveryProcessState.CAPTURE_FAILED, "native_control_early")
+                                    break
+                                if stage == "initialize":
+                                    stage = "settings"
+                                    request_id = "recovery-settings-" + os.urandom(16).hex()
+                                    pending = _claude_control_bytes("get_settings", request_id)
+                                else:
+                                    stage = "prompt"
+                                    request_id = None
+                                    assert input_text is not None
+                                    pending = _claude_user_bytes(input_text)
+                                offset = 0
+                                if stdin is None:
+                                    poisoned = True
+                                    block(RecoveryProcessState.CAPTURE_FAILED, "native_stdin_closed")
+                                    break
+                                selector.register(stdin, selectors.EVENT_WRITE, "stdin")
+                        if len(frame_buffer) > NATIVE_FRAME_LIMIT:
+                            poisoned = True
+                            block(RecoveryProcessState.CAPTURE_FAILED, "native_frame_oversized")
+                        if poisoned:
+                            frame_buffer.clear()
+                    elif claude:
+                        omitted_stderr_bytes += len(chunk)
+                    else:
+                        err.extend(chunk)
+
+        try:
+            for pipe, name in ((proc.stdout, "stdout"), (proc.stderr, "stderr")):
+                assert pipe is not None
+                os.set_blocking(pipe.fileno(), False)
+                selector.register(pipe, selectors.EVENT_READ, name)
+            assert stdin is not None
+            os.set_blocking(stdin.fileno(), False)
+            selector.register(stdin, selectors.EVENT_WRITE, "stdin")
+            while True:
+                if lifecycle.first_blocker is not None:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    deadline_observed = True
+                    block(RecoveryProcessState.DEADLINE)
+                    break
+                if process_leader_exited(proc):
+                    if capture.checkpoint is not None:
+                        block(RecoveryProcessState.NATURAL_COMPLETION)
+                    break
+                if capture.checkpoint is not None:
+                    try:
+                        candidate = recovery_file_bytes(cwd, capture.checkpoint.checkpoint_path)
+                    except FileNotFoundError:
+                        candidate = None
+                    if candidate is not None:
+                        if not capture.checkpoint.matches(candidate):
+                            block(RecoveryProcessState.CHECKPOINT_MISMATCH)
+                            break
+                        lifecycle.checkpoint_observed = candidate
+                        try:
+                            (capture.directory / "checkpoint-observed.bin").write_bytes(candidate)
+                        except OSError:
+                            block(RecoveryProcessState.CAPTURE_FAILED,
+                                  "native_artifact_failed")
+                            break
+                        lifecycle.before_deadline_after_capture = time.monotonic() < deadline
+                        lifecycle.live_after_capture = not process_leader_exited(proc)
+                        if not lifecycle.before_deadline_after_capture:
+                            deadline_observed = True
+                            block(RecoveryProcessState.DEADLINE)
+                        elif not lifecycle.live_after_capture:
+                            block(RecoveryProcessState.NATURAL_COMPLETION)
+                        break
+                try:
+                    pump(min(PROCESS_LEADER_POLL_INTERVAL_S, remaining))
+                except Exception:
+                    block(RecoveryProcessState.CAPTURE_FAILED,
+                          "native_pipe_failed")
+                    break
+        except BaseException as exc:
+            block(RecoveryProcessState.OBSERVER_FAILED,
+                  "native_observer_failed")
+            if not isinstance(exc, Exception):
+                interruption = exc
+        group_cleanup: dict[str, Any] = {"status": "not_needed"}
+        group_observation = "cleanup_exception"
+        try:
+            if lifecycle.checkpoint_observed is not None and lifecycle.first_blocker is None:
+                lifecycle.before_deadline_before_term = time.monotonic() < deadline
+                lifecycle.live_before_term = not process_leader_exited(proc)
+                if not lifecycle.before_deadline_before_term:
+                    deadline_observed = True
+                    block(RecoveryProcessState.DEADLINE)
+                elif not lifecycle.live_before_term:
+                    block(RecoveryProcessState.NATURAL_COMPLETION)
+                else:
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                        lifecycle.term_requested = True
+                        signal_sent = int(signal.SIGTERM)
+                    except OSError:
+                        block(RecoveryProcessState.SIGNAL_FAILED,
+                              "native_signal_failed")
+            if stdin is not None:
+                try:
+                    selector.unregister(stdin)
+                except KeyError:
+                    pass
+                stdin.close()
+                stdin = None
+            if lifecycle.term_requested:
+                drain_deadline = time.monotonic() + PROCESS_PIPE_DRAIN_GRACE_S
+                while not (process_leader_exited(proc) and lifecycle.stdout_eof and lifecycle.stderr_eof):
+                    remaining = drain_deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    pump(min(PROCESS_LEADER_POLL_INTERVAL_S, remaining))
+            group_cleanup = kill_process_group(proc.pid)
+            if group_cleanup["status"] in {"unsupported", "warning"}:
+                block(RecoveryProcessState.CLEANUP_FAILED)
+                if proc.poll() is None:
+                    proc.kill()
+            drain_deadline = time.monotonic() + PROCESS_PIPE_DRAIN_GRACE_S
+            while not (lifecycle.stdout_eof and lifecycle.stderr_eof):
+                remaining = drain_deadline - time.monotonic()
+                if remaining <= 0:
+                    block(RecoveryProcessState.CAPTURE_FAILED)
+                    break
+                pump(min(PROCESS_LEADER_POLL_INTERVAL_S, remaining))
+            proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+            lifecycle.leader_reaped = True
+            lifecycle.os_returncode = proc.returncode
+            group_deadline = time.monotonic() + PROCESS_PIPE_DRAIN_GRACE_S
+            while True:
+                lifecycle.group_stopped, group_observation = recovery_group_stopped(proc.pid)
+                if lifecycle.group_stopped or time.monotonic() >= group_deadline:
+                    break
+                time.sleep(PROCESS_LEADER_POLL_INTERVAL_S)
+            if lifecycle.checkpoint_observed is not None:
+                assert capture.checkpoint is not None
+                try:
+                    lifecycle.checkpoint_final = recovery_file_bytes(cwd, capture.checkpoint.checkpoint_path)
+                except FileNotFoundError:
+                    pass
+                if lifecycle.checkpoint_final is not None:
+                    try:
+                        (capture.directory / "checkpoint-final.bin").write_bytes(lifecycle.checkpoint_final)
+                    except OSError:
+                        lifecycle.artifacts_ready = False
+                        error = "native_artifact_failed"
+        except BaseException as exc:
+            block(RecoveryProcessState.CLEANUP_FAILED,
+                  "native_cleanup_failed")
+            if not isinstance(exc, Exception):
+                interruption = exc
+            kill_process_group(proc.pid)
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+            lifecycle.leader_reaped = True
+            lifecycle.os_returncode = proc.returncode
+        finally:
+            selector.close()
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None and not pipe.closed:
+                    pipe.close()
+        lifecycle.input_delivered = stage == "closed"
+        if claude:
+            if frame_buffer:
+                poisoned = True
+                block(RecoveryProcessState.CAPTURE_FAILED, "native_frame_truncated")
+            if stage != "closed":
+                poisoned = True
+                block(RecoveryProcessState.CAPTURE_FAILED, "native_input_incomplete")
+            terminal = _TerminalObservation(
+                next(iter(identities)) if len(identities) == 1 else None,
+                not poisoned and len(identities) == 1, completion_seen, failure_seen)
+            observation = {"schema_version": 2, "provider": "claude", "session_id": terminal.session_id,
+                           "invocation_id": proc.pid, "phase": capture.directory.name,
+                           "source_artifact": "stdout.bin",
+                           "availability": "unavailable" if poisoned else "partial",
+                           "settings": [asdict(item) for item in settings],
+                           "served_models": [asdict(item) for item in served_models],
+                           "stdout_contract": "claude-allowlisted-jsonl-v2",
+                           "stderr_contract": "omitted-v2", "omitted_stderr_bytes": omitted_stderr_bytes,
+                           "permission_parity": "unverified", "adoption": "independent_review_required"}
+            try:
+                write_json(capture.directory / "native.json", observation)
+            except Exception:
+                lifecycle.artifacts_ready = False
+                error = "native_artifact_failed"
+        else:
+            terminal = _codex_terminal_observation(bytes(out))
+            home = env.get("CODEX_HOME") if env is not None else None
+            if "--ephemeral" in argv:
+                projection = _CodexProjection("unavailable", "explicit_ephemeral", terminal.session_id)
+            elif home is None:
+                projection = _CodexProjection("unavailable", "missing_isolated_home", terminal.session_id)
+            else:
+                projection = _collect_codex_context(Path(home), terminal.session_id)
+            try:
+                (capture.directory / "codex-context.jsonl").write_bytes(b"".join(projection.retained))
+                projected_metadata = {key: value for key, value in asdict(projection).items() if key != "retained"}
+                write_json(capture.directory / "native.json", {
+                    "schema_version": 2, "provider": "codex",
+                    "invocation_id": proc.pid, "phase": capture.directory.name, **projected_metadata,
+                    "source_artifact": "codex-context.jsonl",
+                    "retained_sha256": hashlib.sha256(b"".join(projection.retained)).hexdigest(),
+                    "source": "codex-rollout-0.160.1-allowlist-v2",
+                    "unsupported_permission_facets": ["permission_profile", "active_permission_profile",
+                                                      "file_system_sandbox_policy"],
+                    "context_scope": "CLI context, not every inference request"})
+            except Exception:
+                lifecycle.artifacts_ready = False
+                error = "native_artifact_failed"
+        for name, content in (("stdout.bin", bytes(out)), ("stderr.bin", bytes(err))):
+            try:
+                (capture.directory / name).write_bytes(content)
+            except Exception:
+                lifecycle.artifacts_ready = False
+                error = "native_artifact_failed"
+        state = _recovery_state(lifecycle, terminal, checkpoint=capture.checkpoint, native=native)
+        facts = {"state": state.value, "pid": proc.pid, "process_group": proc.pid,
+                 "os_returncode": proc.returncode, "signal_sent": signal_sent,
+                 "leader_reaped": lifecycle.leader_reaped,
+                 "pipes_drained": lifecycle.stdout_eof and lifecycle.stderr_eof,
+                 "group_stopped": lifecycle.group_stopped, "group_observation": group_observation,
+                 "process_group_cleanup": group_cleanup,
+                 "checkpoint_observed_live": lifecycle.live_after_capture,
+                 "checkpoint_sha256": hashlib.sha256(lifecycle.checkpoint_observed).hexdigest()
+                 if lifecycle.checkpoint_observed is not None else None,
+                 "compatibility_returncode": 124 if deadline_observed else proc.returncode,
+                 "error": error,
+                 "raw_sha256": {"stdout.bin": hashlib.sha256(out).hexdigest(),
+                                "stderr.bin": hashlib.sha256(err).hexdigest()},
+                 "raw_files_present": {name: (capture.directory / name).is_file()
+                                       for name in ("stdout.bin", "stderr.bin")}}
+        facts.update({"schema_version": 2, "native_provider": native.provider,
+                      "termination_cause": None,
+                      "stdout_contract": "claude-allowlisted-jsonl-v2" if claude else "raw-v2",
+                      "stderr_contract": "omitted-v2" if claude else "raw-v2",
+                      "omitted_stderr_bytes": omitted_stderr_bytes,
+                      "guards": {key: value for key, value in asdict(lifecycle).items()
+                                 if key not in {"checkpoint_observed", "checkpoint_final", "first_blocker"}},
+                      "first_blocker": lifecycle.first_blocker.value if lifecycle.first_blocker else None,
+                      "checkpoint_final_sha256": hashlib.sha256(lifecycle.checkpoint_final).hexdigest()
+                      if lifecycle.checkpoint_final is not None else None,
+                      "terminal": asdict(terminal)})
+        try:
+            _atomic_write_text(capture.directory / "process.json",
+                               json.dumps(facts, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+        except Exception:
+            capture.state = None
+            try:
+                (capture.directory / "process.json").unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise RuntimeError("native_process_publication_failed") from None
+        capture.state = state
+        if interruption is not None:
+            raise interruption
+        stdout, stdout_valid = _wire_text(bytes(out), redact_stdout)
+        stderr, stderr_valid = _wire_text(bytes(err), redact_stderr)
+        metadata = {"recovery_process": facts, "process_group_cleanup": group_cleanup,
+                    "stdout_utf8_valid": stdout_valid, "stderr_utf8_valid": stderr_valid}
+        elapsed = int((time.time() - start) * 1000)
+        if deadline_observed:
+            return InvocationOutcome.from_timeout(stdout=stdout, stderr=stderr[:4000],
+                                                  elapsed_ms=elapsed, metadata=metadata)
+        assert proc.returncode is not None
+        return InvocationOutcome.from_process(stdout=stdout, stderr=stderr[:4000],
+                                              returncode=proc.returncode,
+                                              elapsed_ms=elapsed, metadata=metadata)
+
     try:
         input_bytes = input_text.encode("utf-8") if input_text is not None else None
     except UnicodeEncodeError:
         return InvocationOutcome.spawn_failed(
             stderr="subprocess stdin is not valid UTF-8", elapsed_ms=0)
     start = time.time()
+    phase_deadline = time.monotonic() + timeout if plan.native_recovery is not None else 0.0
     capture = plan.recovery_capture
     if capture is not None:
         execution_environment = os.environ if env is None else env
@@ -7127,6 +7940,32 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                 wrapper["executable_sha256"] = hashlib.sha256(Path(executable).read_bytes()).hexdigest()
             except OSError:
                 pass
+        if plan.native_recovery is not None:
+            cwd_stat = cwd.stat()
+            wrapper["workspace_identity"] = {
+                "lexical_cwd": str(cwd.absolute()), "canonical_cwd": str(cwd.resolve(strict=True)),
+                "device": cwd_stat.st_dev, "inode": cwd_stat.st_ino}
+            loaded_files = []
+            for module_name in ("skill_benchmark", "invocation_contracts"):
+                loaded = sys.modules[module_name].__file__
+                if loaded is not None:
+                    try:
+                        loaded_files.append({"module": module_name, "path": str(Path(loaded).resolve()),
+                                             "sha256": hashlib.sha256(Path(loaded).read_bytes()).hexdigest()})
+                    except OSError:
+                        pass
+            wrapper["loaded_files"] = loaded_files
+            wrapper["installed_distribution"] = None
+            try:
+                distribution = importlib.metadata.distribution("skill-eval-harness-ext")
+            except importlib.metadata.PackageNotFoundError:
+                pass
+            else:
+                entrypoints = [entry.value for entry in distribution.entry_points
+                               if entry.group == "console_scripts" and entry.name == "skill-benchmark"]
+                wrapper["installed_distribution"] = {
+                    "name": distribution.metadata["Name"], "version": distribution.version,
+                    "skill_benchmark_entrypoints": entrypoints}
         write_json(capture.directory / "invocation.json", wrapper)
     try:
         proc = subprocess.Popen(
@@ -7153,6 +7992,8 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
             elapsed_ms=int((time.time() - start) * 1000),
         )
     if capture is not None:
+        if plan.native_recovery is None:
+            return observe_fixed_recovery_process(proc, capture, input_bytes, start)
         return observe_recovery_process(proc, capture, input_bytes, start)
     deadline = time.monotonic() + timeout
     communication_started = False
@@ -11286,7 +12127,8 @@ def run_recovery_case(pt: PreparedTask, base: Path, backend: AgentBackend, *,
     evidence = base / "recovery"
     evidence.mkdir()
     record: dict[str, Any] = {
-        "schema_version": 1, "status": "failed", "failure": None,
+        "schema_version": 2 if backend.name in {"codex", "claude"} else 1,
+        "status": "failed", "failure": None,
         "evidence_directory": str(evidence.resolve()), "phases": [],
         "requested_model": model, "requested_effort": effort,
         "runtime_model": None, "runtime_effort": None,
@@ -11350,8 +12192,17 @@ def run_recovery_case(pt: PreparedTask, base: Path, backend: AgentBackend, *,
                         if checkpoint is None and not isinstance(outcome, Completed):
                             record["failure"] = "phase_invocation_failed"
                             return False
+                    except RuntimeError as exc:
+                        if str(exc) == "native_process_publication_failed":
+                            phase_record["state"] = "capture_failed"
+                            record["failure"] = "capture_failed"
+                            return False
+                        raise
                     finally:
-                        phase_record["state"] = capture.state.value if capture.state else "no_process_evidence"
+                        if capture.state is not None:
+                            phase_record["state"] = capture.state.value
+                        elif phase_record["state"] is None:
+                            phase_record["state"] = "no_process_evidence"
                         forbidden = workspace / case.forbidden_path
                         if workspace.resolve() not in forbidden.parent.resolve().parents and forbidden.parent.resolve() != workspace.resolve():
                             raise ValueError("forbidden path parent escapes workspace")
@@ -11698,10 +12549,14 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
     harness repo cwd."""
     if output_format not in {"json", "stream-json"}:
         raise ValueError(f"unsupported claude output_format {output_format!r}")
+    if recovery_capture is not None:
+        output_format = "stream-json"
     argv = [claude_bin, "-p", "--output-format", output_format]
     if output_format == "stream-json":
         argv.append("--verbose")
     argv.append("--no-session-persistence")
+    if recovery_capture is not None:
+        argv += ["--input-format", "stream-json"]
     isolation_args = CLAUDE_ISOLATION_ARGS[isolation]
     argv += isolation_args
     if model:
@@ -11718,6 +12573,7 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
             cwd=cwd_path,
             timeout_s=timeout,
             recovery_capture=recovery_capture,
+            native_recovery=NativeRecoveryConfig("claude") if recovery_capture is not None else None,
         ))
 
     if cwd is None:
@@ -12175,7 +13031,7 @@ def codex_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | N
         argv += ["--model", model]
     if "--skip-git-repo-check" not in argv:
         argv.append("--skip-git-repo-check")
-    if "--ephemeral" not in argv:
+    if recovery_capture is None and "--ephemeral" not in argv:
         argv.append("--ephemeral")
     if "--ignore-user-config" not in argv:
         argv.append("--ignore-user-config")
@@ -12224,6 +13080,7 @@ def codex_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | N
             redact_output=redact_host_paths,
             redact_stdout=False,
             recovery_capture=recovery_capture,
+            native_recovery=NativeRecoveryConfig("codex") if recovery_capture is not None else None,
         ))
         last_message_found = last_message.exists()
         last_message_utf8_valid = True

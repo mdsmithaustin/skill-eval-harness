@@ -146,3 +146,25 @@ class ReachedExitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NativeRecoveryPlanTests(unittest.TestCase):
+    def test_native_configuration_is_closed_and_requires_capture_and_prompt(self):
+        from invocation_contracts import NativeRecoveryConfig, RecoveryCapture
+        with self.assertRaisesRegex(ValueError, "provider must be"):
+            NativeRecoveryConfig("other")
+        for capture, prompt in ((None, "prompt"), (RecoveryCapture(Path("evidence")), None),
+                                (RecoveryCapture(Path("evidence")), "")):
+            with self.subTest(capture=capture, prompt=prompt), self.assertRaisesRegex(ValueError, "requires a capture and prompt"):
+                ProcessInvocationPlan.from_values(["codex"], input_text=prompt, cwd="workspace",
+                    timeout_s=1, recovery_capture=capture, native_recovery=NativeRecoveryConfig("codex"))
+
+    def test_native_claude_rejects_conflicting_input_and_callback_routes_before_spawn(self):
+        from invocation_contracts import NativeRecoveryConfig, RecoveryCapture
+        valid = ["claude", "--input-format", "stream-json", "--output-format", "stream-json"]
+        for argv in (["claude"], valid + ["--input-format", "text"], valid + ["--input-format=text"],
+                     valid + ["--permission-prompt-tool", "stdio"], valid + ["--sdk-url=url"]):
+            with self.subTest(argv=argv), self.assertRaisesRegex(ValueError, "native Claude recovery"):
+                ProcessInvocationPlan.from_values(argv, input_text="prompt", cwd="workspace",
+                    timeout_s=1, recovery_capture=RecoveryCapture(Path("evidence")),
+                    native_recovery=NativeRecoveryConfig("claude"))

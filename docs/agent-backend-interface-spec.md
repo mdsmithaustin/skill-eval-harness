@@ -6,6 +6,7 @@ This spec captures the shared adapter shape now used by Claude, Codex, Gemini CL
 
 The answer-output, grading, and normalized telemetry descriptions below apply to ordinary answer rows.
 Optional recovery rows through `run-agent` or its `run-codex` and `run-claude` wrappers retain `recovery.json` and raw snapshots instead.
+Native V2 preserves raw Codex streams, but filters Claude stdout and omits Claude stderr.
 The [recovery reference](recovery.md) defines their separate lifecycle and consumer evidence limits.
 
 ## Problem
@@ -62,6 +63,12 @@ The point of the adapter work is not only feature parity. The refactor should ma
 
 ## Current Claude features
 
+The table describes ordinary routes. Native recovery V2 retains `--no-session-persistence` and uses `stream-json` stdin for correlated `initialize`, `get_settings`, one original-user envelope, and EOF.
+Its next-request settings and main-session served model observations remain separate.
+The adapter selects this prototype automatically for recovery capture, without a runtime adoption gate.
+Permission parity remains unverified and requires independent source and control review before adoption for real task input.
+See [native observations](recovery.md#native-observations) for the retained fields and limits.
+
 | Surface | Current Claude behavior |
 |---|---|
 | Answer runs | `skill-benchmark run-claude` runs prepared rows through `claude -p --output-format stream-json --verbose --no-session-persistence --setting-sources project --strict-mcp-config --settings '{"disableBundledSkills":true,"autoMemoryEnabled":false}'`. |
@@ -85,6 +92,10 @@ The point of the adapter work is not only feature parity. The refactor should ma
 | Tool replay | Available through `run-subagent`'s default Claude backend, not the `run-claude` CLI path. |
 
 ## Codex today and parity gap
+
+The table describes ordinary routes. Native recovery V2 omits only the adapter-added `--ephemeral` to extract scoped CLI context before isolated-home cleanup.
+A supplied `--ephemeral` stays present and leaves native context metadata unavailable.
+The retained rollout projection does not establish every inference request or permission enforcement.
 
 | Surface | Codex today | Needed for Claude parity |
 |---|---|---|

@@ -186,7 +186,20 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
                                    ("exit-handler", "json", "natural_completion"),
                                    ("timeout", "json", "deadline")):
             with self.subTest(mode=mode, match=match), tempfile.TemporaryDirectory() as temporary:
-                result, base = self.run_case(Path(temporary), mode=mode, match=match, timeout=1)
+                processes = []
+                popen, read = sb.subprocess.Popen, sb.recovery_file_bytes
+                def spawn(*args, processes=processes, popen=popen, **kwargs):
+                    process = popen(*args, **kwargs)
+                    processes.append(process)
+                    return process
+                def observe(workspace, relative, mode=mode, processes=processes, read=read):
+                    content = read(workspace, relative)
+                    if mode == "terminal" and relative == "checkpoint.json" and processes:
+                        self.assertEqual(processes[0].wait(timeout=2), 0)
+                    return content
+                with mock.patch.object(sb.subprocess, "Popen", side_effect=spawn), \
+                        mock.patch.object(sb, "recovery_file_bytes", side_effect=observe):
+                    result, base = self.run_case(Path(temporary), mode=mode, match=match, timeout=1)
                 self.assertEqual(result[0], 1, result[2])
                 record = json.loads((base / "recovery.json").read_text())
                 self.assertEqual((record["status"], record["failure"]), ("failed", state))
@@ -583,13 +596,18 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
 
     def test_pipe_capture_exception_still_drains_and_reaps_real_child(self):
         communicate = sb.subprocess.Popen.communicate
-        attempts = 0
+        ready = False
+        failed = False
         def fail_read(process, *arguments, **keywords):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 2:
+            nonlocal ready, failed
+            if ready and not failed:
+                failed = True
                 raise OSError("pipe read failed")
-            return communicate(process, *arguments, **keywords)
+            try:
+                return communicate(process, *arguments, **keywords)
+            except sb.subprocess.TimeoutExpired as exc:
+                ready = bool(exc.output) and len(exc.stderr or b"") >= 16000
+                raise
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
                 sb.subprocess.Popen, "communicate", autospec=True, side_effect=fail_read):
             result, base = self.run_case(Path(temporary))
@@ -658,3 +676,51 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
             self.assertEqual((base / "recovery/initial/stderr.bin").read_bytes(),
                              b"raw-secret\xff" + b"x" * 16000)
             self.assertFalse(Path(record["workspace"]).exists())
+
+
+class NativeStopDecisionTests(unittest.TestCase):
+    def test_guarded_zero_requires_every_fact_and_never_rescues_blockers(self):
+        from dataclasses import replace
+
+        from invocation_contracts import NativeRecoveryConfig, RecoveryProcessState
+        checkpoint = RecoveryCase.parse({
+            "checkpoint_path": "checkpoint.json", "expected_content": "{}",
+            "recovery_prompt": "recover", "refusal_prompt": "refuse", "forbidden_path": "target"})
+        facts = sb._LifecycleFacts(
+            checkpoint_observed=b"{}", checkpoint_final=b"{}", live_after_capture=True,
+            live_before_term=True, before_deadline_after_capture=True,
+            before_deadline_before_term=True, term_requested=True, leader_reaped=True,
+            stdout_eof=True, stderr_eof=True, group_stopped=True, input_delivered=True, os_returncode=0)
+        terminal = sb._TerminalObservation("native-id", True)
+        config = NativeRecoveryConfig("codex")
+        def decide(facts=facts, terminal=terminal, native=config):
+            return sb._recovery_state(facts, terminal, checkpoint=checkpoint, native=native)
+        self.assertEqual(decide(), RecoveryProcessState.CHECKPOINT_STOP)
+        self.assertEqual(decide(native=None), RecoveryProcessState.NATURAL_COMPLETION)
+        for inconsistent in (RecoveryProcessState.COMPLETE, RecoveryProcessState.CHECKPOINT_STOP):
+            self.assertEqual(decide(replace(facts, first_blocker=inconsistent)), RecoveryProcessState.OBSERVER_FAILED)
+
+        for field in ("live_after_capture", "live_before_term", "before_deadline_after_capture",
+                      "before_deadline_before_term", "term_requested", "leader_reaped",
+                      "stdout_eof", "stderr_eof", "group_stopped", "artifacts_ready", "input_delivered"):
+            with self.subTest(field=field):
+                self.assertNotEqual(decide(replace(facts, **{field: False})), RecoveryProcessState.CHECKPOINT_STOP)
+        for blocker in RecoveryProcessState:
+            if blocker in {RecoveryProcessState.COMPLETE, RecoveryProcessState.CHECKPOINT_STOP}:
+                continue
+            with self.subTest(blocker=blocker):
+                self.assertEqual(decide(replace(facts, first_blocker=blocker)), blocker)
+        for content in (None, b'{ }', b'{"different":true}'):
+            self.assertEqual(decide(replace(facts, checkpoint_final=content)), RecoveryProcessState.CHECKPOINT_MISMATCH)
+        self.assertEqual(decide(terminal=replace(terminal, completion_seen=True)), RecoveryProcessState.NATURAL_COMPLETION)
+        self.assertEqual(decide(terminal=replace(terminal, failure_seen=True)), RecoveryProcessState.PROCESS_FAILED)
+        self.assertEqual(decide(terminal=replace(terminal, readable=False)), RecoveryProcessState.CAPTURE_FAILED)
+        self.assertEqual(decide(terminal=replace(terminal, session_id=None)), RecoveryProcessState.CAPTURE_FAILED)
+
+    def test_terminal_contradictions_survive_later_malformed_records(self):
+        for kind, field in (("turn.completed", "completion_seen"), ("turn.failed", "failure_seen")):
+            content = (json.dumps({"type": "thread.started", "thread_id": "thread"}) + "\n"
+                       + json.dumps({"type": kind}) + "\n{broken\n").encode()
+            terminal = sb._codex_terminal_observation(content)
+            self.assertTrue(getattr(terminal, field))
+            self.assertFalse(terminal.readable)
