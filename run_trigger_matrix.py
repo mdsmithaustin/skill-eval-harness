@@ -1531,7 +1531,6 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
                     observations.append(matrix_failure_observation(
                         agent, model, query, should_trigger, exc, metadata, identity, constraints))
         finally:
-            # A stopped run must not start the cells still queued.
             ex.shutdown(cancel_futures=True)
     observations.sort(key=lambda observation: (
         observation.agent, str(observation.model or ""),

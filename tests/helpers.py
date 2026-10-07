@@ -17,7 +17,7 @@ import stat
 import statistics
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -908,26 +908,26 @@ CLAUDE_POST_RESULT_RECORDS: list[tuple[str, dict[str, Any], bool]] = [
 
 
 def write_sleeping_agents(bin_dir: Path, pid_log: Path) -> None:
-    """Fake `claude` and `codex` executables that log their pid and sleep. The
-    fake codex ignores SIGINT and SIGTERM, so only SIGKILL stops it."""
     for name, ignore in (("claude", ""), ("codex", "trap '' INT TERM\n")):
         path = bin_dir / name
         path.write_text(
             "#!/bin/sh\n"
             'case "$*" in *--version*) echo "1.0.0"; exit 0;; esac\n'
-            f"echo $$ >> '{pid_log}'\n"
-            f"{ignore}exec sleep 60\n",
+            f"{ignore}echo $$ >> '{pid_log}'\n"
+            "exec sleep 60\n",
             encoding="utf-8")
         path.chmod(0o755)
 
 
+class SignalledRun(NamedTuple):
+    code: int | None
+    output: str
+    pids: list[int]
+    survivors: list[int]
+
+
 def signal_mid_run(argv: list[str], *, cwd: Path, fake_bin: Path, pid_log: Path,
-                   agents: int, signum: int) -> tuple[int | None, str, list[int], list[int]]:
-    """Start a CLI in its own session, wait for `agents` fake agents, and send
-    it `signum`. Returns (exit code, or None when it outlived 15 s; its output;
-    the agent pids; the agents whose process or process group is alive 2 s
-    after it exited).
-    Whatever is left is killed, so a failing run leaks nothing."""
+                   agents: int, signum: int) -> SignalledRun:
     import os
     import signal
     import subprocess
@@ -963,10 +963,11 @@ def signal_mid_run(argv: list[str], *, cwd: Path, fake_bin: Path, pid_log: Path,
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGKILL)
         output, _ = proc.communicate()
+        pids = logged()
         deadline = time.monotonic() + 2
         while any(alive(pid) for pid in pids) and time.monotonic() < deadline:
             time.sleep(0.05)
-        return code, output, pids, [pid for pid in pids if alive(pid)]
+        return SignalledRun(code, output, pids, [pid for pid in pids if alive(pid)])
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGKILL)

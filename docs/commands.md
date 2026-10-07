@@ -12,13 +12,17 @@ grading never calls a model is [`architecture.md`](architecture.md).
 Long options must be spelled in full: every entry point, subcommand and script rejects a prefix
 (`--judge-res` for `--judge-results`) as an unrecognized argument and exits 2.
 
-Every entry point stops the same way on SIGINT (Ctrl-C) or SIGTERM. It sends that signal to the
-process group of each agent still running, sends SIGKILL to any group alive 2 seconds later, and
-starts no queued run. A [fixed recovery case](#run-fixed-recovery-cases) sends SIGKILL at once. The
-command then prints `stopped by SIGINT` (or `SIGTERM`) and exits 128 plus the signal number: 130
-for SIGINT, 143 for SIGTERM. Runs that finished before the signal keep their artifacts, and
-`skill-trigger-matrix` writes no report. A signal that was ignored when the command started stays
-ignored.
+A command that runs agents stops the same way on SIGINT (Ctrl-C) or SIGTERM. The native runners
+and trigger adapters start each agent in its own session, so the command sends the signal to each
+running agent's process group itself. It sends SIGKILL to the group as soon as the agent exits, or
+after 2 seconds if the agent is still running. It starts no queued run. A
+[fixed recovery case](#run-fixed-recovery-cases) sends SIGKILL at once. The command then prints
+`stopped by SIGINT` (or `SIGTERM`) and exits 128 plus the signal number: 130 for SIGINT, 143 for
+SIGTERM. Runs that finished before the signal keep their artifacts. `skill-trigger-matrix` and
+`skill-pi-trigger-eval` write no report, so a stopped matrix keeps only the `--trace-runs` files of
+its finished cells. A signal that was ignored when the command started stays ignored. An
+`--agent-cmd` or `--judge-cmd` command runs in the harness's own process group, which Ctrl-C in a
+terminal also reaches. `render-viewer --serve` stops its server and exits 0.
 
 ## Inspect agent capabilities
 

@@ -2240,8 +2240,6 @@ class RunnerOutcomeContractTests(unittest.TestCase):
 
 @unittest.skipUnless(hasattr(os, "killpg"), "process-group cleanup requires POSIX")
 class RunAgentStopSignalTests(unittest.TestCase):
-    """A stopped run-agent ends the agent session in flight, exits 128 + the
-    signal number, and says so in one line instead of a traceback."""
 
     def assert_stops_the_agent(self, signum):
         for agent in ("claude", "codex"):

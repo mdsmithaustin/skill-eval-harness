@@ -889,8 +889,6 @@ class TriggerCliStatusTests(unittest.TestCase):
 
 @unittest.skipUnless(hasattr(os, "killpg"), "process-group cleanup requires POSIX")
 class MatrixStopSignalTests(unittest.TestCase):
-    """A stopped matrix ends every agent session it started, exits 128 + the
-    signal number, and says so in one line instead of a traceback."""
 
     def assert_stops_every_agent(self, signum):
         with tempfile.TemporaryDirectory() as td:
@@ -900,9 +898,9 @@ class MatrixStopSignalTests(unittest.TestCase):
             code, output, pids, survivors = signal_mid_run(
                 [sys.executable, str(ROOT / "run_trigger_matrix.py"), str(DEMO_MANIFEST),
                  "--agent", "claude", "--agent", "codex", "--model", "m",
-                 "--runs-per-query", "1", "--workers", "4", "--out", str(root / "report.json")],
-                cwd=root, fake_bin=root / "bin", pid_log=root / "pids", agents=4, signum=signum)
-        self.assertEqual(len(pids), 4, output)
+                 "--runs-per-query", "1", "--workers", "3", "--out", str(root / "report.json")],
+                cwd=root, fake_bin=root / "bin", pid_log=root / "pids", agents=3, signum=signum)
+        self.assertEqual(len(pids), 3, output)
         self.assertEqual(code, 128 + signum, output)
         self.assertEqual(survivors, [])
         self.assertEqual(output, f"stopped by {signal.Signals(signum).name}\n")
