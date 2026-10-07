@@ -128,6 +128,7 @@ from skill_benchmark import (
     safe_trace_label,
     skill_root_keys_for,
     skill_tree_hash,
+    stops_on_signal,
     stream_duplicate_keys,
     stream_usage_and_cost,
     strict_json_loads,
@@ -1486,7 +1487,8 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
             trace_root = Path(tempfile.mkdtemp(prefix="matrix-", dir=trace_runs))
         futures, observations, design = [], [], []
         future_context: dict[Any, tuple[str, str | None, str, bool, dict[str, Any], TriggerRepetitionIdentity, SkillTriggerConstraints | None]] = {}
-        with ThreadPoolExecutor(max_workers=workers) as ex:
+        ex = ThreadPoolExecutor(max_workers=workers)
+        try:
             for adapter in adapters:
                 for model in (models if models is not None else adapter.default_models):
                     for row_index, row in enumerate(rows, 1):
@@ -1528,6 +1530,9 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
                     agent, model, query, should_trigger, metadata, identity, constraints = future_context[fut]
                     observations.append(matrix_failure_observation(
                         agent, model, query, should_trigger, exc, metadata, identity, constraints))
+        finally:
+            # A stopped run must not start the cells still queued.
+            ex.shutdown(cancel_futures=True)
     observations.sort(key=lambda observation: (
         observation.agent, str(observation.model or ""),
         str(observation.identity.query_id if observation.identity else ""),
@@ -1578,6 +1583,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return ap
 
 
+@stops_on_signal
 def main() -> int:
     ap = build_arg_parser()
     args = ap.parse_args()
