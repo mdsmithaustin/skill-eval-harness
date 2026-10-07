@@ -679,6 +679,52 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
 
 
 class NativeStopDecisionTests(unittest.TestCase):
+    def test_claude_malformed_parent_scope_is_rejected_before_projection(self):
+        records = (
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"role": "assistant", "model": "model", "content": []}},
+            {"type": "assistant", "error": "authentication_failed",
+             "message": {"role": "assistant", "model": "model", "content": []}},
+            {"type": "user", "message": {"role": "user", "content": "task"}},
+            {"type": "result", "is_error": False, "result": "done"},
+            {"type": "result", "is_error": True},
+            {"type": "stream_event", "event": {"type": "message_stop"}},
+            {"type": "rate_limit_event"},
+        )
+        for parent in (False, True, 0, 1, -1, 0.0, 1.5, {}, [],
+                       {"secret": "SCOPE_CANARY"}, ["SCOPE_CANARY"]):
+            for record in records:
+                with self.subTest(parent=parent, record=record):
+                    frame = dict(record, session_id="session", parent_tool_use_id=parent)
+                    with self.assertRaisesRegex(TypeError, "^native_parent_invalid$"):
+                        sb._claude_project_frame(json.dumps(frame).encode(), None, "closed")
+
+    def test_claude_valid_parent_scope_preserves_main_and_nested_observations(self):
+        records = (
+            ({"type": "system", "subtype": "init"}, False, False, None),
+            ({"type": "assistant", "message": {"role": "assistant", "model": "model", "content": []}},
+             False, False, "model"),
+            ({"type": "assistant", "error": "authentication_failed",
+              "message": {"role": "assistant", "model": "model", "content": []}}, False, True, "model"),
+            ({"type": "user", "message": {"role": "user", "content": "task"}}, False, False, None),
+            ({"type": "result", "is_error": False, "result": "done"}, True, False, None),
+            ({"type": "result", "is_error": True}, False, True, None),
+            ({"type": "stream_event", "event": {"type": "message_stop"}}, False, False, None),
+            ({"type": "rate_limit_event"}, False, False, None),
+        )
+        for scope, main in (({}, True), ({"parent_tool_use_id": None}, True),
+                            ({"parent_tool_use_id": "tool-parent"}, False),
+                            ({"parent_tool_use_id": ""}, False), ({"parent_tool_use_id": " "}, False)):
+            for record, completed, failed, model in records:
+                with self.subTest(scope=scope, record=record):
+                    frame = dict(record, session_id="session", **scope)
+                    projected = sb._claude_project_frame(json.dumps(frame).encode(), None, "closed")
+                    self.assertEqual((projected.session_id, projected.completion_seen,
+                                      projected.failure_seen, projected.served_model),
+                                     ("session" if main else None, completed and main,
+                                      failed and main, model if main else None))
+                    self.assertEqual(json.loads(projected.retained), frame)
+
     def test_guarded_zero_requires_every_fact_and_never_rescues_blockers(self):
         from dataclasses import replace
 

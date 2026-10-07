@@ -7007,6 +7007,10 @@ def _claude_project_frame(frame: bytes, expected_id: str | None,
                             control_status=status, settings=settings)
     if kind not in {"system", "assistant", "user", "result", "stream_event", "rate_limit_event"}:
         raise ValueError("native_frame_unsupported")
+    parent = record.get("parent_tool_use_id")
+    if parent is not None and not isinstance(parent, str):
+        raise TypeError("native_parent_invalid")
+    main_session = parent is None
     identity = record.get("session_id")
     if identity is not None and (not isinstance(identity, str) or not identity.strip() or identity == "default"):
         raise ValueError("native_identity_invalid")
@@ -7078,7 +7082,7 @@ def _claude_project_frame(frame: bytes, expected_id: str | None,
             safe["message"]["content"] = blocks
         elif not isinstance(content, str):
             raise TypeError("native_content_invalid")
-        if kind == "assistant" and record.get("parent_tool_use_id") is None:
+        if kind == "assistant" and main_session:
             model = message.get("model")
             if model is not None and (not isinstance(model, str) or not model.strip()):
                 raise ValueError("native_model_invalid")
@@ -7097,7 +7101,6 @@ def _claude_project_frame(frame: bytes, expected_id: str | None,
         if not failure and not isinstance(record.get("result"), str):
             raise ValueError("native_result_invalid")
         completion = not failure
-    main_session = record.get("parent_tool_use_id") is None
     return _ClaudeFrame((json.dumps(safe, allow_nan=False) + "\n").encode("utf-8"),
                         identity if main_session else None, completion and main_session,
                         failure and main_session, served_model=served)

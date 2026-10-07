@@ -364,7 +364,7 @@ time.sleep(60)
 
 
 class ClaudeNativeProtocolTests(unittest.TestCase):
-    def run_protocol_case(self, root, mode, *, large_prompt=False):
+    def run_protocol_case(self, root, mode, *, large_prompt=False, scope_frame=None):
         _, tasks, relative = write_with_skill_task(root)
         row = json.loads(tasks.read_text())
         row["recovery"] = {
@@ -426,6 +426,14 @@ if mode == "ambiguous-session":
 print(json.dumps({{"type":"assistant","session_id":session,"message":{{"role":"assistant","model":"served-model","content":[{{"type":"text","text":"task"}}]}}}}), flush=True)
 if prompt not in {{"RECOVER", "REFUSE"}}:
     def handle(number, frame):
+        if mode == "parent-scope":
+            record = {scope_frame!r}
+            parent = record.get("parent_tool_use_id")
+            record["session_id"] = "nested-session" if isinstance(parent, str) else session
+            print(json.dumps(record), flush=True)
+            if parent is not None and not isinstance(parent, str):
+                print(json.dumps({{"type":"assistant","session_id":session,"message":{{"role":"assistant",
+                    "model":"served-model","content":[{{"type":"text","text":"AFTER_SCOPE_CANARY"}}]}}}}), flush=True)
         if mode in {{"assistant-error", "unknown-assistant-error", "malformed-after-assistant-error"}}:
             error = {{"detail":"SETTINGS_CANARY"}} if mode == "unknown-assistant-error" else "authentication_failed"
             print(json.dumps({{"type":"assistant","session_id":session,"error":error,
@@ -436,7 +444,11 @@ if prompt not in {{"RECOVER", "REFUSE"}}:
             os.write(1, b'{{"secret":"SETTINGS_CANARY"}}invalid\\n')
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, handle)
-    Path("checkpoint.json").write_bytes(b"{{}}")
+    if mode == "parent-scope":
+        Path("checkpoint.pending").write_bytes(b"{{}}")
+        Path("checkpoint.pending").rename("checkpoint.json")
+    else:
+        Path("checkpoint.json").write_bytes(b"{{}}")
     time.sleep(60)
 print(json.dumps({{"type":"result","session_id":session,"is_error":False,"result":"done","subtype":"success"}}), flush=True)
 ''')
@@ -444,6 +456,62 @@ print(json.dumps({{"type":"result","session_id":session,"is_error":False,"result
         result = run_cli("run-agent", "--agent", "claude", "--tasks", tasks,
                          "--runs", root / "runs", "--claude-bin", script, "--timeout", "4")
         return result, root / "runs" / relative
+
+    def test_public_malformed_parent_scope_blocks_continuation_and_omits_secrets(self):
+        records = (
+            {"type": "result", "is_error": False, "result": "SCOPE_CANARY"},
+            {"type": "assistant", "error": "authentication_failed", "error_detail": "SCOPE_CANARY",
+             "message": {"role": "assistant", "model": "nested-model",
+                         "content": [{"type": "text", "text": "SCOPE_CANARY"}]}},
+            {"type": "result", "is_error": True, "result": "SCOPE_CANARY"},
+        )
+        for parent in (False, True, 0, 1, -1, 0.0, 1.5, {}, [],
+                       {"secret": "SCOPE_CANARY"}, ["SCOPE_CANARY"]):
+            for record in records:
+                with self.subTest(parent=parent, record=record), tempfile.TemporaryDirectory() as temporary:
+                    result, base = self.run_protocol_case(
+                        Path(temporary), "parent-scope", scope_frame=dict(record, parent_tool_use_id=parent))
+                    self.assertEqual(result[0], 1, result[2])
+                    recovery = json.loads((base / "recovery.json").read_text())
+                    self.assertEqual((recovery["failure"], len(recovery["phases"])), ("capture_failed", 1))
+                    facts = json.loads((base / "recovery/initial/process.json").read_text())
+                    self.assertEqual((facts["state"], facts["os_returncode"], facts["error"]),
+                                     ("capture_failed", 0, "native_frame_invalid"))
+                    self.assertEqual(facts["terminal"], {"session_id": str(facts["pid"]), "readable": False,
+                                                        "completion_seen": False, "failure_seen": False})
+                    self.assertTrue(facts["leader_reaped"] and facts["pipes_drained"] and facts["group_stopped"])
+                    native = json.loads((base / "recovery/initial/native.json").read_text())
+                    self.assertEqual(native["availability"], "unavailable")
+                    self.assertEqual([item["model"] for item in native["served_models"]], ["served-model"])
+                    for path in base.rglob("*"):
+                        if path.is_file():
+                            self.assertNotIn(b"CANARY", path.read_bytes(), str(path))
+                    self.assertNotIn("CANARY", str(result))
+
+    def test_public_valid_parent_scope_preserves_terminal_vetoes_and_nested_continuation(self):
+        records = (
+            ({"type": "result", "is_error": False, "result": "done"}, "natural_completion", True, False),
+            ({"type": "assistant", "error": "authentication_failed",
+              "message": {"role": "assistant", "model": "nested-model", "content": []}},
+             "process_failed", False, True),
+            ({"type": "result", "is_error": True}, "process_failed", False, True),
+        )
+        for scope, main in (({}, True), ({"parent_tool_use_id": None}, True),
+                            ({"parent_tool_use_id": "tool-parent"}, False),
+                            ({"parent_tool_use_id": ""}, False), ({"parent_tool_use_id": " "}, False)):
+            for record, state, completed, failed in records:
+                with self.subTest(scope=scope, record=record), tempfile.TemporaryDirectory() as temporary:
+                    result, base = self.run_protocol_case(Path(temporary), "parent-scope", scope_frame=dict(record, **scope))
+                    self.assertEqual(result[0], 1 if main else 0, result[2])
+                    recovery = json.loads((base / "recovery.json").read_text())
+                    self.assertEqual([phase["state"] for phase in recovery["phases"]],
+                                     [state] if main else ["checkpoint_stop", "complete", "complete"])
+                    facts = json.loads((base / "recovery/initial/process.json").read_text())
+                    self.assertEqual(facts["terminal"], {"session_id": str(facts["pid"]), "readable": True,
+                                                        "completion_seen": completed and main, "failure_seen": failed and main})
+                    frames = list(map(json.loads, (base / "recovery/initial/stdout.bin").read_text().splitlines()))
+                    expected = dict(record, session_id=str(facts["pid"]) if main else "nested-session", **scope)
+                    self.assertEqual(frames[-1], expected)
 
     def test_public_controls_filter_secrets_and_preserve_unknown_effort(self):
         for mode in ("safe", "settings-error", "event-controls", "invalid-event", "wrong-id", "malformed", "invalid-effort",
