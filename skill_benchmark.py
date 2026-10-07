@@ -6869,7 +6869,9 @@ def _recovery_state(facts: _LifecycleFacts, terminal: _TerminalObservation, *,
         return RecoveryProcessState.OBSERVER_FAILED
     if facts.checkpoint_final != facts.checkpoint_observed:
         return RecoveryProcessState.CHECKPOINT_MISMATCH
-    signal_exits = {-int(signal.SIGTERM), -int(signal.SIGKILL)}
+    signal_exits = {-int(signal.SIGTERM)}
+    if sys.platform != "win32":
+        signal_exits.add(-int(signal.SIGKILL))
     if facts.os_returncode in signal_exits or (native is not None and facts.os_returncode == 0):
         return RecoveryProcessState.CHECKPOINT_STOP
     return RecoveryProcessState.NATURAL_COMPLETION
@@ -7253,6 +7255,8 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
     contradictory returncode/timeout/completeness booleans."""
     if not isinstance(plan, ProcessInvocationPlan):
         raise TypeError("invoke_argv_with_timeout requires a ProcessInvocationPlan")
+    if plan.native_recovery is not None and sys.platform == "win32":
+        raise RuntimeError("native recovery execution is unsupported on Windows")
     argv = list(plan.argv)
     cwd = plan.cwd
     env = None if plan.environment is None else dict(plan.environment)
@@ -7538,6 +7542,7 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
 
     def observe_recovery_process(proc: subprocess.Popen[bytes], capture: RecoveryCapture,
                                  input_bytes: bytes | None, start: float) -> InvocationOutcome:
+        assert sys.platform != "win32"
         deadline = phase_deadline
         lifecycle = _LifecycleFacts()
         error: str | None = None

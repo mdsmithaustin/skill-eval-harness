@@ -120,8 +120,9 @@ class RecoveryCompatibilityTests(unittest.TestCase):
                     script = root / "fake_claude.py"
                     script.write_text(
                         f"#!{sys.executable}\n"
-                        "import json, os, sys, time\n"
+                        "import json, os, signal, sys, time\n"
                         "from pathlib import Path\n"
+                        "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
                         "for kind in ('initialize', 'get_settings'):\n"
                         "    request = json.loads(sys.stdin.readline())\n"
                         "    print(json.dumps({'type':'control_response','response':{'subtype':'success','request_id':request['request_id'],'response':{}}}), flush=True)\n"
@@ -133,7 +134,8 @@ class RecoveryCompatibilityTests(unittest.TestCase):
                         "if mode == 'exit-124':\n"
                         "    raise SystemExit(124)\n"
                         "if mode == 'stop':\n"
-                        "    Path('checkpoint.json').write_bytes(b'{\"phase\":1}')\n"
+                        "    Path('checkpoint.pending').write_bytes(b'{\"phase\":1}')\n"
+                        "    Path('checkpoint.pending').rename('checkpoint.json')\n"
                         "time.sleep(60)\n")
                     script.chmod(0o755)
 
@@ -157,7 +159,8 @@ class RecoveryCompatibilityTests(unittest.TestCase):
                             mock.patch.object(Path, "write_bytes", autospec=True, side_effect=fail_raw):
                         code, _, stderr = run_cli(
                             "run-agent", "--agent", "claude", "--tasks", tasks, "--runs", root / "runs",
-                            "--claude-bin", script, "--model", "fake-model", "--timeout", "1")
+                            "--claude-bin", script, "--model", "fake-model",
+                            "--timeout", "1" if mode == "timeout" else "4")
                     self.assertEqual(code, 1, stderr)
                     base = root / "runs" / relative
                     record = json.loads((base / "recovery.json").read_text())
@@ -174,7 +177,7 @@ class RecoveryCompatibilityTests(unittest.TestCase):
                                      ("capture_failed", "capture_failed", "native_artifact_failed"))
                     self.assertEqual((facts["os_returncode"], facts["compatibility_returncode"],
                                       phase["compatibility_returncode"]),
-                                     (os_returncode, compatibility_returncode, compatibility_returncode))
+                                     (os_returncode, compatibility_returncode, compatibility_returncode), facts)
                     self.assertEqual(phase["outcome"], "TimedOut" if mode == "timeout" else "ProviderFailed")
                     self.assertEqual((facts["leader_reaped"], facts["pipes_drained"], facts["group_stopped"]),
                                      (True, True, True))
@@ -444,11 +447,8 @@ if prompt not in {{"RECOVER", "REFUSE"}}:
             os.write(1, b'{{"secret":"SETTINGS_CANARY"}}invalid\\n')
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, handle)
-    if mode == "parent-scope":
-        Path("checkpoint.pending").write_bytes(b"{{}}")
-        Path("checkpoint.pending").rename("checkpoint.json")
-    else:
-        Path("checkpoint.json").write_bytes(b"{{}}")
+    Path("checkpoint.pending").write_bytes(b"{{}}")
+    Path("checkpoint.pending").rename("checkpoint.json")
     time.sleep(60)
 print(json.dumps({{"type":"result","session_id":session,"is_error":False,"result":"done","subtype":"success"}}), flush=True)
 ''')
@@ -542,7 +542,7 @@ print(json.dumps({{"type":"result","session_id":session,"is_error":False,"result
                     self.assertTrue(facts["terminal"]["completion_seen"])
                     self.assertFalse(facts["terminal"]["readable"])
                 if mode in {"assistant-error", "unknown-assistant-error", "malformed-after-assistant-error"}:
-                    self.assertTrue(facts["terminal"]["failure_seen"])
+                    self.assertTrue(facts["terminal"]["failure_seen"], facts)
                     self.assertFalse(facts["terminal"]["completion_seen"])
                     self.assertEqual(facts["state"], "capture_failed" if mode == "malformed-after-assistant-error" else "process_failed")
                     self.assertEqual(len(json.loads((base / "recovery.json").read_text())["phases"]), 1)
