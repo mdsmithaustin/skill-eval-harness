@@ -168,7 +168,7 @@ Right: each enabled smoke passes. A failure is a finding; report the CLI version
 
 ## 9. Stop a run
 
-1. Start `skill-trigger-matrix examples/demo-skill/evals/shared-benchmark.json --agent claude --agent codex --runs-per-query 1 --out /tmp/live/stop.json`.
+1. Start `skill-trigger-matrix examples/demo-skill/evals/shared-benchmark.json --agent claude --agent codex --runs-per-query 1 --workers 8 --out /tmp/live/stop.json`.
    Press Ctrl-C after both agents start. Repeat with `kill -TERM <pid>` from another terminal.
    - Right: the command prints only `stopped by SIGINT` (or `SIGTERM`), exits 130 (or 143) within
      about 3 seconds, and `pgrep -fl 'claude|codex'` lists none of the run's agents.

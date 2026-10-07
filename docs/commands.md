@@ -12,8 +12,8 @@ grading never calls a model is [`architecture.md`](architecture.md).
 Long options must be spelled in full: every entry point, subcommand and script rejects a prefix
 (`--judge-res` for `--judge-results`) as an unrecognized argument and exits 2.
 
-A command that runs agents stops the same way on SIGINT (Ctrl-C) or SIGTERM. The native runners
-and trigger adapters start each agent in its own session, so the command sends the signal to each
+On POSIX, a command that runs agents stops the same way on SIGINT (Ctrl-C) or SIGTERM. The native
+runners and trigger adapters start each agent in its own session, so the command sends the signal to each
 running agent's process group itself. It sends SIGKILL to the group as soon as the agent exits, or
 after 2 seconds if the agent is still running. It starts no queued run. A
 [fixed recovery case](#run-fixed-recovery-cases) sends SIGKILL at once. The command then prints
