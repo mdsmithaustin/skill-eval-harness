@@ -26,6 +26,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -39,8 +40,10 @@ from helpers import (
     assert_dies,
     claude_streams_ending_after_result,
     run_cli,
+    signal_mid_run,
     skill_markdown,
     stub_agent_cli,
+    write_sleeping_agents,
 )
 
 import run_pi_trigger_eval as tr
@@ -882,6 +885,33 @@ class TriggerCliStatusTests(unittest.TestCase):
                          self.assertRaises(SystemExit) as ctx:
                         main()
                     self.assertIn("must be None or a non-empty string", str(ctx.exception.code))
+
+
+@unittest.skipUnless(hasattr(os, "killpg"), "process-group cleanup requires POSIX")
+class MatrixStopSignalTests(unittest.TestCase):
+    """A stopped matrix ends every agent session it started, exits 128 + the
+    signal number, and says so in one line instead of a traceback."""
+
+    def assert_stops_every_agent(self, signum):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "bin").mkdir()
+            write_sleeping_agents(root / "bin", root / "pids")
+            code, output, pids, survivors = signal_mid_run(
+                [sys.executable, str(ROOT / "run_trigger_matrix.py"), str(DEMO_MANIFEST),
+                 "--agent", "claude", "--agent", "codex", "--model", "m",
+                 "--runs-per-query", "1", "--workers", "4", "--out", str(root / "report.json")],
+                cwd=root, fake_bin=root / "bin", pid_log=root / "pids", agents=4, signum=signum)
+        self.assertEqual(len(pids), 4, output)
+        self.assertEqual(code, 128 + signum, output)
+        self.assertEqual(survivors, [])
+        self.assertEqual(output, f"stopped by {signal.Signals(signum).name}\n")
+
+    def test_sigint_stops_every_agent_session(self):
+        self.assert_stops_every_agent(signal.SIGINT)
+
+    def test_sigterm_stops_every_agent_session(self):
+        self.assert_stops_every_agent(signal.SIGTERM)
 
 
 class ClaudeDetectionTests(unittest.TestCase):
