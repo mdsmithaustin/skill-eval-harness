@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 
 from run_trigger_matrix import DEFAULT_TIMEOUT_S, eval_rows_from_args, run_matrix
-from skill_benchmark import VALID_SPLITS, write_json
+from skill_benchmark import VALID_SPLITS, stops_on_signal, write_json
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -40,6 +40,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return ap
 
 
+@stops_on_signal
 def main() -> int:
     args = build_arg_parser().parse_args()
     manifest_path = Path(args.manifest)

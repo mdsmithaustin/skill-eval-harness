@@ -55,6 +55,7 @@ On Linux, group observation excludes zombies because they cannot write. Other PO
 An escaped descendant holding a pipe prevents a verified stop when the capture cannot drain.
 The runner does not attest writers that leave the original group and close their inherited pipes.
 Temporary workspace cleanup runs after snapshots, including on failure or cancellation.
+A SIGINT or SIGTERM to `run-agent` sends `SIGKILL` to the running phase's group at once, records the phase as `observer_failed` with its partial evidence, and exits 130 or 143.
 
 ## Run artifacts
 

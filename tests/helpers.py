@@ -17,7 +17,7 @@ import stat
 import statistics
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -900,3 +900,78 @@ CLAUDE_POST_RESULT_RECORDS: list[tuple[str, dict[str, Any], bool]] = [
     ("unknown type carrying a message", {"type": "session_turn", "message": {
         "role": "assistant", "content": [{"type": "text", "text": "late"}]}}, False),
 ]
+
+
+# --------------------------------------------------------------------------- #
+# lane T: stopping a run that has agents in flight
+# --------------------------------------------------------------------------- #
+
+
+def write_sleeping_agents(bin_dir: Path, pid_log: Path) -> None:
+    for name, ignore in (("claude", ""), ("codex", "trap '' INT TERM\n")):
+        path = bin_dir / name
+        path.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in *--version*) echo "1.0.0"; exit 0;; esac\n'
+            f"{ignore}echo $$ >> '{pid_log}'\n"
+            "exec sleep 60\n",
+            encoding="utf-8")
+        path.chmod(0o755)
+
+
+class SignalledRun(NamedTuple):
+    code: int | None
+    output: str
+    pids: list[int]
+    survivors: list[int]
+
+
+def signal_mid_run(argv: list[str], *, cwd: Path, fake_bin: Path, pid_log: Path,
+                   agents: int, signum: int) -> SignalledRun:
+    import os
+    import signal
+    import subprocess
+    import time
+
+    def logged() -> list[int]:
+        return [int(line) for line in pid_log.read_text().split()] if pid_log.exists() else []
+
+    def alive(pid: int) -> bool:
+        for probe in (os.kill, os.killpg):
+            try:
+                probe(pid, 0)
+            except ProcessLookupError:
+                continue
+            return True
+        return False
+
+    env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"}
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, start_new_session=True)
+    pids: list[int] = []
+    code: int | None = None
+    try:
+        deadline = time.monotonic() + 30
+        while len(pids) < agents and time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+            pids = logged()
+        if proc.poll() is None:
+            os.kill(proc.pid, signum)
+        try:
+            proc.wait(timeout=15)
+            code = proc.returncode
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+        output, _ = proc.communicate()
+        pids = logged()
+        deadline = time.monotonic() + 2
+        while any(alive(pid) for pid in pids) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return SignalledRun(code, output, pids, [pid for pid in pids if alive(pid)])
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+        for pid in pids:
+            if alive(pid):
+                os.killpg(pid, signal.SIGKILL)

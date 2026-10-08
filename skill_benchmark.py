@@ -444,6 +444,7 @@ FORGETTABLE_GRADED_THRESHOLD = 0.75
 # escaped process cannot stall a benchmark worker indefinitely.
 PROCESS_LEADER_POLL_INTERVAL_S = 0.05
 PROCESS_PIPE_DRAIN_GRACE_S = 0.25
+AGENT_STOP_GRACE_S = 2.0
 CODEX_TEMP_CLEANUP_RETRY_DELAYS_S = (0.05, 0.1, 0.2, 0.4, 0.8)
 
 
@@ -6801,6 +6802,43 @@ def recovery_group_stopped(pgid: int) -> tuple[bool, str]:
     return False, "killpg_members_remain"
 
 
+# Only the main thread receives signals, so worker threads read the stop from here.
+_stop_signal: int | None = None
+
+
+def _stop_run(signum: int, frame: object) -> None:
+    global _stop_signal
+    if _stop_signal is None:
+        _stop_signal = signum
+        raise KeyboardInterrupt
+
+
+def stops_on_signal(main: Callable[[], int]) -> Callable[[], int]:
+    """Make SIGINT and SIGTERM stop a CLI entrypoint and every agent it runs.
+
+    The entrypoint then prints one line and returns 128 + the signal number. A
+    signal ignored at startup stays ignored."""
+    @functools.wraps(main)
+    def run() -> int:
+        global _stop_signal
+        _stop_signal = None
+        previous = {signum: signal.signal(signum, _stop_run)
+                    for signum in (signal.SIGINT, signal.SIGTERM)
+                    if signal.getsignal(signum) not in (signal.SIG_IGN, None)}
+        try:
+            return main()
+        except KeyboardInterrupt:
+            if _stop_signal is None:
+                raise
+            print(f"stopped by {signal.Signals(_stop_signal).name}", file=sys.stderr)
+            return 128 + _stop_signal
+        finally:
+            _stop_signal = None
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+    return run
+
+
 def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
     """Typed subprocess owner for every spawned runner/adapter process.
 
@@ -6851,6 +6889,26 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
             return {"status": "warning", "signal": "SIGKILL",
                     "error": errno.errorcode.get(exc.errno, type(exc).__name__)}
         return {"status": "kill_sent", "signal": "SIGKILL"}
+
+    def stop_session(proc: subprocess.Popen[bytes], signum: int) -> None:
+        killpg = getattr(os, "killpg", None)
+        sigkill = getattr(signal, "SIGKILL", None)
+        if not callable(killpg) or not isinstance(sigkill, int):
+            proc.kill()
+            return
+        # The unreaped leader keeps the group id reserved until SIGKILL is sent.
+        try:
+            killpg(proc.pid, signum)
+            deadline = time.monotonic() + AGENT_STOP_GRACE_S
+            while not process_leader_exited(proc) and time.monotonic() < deadline:
+                time.sleep(PROCESS_LEADER_POLL_INTERVAL_S)
+            killpg(proc.pid, sigkill)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+        except subprocess.TimeoutExpired:
+            pass
 
     def process_leader_exited(proc: subprocess.Popen[bytes]) -> bool:
         """Observe POSIX leader exit without reaping it when the OS supports that."""
@@ -7159,35 +7217,41 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
     communication_complete = False
     communication_timeout: subprocess.TimeoutExpired | None = None
     leader_exited = False
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            if communication_timeout is None:
-                communication_timeout = subprocess.TimeoutExpired(argv, timeout)
-            leader_exited = process_leader_exited(proc)
-            break
-        try:
-            out, err = proc.communicate(
-                input=(input_bytes
-                       if input_bytes is not None and not communication_started
-                       else None),
-                timeout=min(PROCESS_LEADER_POLL_INTERVAL_S, remaining),
-            )
-        except subprocess.TimeoutExpired as exc:
-            communication_started = True
-            communication_timeout = exc
-            # ``communicate`` waits for pipe EOF as well as leader exit. Poll in
-            # short slices so a successful leader is not charged the full task
-            # timeout merely because one of its helpers inherited a capture fd.
-            leader_exited = process_leader_exited(proc)
-            if leader_exited:
+    try:
+        while True:
+            if _stop_signal is not None:
+                raise KeyboardInterrupt
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if communication_timeout is None:
+                    communication_timeout = subprocess.TimeoutExpired(argv, timeout)
+                leader_exited = process_leader_exited(proc)
                 break
-        else:
-            stdout, stdout_utf8_valid = _wire_text(out, redact_stdout)
-            stderr, stderr_utf8_valid = _wire_text(err, redact_stderr)
-            stderr, returncode, _timed_out = stderr[:4000], proc.returncode, False
-            communication_complete = True
-            break
+            try:
+                out, err = proc.communicate(
+                    input=(input_bytes
+                           if input_bytes is not None and not communication_started
+                           else None),
+                    timeout=min(PROCESS_LEADER_POLL_INTERVAL_S, remaining),
+                )
+            except subprocess.TimeoutExpired as exc:
+                communication_started = True
+                communication_timeout = exc
+                # ``communicate`` waits for pipe EOF as well as leader exit. Poll in
+                # short slices so a successful leader is not charged the full task
+                # timeout merely because one of its helpers inherited a capture fd.
+                leader_exited = process_leader_exited(proc)
+                if leader_exited:
+                    break
+            else:
+                stdout, stdout_utf8_valid = _wire_text(out, redact_stdout)
+                stderr, stderr_utf8_valid = _wire_text(err, redact_stderr)
+                stderr, returncode, _timed_out = stderr[:4000], proc.returncode, False
+                communication_complete = True
+                break
+    except KeyboardInterrupt:
+        stop_session(proc, _stop_signal or signal.SIGINT)
+        raise
     if not communication_complete:
         assert communication_timeout is not None
         exc = communication_timeout
@@ -23437,6 +23501,7 @@ def validate_cli_command(args: argparse.Namespace) -> int:
     return 0
 
 
+@stops_on_signal
 def main() -> int:
     parser = build_arg_parser()
     raw_args = parser.parse_args()

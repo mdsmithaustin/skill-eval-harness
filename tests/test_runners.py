@@ -12,6 +12,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -29,9 +30,11 @@ from helpers import (
     claude_stream_records,
     make_eval_repo,
     run_cli,
+    signal_mid_run,
     skill_markdown,
     stub_claude,
     stub_claude_stream,
+    write_sleeping_agents,
     write_with_skill_task,
 )
 from helpers import (
@@ -2233,6 +2236,32 @@ class RunnerOutcomeContractTests(unittest.TestCase):
             meta = json.loads((base / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["usage_normalized"]["source"], "trace_normalized")
             self.assertEqual(meta["usage_normalized"]["input_tokens"], 22215)
+
+
+@unittest.skipUnless(hasattr(os, "killpg"), "process-group cleanup requires POSIX")
+class RunAgentStopSignalTests(unittest.TestCase):
+
+    def assert_stops_the_agent(self, signum):
+        for agent in ("claude", "codex"):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                _, tasks, _ = write_with_skill_task(root)
+                (root / "bin").mkdir()
+                write_sleeping_agents(root / "bin", root / "pids")
+                code, output, pids, survivors = signal_mid_run(
+                    [sys.executable, str(ROOT / "skill_benchmark.py"), "run-agent", "--agent", agent,
+                     "--model", "m", "--tasks", str(tasks), "--runs", str(root / "runs")],
+                    cwd=root, fake_bin=root / "bin", pid_log=root / "pids", agents=1, signum=signum)
+                self.assertEqual(len(pids), 1, output)
+                self.assertEqual(code, 128 + signum, output)
+                self.assertEqual(survivors, [])
+                self.assertEqual(output, f"stopped by {signal.Signals(signum).name}\n")
+
+    def test_sigint_stops_the_agent_session(self):
+        self.assert_stops_the_agent(signal.SIGINT)
+
+    def test_sigterm_stops_the_agent_session(self):
+        self.assert_stops_the_agent(signal.SIGTERM)
 
 
 CLAUDE_WORKSPACE_ISOLATION = ["--setting-sources", "project", "--strict-mcp-config",

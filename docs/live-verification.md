@@ -165,3 +165,12 @@ Right: each enabled smoke passes. A failure is a finding; report the CLI version
    after `grade`. `judge … --judge-cmd … --quorum 2` must exit 1.
 3. On a real suite with a judge-only case, `case_flags` entries read `signal: combined`, and
    `readiness.floor_cases` is a subset of the cases flagged `floor`.
+
+## 9. Stop a run
+
+1. Start `skill-trigger-matrix examples/demo-skill/evals/shared-benchmark.json --agent claude --agent codex --runs-per-query 1 --workers 8 --out /tmp/live/stop.json`.
+   Press Ctrl-C after both agents start. Repeat with `kill -TERM <pid>` from another terminal.
+   - Right: the command prints only `stopped by SIGINT` (or `SIGTERM`), exits 130 (or 143) within
+     about 3 seconds, and `pgrep -fl 'claude|codex'` lists none of the run's agents.
+2. Do the same with `skill-benchmark run-agent --agent claude --tasks /tmp/live/tasks.jsonl --runs /tmp/live/rstop`
+   and with `--agent codex`. Right: the same line, exit code, and no agent left running.
