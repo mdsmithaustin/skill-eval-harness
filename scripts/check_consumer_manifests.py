@@ -78,7 +78,6 @@ def main(argv: list[str] | None = None) -> int:
                 failures.append(f"{rel}: {name}")
                 print(f"FAIL {rel}: {name} exited {code}")
                 for line in stderr.splitlines():
-                    # Leakage warnings and notes are advisory; show the failure itself.
                     if not line.startswith(("WARN ", "note:")):
                         print(f"       {line}")
     if failures:

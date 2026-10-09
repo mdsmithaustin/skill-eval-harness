@@ -760,7 +760,6 @@ def repo_root_for_manifest(manifest_path: Path) -> Path:
 
 
 def skill_root_rule(manifest_path: Path) -> str:
-    """Describe the same skill-path resolution used by preparation."""
     root = repo_root_for_manifest(manifest_path)
     if manifest_path.name == "shared-benchmark.json" and (
             manifest_path.parent.name == "evals" or manifest_path.parent.parent.name == "evals"):

@@ -1033,7 +1033,6 @@ class ScopedTriggerManifestTests(unittest.TestCase):
 
 
 def _dies_with(test: unittest.TestCase, fn, *args, **kwargs) -> str:
-    """Run fn, require SystemExit, and return what die() printed."""
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr), test.assertRaises(SystemExit):
         fn(*args, **kwargs)
@@ -1045,10 +1044,6 @@ def _validate_args(path: Path) -> argparse.Namespace:
 
 
 class SkillPathAgreementTests(unittest.TestCase):
-    """validate, prepare and audit-manifest share one skill-path check, so a
-    manifest whose with_skill arm would mount a nonexistent or out-of-repo path
-    fails all three instead of validating OK (the good-pr `../skills/...` trap:
-    evals/shared-benchmark.json resolves skill_paths from the repository root)."""
 
     def _repo(self, root: Path, skill_paths: list[str], name: str = "shared-benchmark.json") -> Path:
         rp = root / "repo"
@@ -1123,7 +1118,6 @@ class SkillPathAgreementTests(unittest.TestCase):
 
 
 class UpgradeHintTests(unittest.TestCase):
-    """The two manifest requirements added after 0.6.0 name their own fix."""
 
     def _case_dies(self, case: dict) -> str:
         with tempfile.TemporaryDirectory() as td:

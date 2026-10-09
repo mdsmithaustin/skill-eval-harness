@@ -1265,10 +1265,6 @@ class DocSyncTests(unittest.TestCase):
         self.assertFalse(duplicates, f"OTel command inventory assigns commands twice: {duplicates}")
 
     def test_skill_pins_reproduce_the_walkthrough_trees(self):
-        # examples/skill-pins.json exists so a reader can fetch and re-run the exact
-        # skill trees docs/ablation-study-walkthrough.md says were evaluated. The
-        # 2026-07-07 pin refresh moved slide-maker and cfdoctor to later commits
-        # with different trees and nothing noticed; the tree hash is the identity.
         pins = json.loads((ROOT / "examples" / "skill-pins.json").read_text(encoding="utf-8"))["skills"]
         walkthrough = (ROOT / "docs" / "ablation-study-walkthrough.md").read_text(encoding="utf-8")
         rows = {

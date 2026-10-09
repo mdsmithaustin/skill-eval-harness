@@ -20,9 +20,7 @@ class AssertionObservationTests(unittest.TestCase):
             **changes,
         }
 
-    # Skipped rows retain observed availability for a lossless round trip.
     STATE_TABLE = (
-        # skipped, availability, passed, state, projected availability
         (False, "complete", True, gc.AssertionState.SATISFIED, "complete"),
         (False, "complete", False, gc.AssertionState.FAILED, "complete"),
         (False, "complete", None, gc.AssertionState.UNAVAILABLE, "partial"),
