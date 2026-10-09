@@ -1377,13 +1377,6 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
         die("manifest.skill_name is required")
     if not isinstance(manifest.get("skill_paths", []), list) or not manifest.get("skill_paths") or not all(isinstance(p, str) for p in manifest.get("skill_paths", [])):
         die("manifest.skill_paths must be a non-empty list of strings")
-    for label in ("skill_paths", "old_skill_paths"):
-        roots = manifest.get(label) or []
-        if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
-            continue
-        for first, second, key in skill_root_key_collisions(repo_root_for_manifest(path), roots):
-            die(f"manifest.{label}: {first!r} and {second!r} both mount as skill directory {key!r}; "
-                "agents list skills by directory name, so rename one directory")
     variants = manifest.get("variants", DEFAULT_VARIANTS)
     if (not isinstance(variants, list) or len(variants) != len(set(variants))
             or set(variants) != {"with_skill", "without_skill"}):
@@ -1625,6 +1618,14 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
             validate_ablation_removal(ablation, manifest)
         except AblationError as exc:
             die(f"ablation {aid}: {exc}")
+    require_resolvable_skill_paths(path, manifest)
+    for label in ("skill_paths", "old_skill_paths"):
+        roots = manifest.get(label) or []
+        if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
+            continue
+        for first, second, key in skill_root_key_collisions(repo_root_for_manifest(path), roots):
+            die(f"manifest.{label}: {first!r} and {second!r} both mount as skill directory {key!r}; "
+                "agents list skills by directory name, so rename one directory")
     return manifest
 
 
