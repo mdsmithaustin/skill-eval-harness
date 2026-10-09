@@ -7091,8 +7091,11 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                         killpg(proc.pid, signal.SIGTERM)
                         signal_sent = int(signal.SIGTERM)
                     except OSError as exc:
-                        state = RecoveryProcessState.SIGNAL_FAILED
-                        error = f"{type(exc).__name__}: {exc}"
+                        if isinstance(exc, ProcessLookupError) or exc.errno == errno.ESRCH:
+                            state = RecoveryProcessState.NATURAL_COMPLETION
+                        else:
+                            state = RecoveryProcessState.SIGNAL_FAILED
+                            error = f"{type(exc).__name__}: {exc}"
             if state is RecoveryProcessState.CHECKPOINT_STOP:
                 try:
                     out, err = proc.communicate(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
