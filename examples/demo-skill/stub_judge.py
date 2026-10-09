@@ -17,8 +17,10 @@ modes, so the judge-trust loop (docs/can-i-trust-my-judge.md) runs in CI:
                        baseline (compare-judges), and scores kappa 0.0 against
                        human labels (judge-alignment).
 
-The verdict shape matches what a real model judge is asked for:
-{"passed": bool, "score": number, "rationale": str}.
+A per-step verdict has one criterion for each completed trajectory step.
+The careful judge reads only trajectory_steps and rejects repeated actions.
+The lenient judge passes every step.
+
 """
 import json
 import sys
@@ -29,9 +31,28 @@ text = sys.stdin.read()
 # hint above it is dumped compact, on one line).
 start = text.index("\n{\n")
 payload = json.loads(text[start + 1:])
-out = payload.get("candidate_output") or ""
+lenient = "--lenient" in sys.argv[1:]
 
-if "--lenient" in sys.argv[1:]:
+steps = payload.get("trajectory_steps")
+if isinstance(steps, list):
+    seen: set[tuple[str, str]] = set()
+    criteria = []
+    redundant: list[str] = []
+    for step in steps:
+        action = (str(step.get("type")), str(step.get("input_summary") or step.get("name") or ""))
+        met = lenient or action not in seen
+        criteria.append({"name": step["step"], "met": met})
+        if not met:
+            redundant.append(str(step["step"]))
+        seen.add(action)
+    rationale = ("Looks good to me." if lenient
+                 else f"{', '.join(redundant)} repeat an earlier step verbatim" if redundant
+                 else "every step is a distinct action")
+    print(json.dumps({"criteria": criteria, "rationale": rationale}))
+    sys.exit(0)
+
+out = payload.get("candidate_output") or ""
+if lenient:
     passed, rationale = True, "Looks good to me."
 else:
     reasoned = "—" in out          # an em-dash justification ("... — because ...")

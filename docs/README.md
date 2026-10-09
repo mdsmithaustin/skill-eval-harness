@@ -21,6 +21,8 @@ title is the question; the body is the loop that answers it, runnable on
 | Did my skill edit regress anything? | [`did-my-skill-edit-regress.md`](did-my-skill-edit-regress.md) |
 | Which model should my skill target? | [`which-model-should-my-skill-target.md`](which-model-should-my-skill-target.md) |
 | Why did this run fail? | [`why-did-this-run-fail.md`](why-did-this-run-fail.md) |
+| Did my skill change how the model works? | [`did-my-skill-change-how-the-model-works.md`](did-my-skill-change-how-the-model-works.md) |
+| Did removing this description break discovery? | [`did-removing-this-break-discovery.md`](did-removing-this-break-discovery.md) |
 | Can I trust my judge? | [`can-i-trust-my-judge.md`](can-i-trust-my-judge.md) |
 | How do I upgrade a v1 manifest to v2? | [`migrating-evals.md`](migrating-evals.md) |
 | How do I upgrade the harness from 0.5.1 to 0.6.0? | [`upgrading.md`](upgrading.md) |
