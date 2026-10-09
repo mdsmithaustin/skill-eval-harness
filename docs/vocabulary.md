@@ -129,7 +129,7 @@ The [recovery reference](recovery.md) defines their separate evidence contract a
 
 - `trace.jsonl` — the raw runner event stream, preserved before normalization.
 - `events.json` — normalized events that process assertions read.
-- `metrics.json` — tokens, command counts, tool calls, elapsed time, retries.
+- `metrics.json` — tokens, command counts, tool calls, elapsed time, and retries where observed. Pi counts `agent_end.willRetry: true` in complete streams. Other providers and incomplete retry evidence omit `retries` rather than report zero.
 - `environment.json` — runner, model, and sandbox details where available.
 
 **Workspace changes** — what an ordinary answer run's or `run-subagent` run's model added, modified, or deleted in its temporary workspace: `workspace-changes.json` (the manifest), `candidate.patch` (text edits), and `candidate-files/<sha256>` (content a patch cannot carry). `workspace_changes_captured` is true only when that evidence is complete and committed; it is reported separately from `artifact_set_complete`.

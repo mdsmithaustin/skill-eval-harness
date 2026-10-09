@@ -387,7 +387,7 @@ Trace-aware runners may also write:
 ```text
 runs/<case_id>/<variant>/run-1/trace.jsonl       # raw runner event stream
 runs/<case_id>/<variant>/run-1/events.json       # normalized events used by process assertions
-runs/<case_id>/<variant>/run-1/metrics.json      # tokens, commands, tool calls, elapsed time, retries
+runs/<case_id>/<variant>/run-1/metrics.json      # tokens, commands, tool calls, elapsed time, retries where observed
 runs/<case_id>/<variant>/run-1/environment.json  # runner/model/sandbox details where available
 runs/<case_id>/<variant>/run-1/artifact-commit.json # required-file SHA-256 inventory, written last by current runners
 runs/<case_id>/<variant>/run-1/workspace-changes.json  # what the model added, modified, or deleted in its workspace

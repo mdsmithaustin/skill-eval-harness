@@ -8755,6 +8755,14 @@ def _no_stream_semantics(records: list[dict[str, Any]], pi_stream: PiStream | No
     return None, None
 
 
+def _no_retry_observation(records: list[dict[str, Any]], pi_stream: PiStream | None) -> int | None:
+    return None
+
+
+def _pi_retries(records: list[dict[str, Any]], pi_stream: PiStream | None) -> int | None:
+    return (pi_stream or PiStream.from_records(records)).retries
+
+
 def _pi_stream_semantics(records: list[dict[str, Any]], pi_stream: PiStream | None) -> tuple[dict[str, Any] | None, str | None]:
     """Pi repeats final cumulative usage on message_end, turn_end, and
     agent_end — one response, not several token deltas — and a terminal
@@ -8854,6 +8862,7 @@ class TraceDialect:
     stream_semantics: Callable[[list[dict[str, Any]], PiStream | None], tuple[dict[str, Any] | None, str | None]] = _no_stream_semantics
     usage_and_cost: Callable[[str, PiStream | None], tuple[dict[str, Any], dict[str, Any]]] = _generic_usage_and_cost_blocks
     protocol_error: Callable[[list[dict[str, Any]], PiStream | None], str | None] = _generic_trace_protocol_error
+    retries: Callable[[list[dict[str, Any]], PiStream | None], int | None] = _no_retry_observation
 
 
 GENERIC_TRACE_DIALECT = TraceDialect()
@@ -8872,6 +8881,7 @@ PI_TRACE_DIALECT = TraceDialect(
     stream_semantics=_pi_stream_semantics,
     usage_and_cost=_pi_usage_and_cost_blocks,
     protocol_error=_pi_trace_protocol_error,
+    retries=_pi_retries,
 )
 GEMINI_TRACE_DIALECT = TraceDialect(
     flatten=gemini_stream_flat_records,
@@ -8958,6 +8968,9 @@ def normalize_trace_records(records: list[dict[str, Any]], *, source: str = "gen
         "skill_invoked": bool(skill_events),
         "skill_invocation_evidence": [command_text(e) or e.get("input_summary", "") for e in skill_events[:10]],
     }
+    retries = dialect.retries(records, pi_stream)
+    if retries is not None:
+        metrics["retries"] = retries
     protocol_errors = [
         str(record.get("message") or "trace protocol error")
         for _, record in flat if record.get("_trace_protocol_invalid") is True
@@ -9131,6 +9144,7 @@ class PiStream:
     terminal_usage: dict[str, Any] | None
     usage_normalized: dict[str, Any]
     cost_normalized: dict[str, Any]
+    retries: int | None = None
 
     def __post_init__(self) -> None:
         if self.failure_error and (
@@ -9138,6 +9152,12 @@ class PiStream:
             or self.cost_normalized != {"source": "missing"}
         ):
             raise ValueError("failed Pi streams cannot carry measured usage or cost")
+        if self.retries is not None and (
+            isinstance(self.retries, bool) or not isinstance(self.retries, int) or self.retries < 0
+        ):
+            raise ValueError("Pi retry count must be a non-negative integer or None")
+        if self.protocol_error and self.retries is not None:
+            raise ValueError("protocol-invalid Pi streams cannot carry a retry count")
 
     @property
     def failure_error(self) -> str | None:
@@ -9164,9 +9184,17 @@ class PiStream:
             cost = normalize_cost(terminal_usage.get("cost"), source="trace_normalized")
         else:
             usage, cost = _generic_stream_usage_and_cost(materialized)
+        attempt_ends = [record for record in materialized if record.get("type") == "agent_end"]
+        last_attempt_event = next((record for record in reversed(materialized)
+                                   if record.get("type") in {"agent_start", "agent_end"}), None)
+        retries = None
+        if (not protocol_error and last_attempt_event is final_agent_end
+                and all("willRetry" not in record or isinstance(record["willRetry"], bool)
+                        for record in attempt_ends)):
+            retries = sum(record.get("willRetry") is True for record in attempt_ends)
         return cls(tuple(materialized), errors, terminal_error, protocol_error,
                    dict(terminal_usage) if terminal_usage is not None else None,
-                   usage, cost)
+                   usage, cost, retries)
 
     @classmethod
     def parse(cls, raw_text: str) -> PiStream:
