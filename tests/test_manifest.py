@@ -1056,12 +1056,86 @@ class SkillPathAgreementTests(unittest.TestCase):
         return path
 
     def _all_three_fail(self, path: Path) -> list[str]:
-        manifest = sb.validate_manifest(path)
-        return [
-            _dies_with(self, sb.validate_cli_command, _validate_args(path)),
-            _dies_with(self, sb.prepared_task_rows, path, manifest, split="tune"),
-            _dies_with(self, sb.audit_manifest_report, path),
+        messages = []
+        for command in ("validate", "prepare", "audit-manifest"):
+            code, _, stderr = run_cli(command, path)
+            self.assertEqual(code, 1, stderr)
+            messages.append(stderr)
+        return messages
+
+    def test_root_skill_path_cli_reports_missing_file_after_present_control(self):
+        for nested in (False, True):
+            with self.subTest(nested=nested), tempfile.TemporaryDirectory() as td:
+                path = make_eval_repo(Path(td), skill_paths=["SKILL.md"])
+                skill = path.parent.parent / "SKILL.md"
+                if nested:
+                    target = path.parent / "demo" / path.name
+                    target.parent.mkdir()
+                    path.rename(target)
+                    path = target
+                for command in ("validate", "prepare", "audit-manifest"):
+                    with self.subTest(command=command, present=True):
+                        code, stdout, stderr = run_cli(command, path)
+                        self.assertEqual(code, 0, stderr)
+                        if command == "validate":
+                            self.assertIn("OK: demo", stdout)
+                        elif command == "prepare":
+                            rows = [json.loads(line) for line in stdout.splitlines()]
+                            self.assertEqual([row["variant"] for row in rows],
+                                             ["with_skill", "without_skill"])
+                            self.assertEqual(rows[0]["skill_paths"], [str(skill.resolve())])
+                            self.assertEqual(rows[0]["skill_root_keys"], ["demo"])
+                            self.assertEqual(rows[1]["skill_paths"], [])
+                        else:
+                            self.assertEqual(json.loads(stdout)["skill_name"], "demo")
+                skill.unlink()
+                for command in ("validate", "prepare", "audit-manifest"):
+                    with self.subTest(command=command, present=False):
+                        code, _, stderr = run_cli(command, path)
+                        self.assertEqual(code, 1, stderr)
+                        self.assertIn("skill paths must exist inside the manifest's skill root", stderr)
+                        self.assertIn("'SKILL.md' does not exist", stderr)
+                        self.assertIn("resolve from the repository root", stderr)
+                        self.assertNotIn("Traceback", stderr)
+
+    def test_root_skill_path_cli_preserves_schema_diagnostics_before_path_check(self):
+        invalid = [
+            ({"version": 99}, "manifest.version must be one of"),
+            ({"skill_name": 1}, "manifest.skill_name is required"),
+            ({"skill_paths": [1]}, "manifest.skill_paths must be a non-empty list of strings"),
+            ({"variants": ["with_skill"]}, "manifest.variants must contain exactly"),
+            ({"cases": [{"id": "bad", "split": "invalid"}]}, "bad: split must be one of"),
+            ({"ablations": [{"id": "broken"}]}, "ablation broken: missing removed_component"),
+            ({"cases": [{"id": "scoped", "kind": "trigger", "split": "tune",
+                         "prompt": "review this", "should_trigger": True,
+                         "expected_skills": ["unknown"]}]}, "unknown"),
         ]
+        for fields, diagnostic in invalid:
+            with self.subTest(fields=fields), tempfile.TemporaryDirectory() as td:
+                path = make_eval_repo(Path(td), skill_paths=["SKILL.md"], extra=fields)
+                (path.parent.parent / "SKILL.md").unlink()
+                for command in ("validate", "prepare", "audit-manifest"):
+                    with self.subTest(command=command):
+                        code, _, stderr = run_cli(command, path)
+                        self.assertEqual(code, 1, stderr)
+                        self.assertIn(diagnostic, stderr)
+                        self.assertNotIn("skill paths must exist", stderr)
+
+    def test_root_skill_path_cli_reports_containment_before_mount_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "SKILL.md").write_text(skill_markdown(), encoding="utf-8")
+            path = make_eval_repo(root, skill_paths=["SKILL.md"],
+                                  extra={"skill_paths": ["../SKILL.md"]})
+            for command in ("validate", "prepare", "audit-manifest"):
+                with self.subTest(command=command):
+                    code, _, stderr = run_cli(command, path)
+                    self.assertEqual(code, 1, stderr)
+                    self.assertIn("skill paths must exist inside the manifest's skill root", stderr)
+                    self.assertIn("'../SKILL.md' resolves to", stderr)
+                    self.assertIn("outside", stderr)
+                    self.assertIn("resolve from the repository root", stderr)
+                    self.assertNotIn("Traceback", stderr)
 
     def test_repo_escaping_path_fails_validate_prepare_and_audit_alike(self):
         with tempfile.TemporaryDirectory() as td:
