@@ -180,6 +180,8 @@ Everything under `docs/` is indexed once, in [`docs/README.md`](docs/README.md):
 
 Each skill repo owns a `shared-benchmark.json` manifest in one of two places. The first is `evals/shared-benchmark.json`, at the repo root or inside a skill directory as `skills/<name>/evals/shared-benchmark.json`. The second is `evals/<name>/shared-benchmark.json`, one directory per skill at the repo root. The second layout exists because a skill installer such as `npx skills` copies a skill directory verbatim, so a manifest under `skills/<name>/evals/` ships fixtures, prompts, and oracles to everyone who installs the skill. `evals/<name>/shared-benchmark.json` keeps those files out of the published directory while `"skill_paths": ["skills/<name>/SKILL.md"]` still resolves. Add a `harness` block so readers know which external harness/version to install.
 
+`skill_paths` (and `old_skill_paths`, ablation `target.skill_root`) resolve from the repository root for a file named `evals/shared-benchmark.json` or `evals/<skill>/shared-benchmark.json`. Other manifest files, including YAML, resolve them from their own directory. `validate`, `prepare` and `audit-manifest` fail when a skill path is missing or escapes that root, and name the rule that applied.
+
 ```json
 {
   "version": 1,

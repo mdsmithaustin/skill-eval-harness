@@ -78,7 +78,9 @@ distilled from those audits and production runs live in [`LESSONS_LEARNED.md`](.
 
 Fork maintainers use the [upstream sync workflow](upstream-syncs/README.md) to preserve
 merge ancestry and record accepted checkpoints. The [2026-10-05 sync record](upstream-syncs/2026-10-05.md)
-documents the pinned inputs, preservation choices, and verification limits.
+documents the pinned inputs, preservation choices, and verification limits. The
+[2026-10-09 sync record](upstream-syncs/2026-10-09.md) records the next pinned integration
+and its local verification limits.
 
 ## Adding a user journey
 
