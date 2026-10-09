@@ -255,6 +255,8 @@ independently set timeout, return code, answer, and failure into a contradictory
 calls no model during default grading; it reads what the runner left behind. The explicit
 `--allow-scripts` and `--embed-cmd` modes may invoke caller-supplied external oracle subprocesses.
 
+`spend_contracts.py` owns an immutable `AnswerCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` supplies serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. A session with no policy executes its callback without spend artifacts.
+
 Before a native provider subprocess starts, `invocation_contracts.py` constructs one
 `ProcessInvocationPlan`: immutable argv, stdin, working directory, environment, a positive
 `TimeoutSeconds`, and an optional `redact_output` function that the subprocess owner applies to the

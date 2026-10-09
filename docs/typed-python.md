@@ -37,6 +37,7 @@ Ruff-checked, byte-compiled, and executed on every supported Python version.
 | judge subprocess and verdict JSON, repeated or panel verdicts | `JudgeInvocation`, `JudgeVerdict`, `Consensus` | `judge_contracts.py`, `judge_verdict.py` |
 | assertion and deferred judge rows | `AssertionObservation`, `JudgeTask` | `grading_contracts.py` |
 | provider telemetry | availability/provenance/comparability domain values | `telemetry.py` |
+| native spend policy, call identity, and ledger snapshots | `SpendPolicy`, `AnswerCall`, `CallState`, `Charge`, `SpendLedger` | `spend_contracts.py`, `spend_runtime.py` |
 | stored availability spellings and telemetry sources | `Availability`, `TelemetrySource` | `observation_contracts.py` |
 | benchmark case flags and audit, readiness, profile, cost, contamination and robustness findings | `CaseFlag`, `FindingKind`, `Finding`, `EvalMark` | `findings.py` |
 | `--fail-on` tokens and the gate flags | `GatePolicy`, `GateDecision` | `gate_policy.py` |

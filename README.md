@@ -640,6 +640,8 @@ skill-eval-harness/
 ├── grading_contracts.py        # closed assertion observations and immutable judge tasks
 ├── report_contracts.py         # empty/complete/partial report coverage cohorts and rates
 ├── runner_contracts.py         # closed answer-runner outcome union
+├── spend_contracts.py          # immutable native call plan and spend receipts
+├── spend_runtime.py            # serial admission and invocation ledger publication
 ├── judge_verdict.py            # strict imported/stored judge verdict variants
 ├── jetty_contracts.py          # closed Jetty lifecycle and observation contract
 ├── trace_contracts.py          # normalized event-log and event lifecycle contracts
