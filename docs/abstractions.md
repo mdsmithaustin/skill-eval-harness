@@ -258,7 +258,15 @@ independently set timeout, return code, answer, and failure into a contradictory
 calls no model during default grading; it reads what the runner left behind. The explicit
 `--allow-scripts` and `--embed-cmd` modes may invoke caller-supplied external oracle subprocesses.
 
-`spend_contracts.py` owns an immutable `AnswerCall | SubagentTurnCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` owns serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. Native runners retain workspace, subprocess, artifact, and recovery policy. Reports read each ledger without changing the immutable answer design. The [native spend walkthrough](limit-native-spend.md) describes the operator contract.
+`spend_contracts.py` owns an immutable `AnswerCall | SubagentTurnCall | JudgeCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` owns serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. Native runners retain workspace, subprocess, artifact, and recovery policy. Reports read each ledger without changing the immutable answer design. The [native spend walkthrough](limit-native-spend.md) describes the operator contract.
+
+Judge admission keeps private immutable guarded and ready slots beside the current judge owner.
+Only ready slots derive the paid plan. `JudgeCall` binds task identity, effective input hash,
+backend, requested model or default, and repeat. Prepared tasks and steps thaw recursively at
+existing validators. Each admitted adapter receives a disposable exploration copy made from
+the private retained template inside `SpendAdmission.run`. Per-call cleanup, verdict parsing,
+and transcript writes follow settlement. Guarded and refused result slots stay in both consensus
+merges. No new guard state enters the ledger.
 
 Subagent admission binds each required external callback turn to its prepared task digest, `RunCoordinate`, and positive turn number. The immutable plan uses the scripted `turns` list, or turn 1 for a single call. Provider-internal turn limits do not add calls. Built-in backends capture immutable reported dollars, scope, and actual process evidence before response validation. Accepted responses freeze recursively and thaw at the existing dictionary validators. Rejected responses retain safe dollars and raw envelopes in diagnostics. Multi-turn prices require explicit `turn_delta`. Cumulative or unspecified counters remain provider diagnostics. Assumptions remain in the ledger.
 
@@ -471,7 +479,7 @@ by domain, difficulty, trigger type, and success goal. Case flags mark saturated
 flaky, and with-skill-failed cases, and `effect_estimates.ceiling_or_floor` separates the two
 ways a case stops discriminating: both arms always pass (ceiling) or both always fail (floor, which
 `suggest-cases` never offers for hardening). These flags, the leakage lint
-(`prompt_assertion_leakage_findings:972`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:974`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as

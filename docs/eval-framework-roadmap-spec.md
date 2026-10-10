@@ -66,20 +66,20 @@ multi-model (2.1) feature built on unverified detectors only scales an unverifie
   `tests/fixtures/detectors/<detector_id>/should-fire.*` and `should-pass.*` that exercise
   `assertion_result` (`:12797`) directly. That function has no direct unit test today, and its
   `contains_any`, `excludes_any`, and `not_regex` branches go unexercised even though their types
-  are declared in the assertion registries (`TEXT_ASSERTIONS:324`).
+  are declared in the assertion registries (`TEXT_ASSERTIONS:326`).
 - **Design:** one table-driven test loads every pair and asserts the detector fires on `should-fire`
   and stays silent on `should-pass`. A `should-pass` twin is mandatory: it enforces the
   false-positive bar `authoring-evals.md` already sets for skill authors ("check both presence and
   absence"). Each `should-pass` set includes a case where the baseline echoes the prompt, because a
   detector that passes on echoed prompt text is a false oracle; this ties the fixtures to leakage
-  lint (`prompt_assertion_leakage_findings` (`:972`)). Every detector bug then becomes a permanent
+  lint (`prompt_assertion_leakage_findings` (`:974`)). Every detector bug then becomes a permanent
   fixture pair, and `test_command_assertions_match_command_inputs_not_outputs` is the first.
 - **Why it is the keystone:** the fixture pair is also the registration contract. It is what lets a
   harvested or third-party detector be trusted on entry, so it gates the exapted detector library
   (TODO, end of 2026), and it raises the oracle-strength ladder (1.7) so that "strong" means
   fixture-verified, not only deterministic.
 - **Testing:** the fixtures are the test. A meta-test asserts every name in `OBJECTIVE_ASSERTIONS`
-  (`:374`) has a fixture pair, so a new detector cannot land unverified.
+  (`:376`) has a fixture pair, so a new detector cannot land unverified.
 
 ### CF.2 — One cross-runner baseline-isolation invariant
 - **Goal:** prove the baseline is skill-free by construction, so a measured lift is the skill's
@@ -129,7 +129,7 @@ assumed.
 - **Goal:** ship graders authors reach for often, so they stop hand-rolling rubrics.
 - **Abstractions used or changed:** `tool_call` and `structured_output` are deterministic, so
   they become new types in `TEXT_ASSERTIONS` / `PROCESS_ASSERTIONS` and gain a branch in
-  `assertion_result`. `tool_call` reuses `command_events` (`:6677`) and the `command_order`
+  `assertion_result`. `tool_call` reuses `command_events` (`:6679`) and the `command_order`
   logic; `structured_output` extends `json_field_equals` with JSON-Schema validation.
   `factuality` adds no core code: it is a named rubric that `judge_prompt` (`:13399`) renders
   and still runs through `--judge-cmd`.
@@ -243,7 +243,7 @@ assumed.
 ### 2.1 Multi-model fan-out (priority)
 - **Goal:** run the same cases across several models and compare lift per model. No surveyed
   framework does this; vitest-evals, eve, and viteval all push it onto the test runner.
-- **Abstractions used or changed:** `prepared_task_rows` (`:1817`) gains a `model` dimension
+- **Abstractions used or changed:** `prepared_task_rows` (`:1819`) gains a `model` dimension
   beside `variant` and `run_number`. Each row carries its target `model`, and `run_dir` gains a
   model segment (`<case>/<model>/<variant>/run-<n>`), kept backward-compatible when one model
   runs. Runners pass the row `model` through; per-run `model` already lands in `metadata.json`,
@@ -357,7 +357,7 @@ assumed.
 ### 2.5 Dataset abstraction
 - **Goal:** fan one case template over many rows instead of hand-authoring each case.
 - **Abstractions used or changed:** a new optional manifest construct (`datasets`, plus a case
-  `template` referencing a dataset id). `iter_cases` (`:713`) materializes template by row into
+  `template` referencing a dataset id). `iter_cases` (`:715`) materializes template by row into
   concrete cases before fan-out; `validate_manifest` validates rows and runs leakage lint per
   materialized case.
 - **Design:** materialization happens early, so prepare, grade, and report stay unchanged.
@@ -397,8 +397,8 @@ assumed.
   it dispatches a subagent with a rubric whose "criteria [are] deliberately absent from
   generation rules."
 - **Abstractions used or changed:** mostly a discipline made first-class, not new machinery.
-  `prepared_task_rows` (`:1817`) already omits `review_rubric` from generation payloads unless
-  `--include-answer-key`; extend `validate_manifest` (`:1383`) to require that a `holdout`/
+  `prepared_task_rows` (`:1819`) already omits `review_rubric` from generation payloads unless
+  `--include-answer-key`; extend `validate_manifest` (`:1385`) to require that a `holdout`/
   `holdback` case's rubric stays out of the skill and public eval text, and pair it with the
   subagent judge from 2.7 and the graded scoring from 2.2. Track which rubrics were held out so
   the report can separate held-out scores from tune-visible ones.
@@ -449,7 +449,7 @@ assumed.
 - **Goal:** evaluate conversational skills across a send/respond sequence.
 - **Abstractions changed (core contract):** a case gains an optional `turns` list. The
   run-output contract grows from one `output.md` to a turn-indexed transcript, so
-  `read_output_base` (`:6536`) and `discover_run_bases` (since replaced by
+  `read_output_base` (`:6538`) and `discover_run_bases` (since replaced by
   `discover_run_bases_under` with `discover_case_model_roots`) learn the turn layout; runners drive the
   sequence; `grade_case_variant` grades per turn and aggregates.
 - **Design:** single-shot stays the default, so existing manifests are untouched.
@@ -650,7 +650,7 @@ and upgrading to the new features should be something an agent can drive.
 
 ### Abstractions used or changed
 
-- `version` on the manifest (`validate_manifest:1383`) becomes meaningful: `validate` accepts both
+- `version` on the manifest (`validate_manifest:1385`) becomes meaningful: `validate` accepts both
   1 and 2, and warns (not errors) on a `version: 1` manifest once 2.2 has landed, pointing at
   `migrate`.
 - No grading abstraction changes for migration itself; it is a source-rewrite plus a guide.

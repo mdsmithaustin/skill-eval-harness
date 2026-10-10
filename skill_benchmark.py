@@ -45,6 +45,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass as _dataclass
+from dataclasses import replace as _replace
 from decimal import ROUND_CEILING, Decimal
 from enum import Enum
 from fractions import Fraction
@@ -232,6 +233,7 @@ from manifest_contracts import (
 from observation_contracts import COST_SOURCES, USAGE_SOURCES, Availability
 from spend_contracts import (
     AnswerCall,
+    JudgeCall,
     NoModelSpend,
     Refused,
     SpendPlan,
@@ -9549,6 +9551,8 @@ class _NoProcessArtifact:
         else:
             raise TypeError("unsupported no-process artifact reason")
         for call in calls:
+            if not isinstance(call, SubagentTurnCall):
+                raise TypeError("no-process artifact requires subagent turn calls")
             if (call.task_sha256 != self.context.metadata_extra.get("answer_task_sha256")
                     or call.coordinate != RunCoordinate.of(
                         self.context.metadata_extra.get("case_id"),
@@ -13165,16 +13169,25 @@ def judge_input_material(
         if run_base is None:
             raise ValueError("requested judge explore evidence has no run directory")
         explore_sha256 = judge_explore_surface_sha256(run_base)
+    return _judge_input_binding(task, candidate_output, evidence_mode=evidence_mode,
+                                trajectory=trajectory, metrics=metrics, artifacts=artifacts,
+                                steps=steps, explore_sha256=explore_sha256)
+
+
+def _judge_input_binding(
+    task: dict[str, Any], candidate_output: str, *, evidence_mode: str,
+    trajectory: list[dict[str, Any]] | None, metrics: dict[str, Any] | None,
+    artifacts: list[str] | None, steps: list[dict[str, Any]] | None,
+    explore_sha256: str | None,
+) -> tuple[str, str, str, str | None]:
     prompt = judge_prompt(
         task, candidate_output, trajectory=trajectory, metrics=metrics,
-        artifacts=artifacts, explore_dir="." if wants_explore else None,
+        artifacts=artifacts, explore_dir="." if explore_sha256 is not None else None,
         steps=steps)
     prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     fingerprint = canonical_json_sha256({
-        "schema_version": 3,
-        "evidence_mode": evidence_mode,
-        "judge_prompt_sha256": prompt_sha256,
-        "explore_surface_sha256": explore_sha256,
+        "schema_version": 3, "evidence_mode": evidence_mode,
+        "judge_prompt_sha256": prompt_sha256, "explore_surface_sha256": explore_sha256,
     })
     return fingerprint, prompt, prompt_sha256, explore_sha256
 
@@ -13799,6 +13812,39 @@ def _judge_row_identity(task: dict[str, Any], *, judge_model: str | None,
     }
 
 
+@_dataclass(frozen=True)
+class _GuardedJudgeSlot:
+    row: Mapping[str, Any]
+
+
+@_dataclass(frozen=True)
+class _ReadyJudgeSlot:
+    task: Mapping[str, Any]
+    call: JudgeCall
+    judge_cmd: str | None
+    provider_options: Mapping[str, Any]
+    prompt: str
+    prompt_sha256: str
+    evidence_mode: str
+    context_sha256: str | None
+    steps: tuple[Mapping[str, Any], ...] | None
+    steps_sha256: str | None
+    explore_template: Path | None
+
+
+_JudgeSlot = _GuardedJudgeSlot | _ReadyJudgeSlot
+
+
+@_dataclass(frozen=True)
+class _PreparedJudgeWork:
+    tasks: tuple[tuple[tuple[_JudgeSlot, ...], ...], ...]
+
+    @property
+    def paid_plan(self) -> SpendPlan:
+        return SpendPlan(tuple(slot.call for members in self.tasks for repeats in members
+                               for slot in repeats if isinstance(slot, _ReadyJudgeSlot)))
+
+
 def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, transcripts_dir: Path | None = None,
                        repeat_index: int = 1, *, judge_model: str | None = None, claude_bin: str = "claude",
                        judge_backend: str = "claude", codex_cmd: str = CODEX_JUDGE_DEFAULT_CMD,
@@ -13806,9 +13852,24 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
                        schema_enforcement: str = "report", include_trajectory: bool = False,
                        explore: bool = False,
                        backend_options: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    # Compatibility-only since malformed verdicts now always fail closed. Keep
-    # accepting the old argument while callers migrate it away.
     _ = schema_enforcement
+    with ExitStack() as scratch_owner:
+        slot = _prepare_judge_task(
+            task, judge_cmd, repeat_index, judge_model=judge_model,
+            claude_bin=claude_bin, judge_backend=judge_backend, codex_cmd=codex_cmd,
+            vibe_cmd=vibe_cmd,
+            include_trajectory=include_trajectory, explore=explore,
+            backend_options=backend_options, scratch_owner=scratch_owner)
+        return _run_judge_slot(slot, SpendAdmission(None, None), transcripts_dir)
+
+
+def _prepare_judge_task(task: dict[str, Any], judge_cmd: str | None = None,
+                       repeat_index: int = 1, *, judge_model: str | None = None, claude_bin: str = "claude",
+                       judge_backend: str = "claude", codex_cmd: str = CODEX_JUDGE_DEFAULT_CMD,
+                       vibe_cmd: str = VIBE_DEFAULT_CMD,
+                       include_trajectory: bool = False, explore: bool = False,
+                       backend_options: Mapping[str, Any] | None = None,
+                       scratch_owner: ExitStack) -> _JudgeSlot:
     if explore and not judge_cmd and judge_backend != "claude":
         raise ValueError(
             "--judge-explore is only supported by the native Claude judge; "
@@ -13826,6 +13887,7 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
     # any model spend, and fail closed — like a process assertion — when there
     # is nothing to judge. grade_case_variant already refuses to emit such a
     # task; this guard covers re-run task files whose run dirs have changed.
+    step_events: list[dict[str, Any]] | None = None
     per_step_steps: list[dict[str, Any]] | None = None
     per_step_fingerprint: str | None = None
     if is_per_step_assertion(task.get("assertion", {})):
@@ -13836,7 +13898,7 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
             # telemetry from a run that happened.
             fallback_hash, _, fallback_prompt_hash, _ = judge_input_material(
                 task, output_text)
-            return validated_result_row({
+            return _GuardedJudgeSlot(freeze_json_mapping(validated_result_row({
                 **_judge_row_identity(task, judge_model=judge_model,
                                       judge_backend=judge_backend, judge_cmd=judge_cmd),
                 "judge_input_sha256": fallback_hash,
@@ -13851,12 +13913,12 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
                 "evidence": f"{PER_STEP_MISSING_EVIDENCE}: {step_error or 'unreadable events.json'}",
                 "returncode": 0,
                 "stderr": "",
-            })
+            }), "guarded judge row"))
         per_step_steps = trajectory_steps(step_events, run_base if has_run_base else None)
         if not per_step_steps:
             complete_hash, _, complete_prompt_hash, _ = judge_input_material(
                 task, output_text, run_base=run_base, steps=[])
-            return validated_result_row({
+            return _GuardedJudgeSlot(freeze_json_mapping(validated_result_row({
                 **_judge_row_identity(task, judge_model=judge_model,
                                       judge_backend=judge_backend, judge_cmd=judge_cmd),
                 "judge_input_sha256": complete_hash,
@@ -13871,13 +13933,13 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
                 "evidence": f"{PER_STEP_MISSING_EVIDENCE}: no completed trajectory steps",
                 "returncode": 0,
                 "stderr": "",
-            })
+            }), "guarded judge row"))
         per_step_fingerprint = trajectory_steps_sha256(per_step_steps)
         expected_fingerprint = task.get("trajectory_steps_sha256")
         if (isinstance(expected_fingerprint, str)
                 and expected_fingerprint != per_step_fingerprint):
             minimum = per_step_minimum(task.get("assertion", {}), len(per_step_steps))
-            return validated_result_row({
+            return _GuardedJudgeSlot(freeze_json_mapping(validated_result_row({
                 **_judge_row_identity(task, judge_model=judge_model,
                                       judge_backend=judge_backend, judge_cmd=judge_cmd),
                 "judge_input_sha256": judge_input_sha256(
@@ -13899,7 +13961,7 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
                 "evidence": "per-step judge task trajectory changed after task creation; model was not invoked",
                 "returncode": 0,
                 "stderr": "",
-            })
+            }), "guarded judge row"))
     planned_input_sha256 = judge_input_sha256(
         task, output_text, run_base=run_base, steps=per_step_steps)
     declared_input_sha256 = task.get("judge_input_sha256")
@@ -13907,7 +13969,7 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
             and declared_input_sha256 != planned_input_sha256):
         _, _, planned_prompt_sha256, _ = judge_input_material(
             task, output_text, run_base=run_base, steps=per_step_steps)
-        return validated_result_row({
+        return _GuardedJudgeSlot(freeze_json_mapping(validated_result_row({
             **_judge_row_identity(task, judge_model=judge_model,
                                   judge_backend=judge_backend, judge_cmd=judge_cmd),
             "judge_input_sha256": planned_input_sha256,
@@ -13921,28 +13983,48 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
             "stderr": "",
             "usage_normalized": normalize_usage(None, source="not_applicable"),
             "cost_normalized": normalize_cost(None, source="not_applicable"),
-        })
-    # G1 tool-using follow-on: an opt-in judge may EXPLORE a SANITIZED copy of the run
-    # dir (oracle files removed by construction) with read-only tools, rather than only
-    # reading a prompt-embedded trajectory. Native adapter only, and only when the run
-    # dir exists to copy. The copy — never the live run dir — is what the judge sees,
-    # and the judge is run WITH the copy as cwd so its tools can't range over the repo.
-    explore_root: Path | None = None
-    explore_dir: Path | None = None
-    extra_args: list[str] | None = None
+        }), "guarded judge row"))
+    explore_template: Path | None = None
     effective_explore = bool(explore and not judge_cmd and judge_model)
     evidence_mode = (
         "trajectory+explore" if include_trajectory and effective_explore else
         "trajectory" if include_trajectory else
         "explore" if effective_explore else "text-only")
     try:
-        current_input_sha256, prompt, prompt_sha256, context_sha256 = judge_input_material(
-            task, output_text, evidence_mode=evidence_mode,
-            run_base=run_base, steps=per_step_steps)
+        trajectory = None
+        metrics = None
+        artifacts = None
+        if include_trajectory:
+            if run_base is None:
+                raise ValueError("requested judge trajectory evidence has no run directory")
+            if step_events is None:
+                step_events, error = read_events_base(run_base)
+                if step_events is None:
+                    raise ValueError(f"requested judge trajectory evidence is incomplete: {error or 'unreadable events.json'}")
+            trajectory = step_events
+            metrics = read_metrics_base(run_base)
+            artifacts = judge_artifact_inventory(run_base)
+        context_sha256 = None
+        if effective_explore:
+            if run_base is None:
+                raise ValueError("requested judge explore evidence has no run directory")
+            scratch = Path(scratch_owner.enter_context(tempfile.TemporaryDirectory(prefix="judge-explore-")))
+            source = scratch / "source"
+            def ignore(dirpath: str, names: list[str]) -> list[str]:
+                return [name for name in names
+                        if any(marker in name.lower() for marker in JUDGE_LEAK_MARKERS)
+                        or (Path(dirpath) / name).is_symlink()]
+            shutil.copytree(run_base, source, ignore=ignore)
+            context_sha256 = judge_explore_surface_sha256(source)
+            explore_template = sanitized_run_copy(source, scratch / "run")
+        current_input_sha256, prompt, prompt_sha256, context_sha256 = _judge_input_binding(
+            task, output_text, evidence_mode=evidence_mode, trajectory=trajectory,
+            metrics=metrics, artifacts=artifacts, steps=per_step_steps,
+            explore_sha256=context_sha256)
     except (OSError, ValueError) as exc:
         _, _, fallback_prompt_sha256, _ = judge_input_material(
             task, output_text, run_base=run_base, steps=per_step_steps)
-        return validated_result_row({
+        return _GuardedJudgeSlot(freeze_json_mapping(validated_result_row({
             **_judge_row_identity(task, judge_model=judge_model,
                                   judge_backend=judge_backend, judge_cmd=judge_cmd),
             "judge_input_sha256": planned_input_sha256,
@@ -13956,49 +14038,105 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
             "stderr": "",
             "usage_normalized": normalize_usage(None, source="not_applicable"),
             "cost_normalized": normalize_cost(None, source="not_applicable"),
-        })
-    if effective_explore and has_run_base:
-        explore_root = Path(tempfile.mkdtemp(prefix="judge-explore-"))
-        explore_dir = sanitized_run_copy(run_base, explore_root / "run")
-        if explore_dir is not None:
-            extra_args = ["--add-dir", str(explore_dir), "--allowedTools", JUDGE_EXPLORE_TOOLS]
-    explore_hint = str(explore_dir) if explore_dir is not None else None
-    # Native judge backends share a registry-owned invocation seam. A shell
-    # `judge_cmd` remains the universal escape hatch; native Codex uses
-    # --output-last-message/--output-schema so stdout JSONL is telemetry, not
-    # the verdict stream.
-    assertion_schema = verdict_schema_for(task.get("assertion", {}))
-    try:
+        }), "guarded judge row"))
+    provider_options = ({} if judge_cmd else binding_for(judge_backend, "judge").option_values({
+        "claude_bin": claude_bin, "codex_cmd": codex_cmd, "vibe_cmd": vibe_cmd,
+        **dict(backend_options or {}),
+    }))
+    call = JudgeCall(task["judge_task_id"], current_input_sha256,
+                     "cmd" if judge_cmd else judge_backend, judge_model, repeat_index)
+    return _ReadyJudgeSlot(
+        freeze_json_mapping(task, "prepared judge task"), call, judge_cmd,
+        freeze_json_mapping(provider_options, "judge options"), prompt, prompt_sha256,
+        evidence_mode, context_sha256,
+        tuple(freeze_json_mapping(step, "judge step") for step in per_step_steps)
+        if per_step_steps is not None else None, per_step_fingerprint, explore_template)
+
+
+def _incomplete_judge_verdict(assertion: dict[str, Any], steps: list[dict[str, Any]] | None) -> dict[str, Any]:
+    if assertion.get("graded_dimensions"):
+        payload = {"dimension_scores": {dimension["name"]: 1 for dimension in assertion["graded_dimensions"]}}
+        entry = merged_qualitative_entry(assertion, payload, "incomplete")
+        return verdict_fields(verdict_from_dict(entry, strict_stored=True))
+    if is_per_step_assertion(assertion) or assertion.get("dynamic_rubric"):
+        minimum = (per_step_minimum(assertion, len(steps or [])) if is_per_step_assertion(assertion)
+                   else max(1, int(assertion["dynamic_rubric"].get("minimum_criteria", 3))))
+        names = [step["step"] for step in steps or []] or [f"criterion-{i}" for i in range(1, minimum + 1)]
+        return verdict_fields(verdict_from_dict({
+            "criteria": [{"name": name, "met": False} for name in names],
+            "minimum_criteria": minimum, "passed": False}, strict_stored=True))
+    scale = judge_score_scale(assertion)
+    if "atLeast" in assertion or scale is not None:
+        threshold = float(assertion.get("atLeast", assertion.get("threshold", scale[1] if scale else 1)))
+        score = scale[0] if scale is not None else 0.0
+        return verdict_fields(verdict_from_dict({"score": score, "threshold": threshold,
+                                               "passed": score >= threshold}, strict_stored=True))
+    return verdict_fields(BooleanVerdict(False))
+
+
+def _run_judge_slot(slot: _JudgeSlot, admission: SpendAdmission,
+                    transcripts_dir: Path | None) -> dict[str, Any]:
+    if isinstance(slot, _GuardedJudgeSlot):
+        return thaw_json_value(slot.row, "guarded judge row")
+    task = thaw_json_value(slot.task, "prepared judge task")
+    per_step_steps = ([thaw_json_value(step, "judge step") for step in slot.steps]
+                      if slot.steps is not None else None)
+    judge_cmd = slot.judge_cmd
+    judge_backend = slot.call.backend
+    judge_model = slot.call.requested_model
+    repeat_index = slot.call.repeat
+    prompt = slot.prompt
+    prompt_sha256 = slot.prompt_sha256
+    current_input_sha256 = slot.call.judge_input_sha256
+    evidence_mode = slot.evidence_mode
+    context_sha256 = slot.context_sha256
+    per_step_fingerprint = slot.steps_sha256
+
+    def invoke() -> Priced[JudgeInvocation]:
+        explore_dir = None
+        if slot.explore_template is not None:
+            scratch = Path(invocation_scratch.enter_context(tempfile.TemporaryDirectory(prefix="judge-call-")))
+            explore_dir = shutil.copytree(slot.explore_template, scratch / "run")
         if judge_cmd:
-            invocation = shell_judge_invoke(
-                prompt, judge_cmd=judge_cmd, model_label=judge_model)
-        elif judge_backend in JUDGE_BACKENDS:
-            available_options = {
-                "claude_bin": claude_bin,
-                "codex_cmd": codex_cmd,
-                "vibe_cmd": vibe_cmd,
-                **dict(backend_options or {}),
-            }
-            provider_options = binding_for(judge_backend, "judge").option_values(
-                available_options)
-            invocation = JUDGE_BACKENDS[judge_backend](
-                prompt,
-                judge_model=judge_model,
-                assertion_schema=assertion_schema,
-                extra_args=extra_args,
-                explore_hint=explore_hint,
-                **provider_options,
-            )
+            invocation = shell_judge_invoke(prompt, judge_cmd=judge_cmd, model_label=judge_model)
         else:
-            raise ValueError(f"unknown native judge backend {judge_backend!r}; choose one of {', '.join(sorted(JUDGE_BACKENDS))} or use --judge-cmd")
+            invocation = JUDGE_BACKENDS[judge_backend](
+                prompt, judge_model=judge_model,
+                assertion_schema=verdict_schema_for(task.get("assertion", {})),
+                extra_args=(["--add-dir", str(explore_dir), "--allowedTools", JUDGE_EXPLORE_TOOLS]
+                            if explore_dir is not None else None),
+                explore_hint=str(explore_dir) if explore_dir is not None else None,
+                **thaw_json_value(slot.provider_options, "judge options"))
         if not isinstance(invocation, JudgeInvocation):
-            raise TypeError(
-                f"judge backend {judge_backend!r} must return JudgeInvocation, "
-                f"got {type(invocation).__name__}")
-    finally:
-        # The sanitized copy is scratch; the judge has already run against it.
-        if explore_root is not None:
-            shutil.rmtree(explore_root, ignore_errors=True)
+            raise TypeError(f"judge backend {judge_backend!r} must return JudgeInvocation, got {type(invocation).__name__}")
+        cost = (telemetry_domain.Measurement.available(
+            telemetry_domain.Money.from_raw(invocation.cost_usd), provenance="provider_reported")
+            if invocation.cost_usd is not None else
+            telemetry_domain.Measurement.unavailable("process_timeout" if invocation.observed_subtotal_usd is not None
+                                                     else "runner_does_not_report_cost"))
+        return Priced(invocation, cost,
+                      observed_subtotal=telemetry_domain.Money.from_raw(invocation.observed_subtotal_usd)
+                      if invocation.observed_subtotal_usd is not None else None)
+
+    with ExitStack() as invocation_scratch:
+        execution = admission.run(slot.call, invoke)
+    if isinstance(execution, NotStarted):
+        row = {
+            **_judge_row_identity(task, judge_model=judge_model, judge_backend=judge_backend, judge_cmd=judge_cmd),
+            **_incomplete_judge_verdict(task.get("assertion", {}), per_step_steps),
+            "judge_input_sha256": current_input_sha256, "judge_prompt_sha256": prompt_sha256,
+            "judge_evidence_mode": evidence_mode,
+            **({"judge_context_sha256": context_sha256} if context_sha256 is not None else {}),
+            **({"trajectory_steps_sha256": per_step_fingerprint} if per_step_fingerprint else {}),
+            "judge_observation_complete": False, "availability": "partial",
+            "invocation_state": "not_started", "spend_refusal_reason": execution.reason.value,
+            "spend_call_id": slot.call.call_id, "judge_repeat": repeat_index,
+            "evidence": f"judge call was not started: {execution.reason.value}",
+            "usage_normalized": normalize_usage(None, source="not_applicable"),
+            "cost_normalized": normalize_cost(None, source="not_applicable"),
+        }
+        return validated_result_row(row)
+    invocation = execution.value
     stdout = invocation.stdout
     stderr = invocation.stderr
     returncode = invocation.returncode
@@ -14139,12 +14277,17 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
         raw_payload = {key: row.pop(key) for key in ("dimension_scores", "criteria", "minimum_criteria") if key in row}
         row.pop("score", None)
         row.pop("threshold", None)
-        row.update(verdict_fields(BooleanVerdict(False)))
+        row.update(_incomplete_judge_verdict(assertion, per_step_steps))
         row["judge_observation_complete"] = False
         row["availability"] = "partial"
         row["verdict_validation_error"] = str(exc)
         if raw_payload:
             row["raw_verdict_payload"] = raw_payload
+    if parse_error is not None:
+        for key in ("verdict_kind", "passed", "score", "threshold", "dimension_scores", "criteria", "minimum_criteria"):
+            row.pop(key, None)
+        row.update(_incomplete_judge_verdict(assertion, per_step_steps))
+        row = validated_result_row(row)
     if transcripts_dir:
         safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", task["judge_task_id"])
         dest = transcripts_dir / safe / f"run-{repeat_index}"
@@ -15627,7 +15770,7 @@ def judge_command(args: argparse.Namespace) -> int:
     panel = effective_judge_models(manifest_for_judge, getattr(args, "judge_panel", None), getattr(args, "judge_model", None))
     if judge_backend in (set(JUDGE_BACKENDS) - {"claude"}) and not panel:
         panel = [None]  # use the CLI's configured default model
-    schema_enforcement = "strict" if getattr(args, "strict_judge_schema", False) else ((manifest_for_judge.get("judge") or {}).get("schema_enforcement") or "report")
+    _ = getattr(args, "strict_judge_schema", False)
     include_trajectory = getattr(args, "judge_trajectory", False)
     explore = getattr(args, "judge_explore", False)
     if judge_backend == "cmd" and not judge_cmd:
@@ -15644,24 +15787,44 @@ def judge_command(args: argparse.Namespace) -> int:
     transcripts = Path(args.transcripts) if getattr(args, "transcripts", None) else None
     repeat = max(1, int(getattr(args, "judge_runs", 1)))
     out = Path(args.out) if getattr(args, "out", None) else None
-    fh = out.open("w", encoding="utf-8") if out else sys.stdout
-    try:
-        quorum = getattr(args, "quorum", None)
+    policy = native_spend_policy(args)
+    refused = False
+    with ExitStack() as scratch_owner:
+        prepared_tasks: list[tuple[tuple[_JudgeSlot, ...], ...]] = []
+        requested_models = [None] if judge_backend == "cmd" else panel
         for task in tasks:
-            # Two-level merge (G3): repeat-merge kills within-judge noise per model;
-            # cross-judge consensus then folds the panel into one verdict per task.
-            # A shell --judge-cmd is one opaque judge (a 1-member panel); native
-            # --judge-model(s) form the panel. A 1-member panel short-circuits to
-            # the single-judge verdict unchanged.
-            if judge_backend == "cmd":
-                members = [merge_repeated_judge_rows([run_one_judge_task(task, judge_cmd, transcripts, i, judge_backend="cmd", schema_enforcement=schema_enforcement, include_trajectory=include_trajectory) for i in range(1, repeat + 1)])]
-            else:
-                members = [merge_repeated_judge_rows([run_one_judge_task(task, None, transcripts, i, judge_model=model, judge_backend=judge_backend, backend_options=backend_options, schema_enforcement=schema_enforcement, include_trajectory=include_trajectory, explore=explore) for i in range(1, repeat + 1)]) for model in panel]
-            fh.write(json.dumps(merge_cross_judge_rows(members, quorum=quorum), ensure_ascii=False) + "\n")
-    finally:
-        if out:
-            fh.close()
-    return 0
+            member_slots = []
+            for model in requested_models:
+                prepared = _prepare_judge_task(
+                    task, judge_cmd if judge_backend == "cmd" else None,
+                    judge_model=model, judge_backend=judge_backend, backend_options=backend_options,
+                    include_trajectory=include_trajectory,
+                    explore=explore, scratch_owner=scratch_owner)
+                member_slots.append(tuple(
+                    _replace(prepared, call=_replace(prepared.call, repeat=index))
+                    if isinstance(prepared, _ReadyJudgeSlot) else prepared
+                    for index in range(1, repeat + 1)))
+            prepared_tasks.append(tuple(member_slots))
+        work = _PreparedJudgeWork(tuple(prepared_tasks))
+        plan = work.paid_plan
+        if policy is not None and policy.ceiling.amount > 0 and policy.assumed_cost_per_run is None:
+            for call in plan.calls:
+                if isinstance(call, JudgeCall) and (call.backend == "cmd" or BACKENDS[call.backend].capabilities.dollar_cost == "missing"):
+                    die(f"{call.backend} does not report dollar cost; --max-cost-usd requires --assumed-cost-per-run-usd")
+        with SpendAdmission.open(policy, plan, root=Path(args.runs) / "spend") as admission:
+            fh = scratch_owner.enter_context(out.open("w", encoding="utf-8")) if out else sys.stdout
+            for member_slots in work.tasks:
+                members = []
+                for repeats in member_slots:
+                    rows = []
+                    for slot in repeats:
+                        row = _run_judge_slot(slot, admission, transcripts)
+                        refused |= row.get("spend_refusal_reason") is not None
+                        rows.append(row)
+                    members.append(merge_repeated_judge_rows(rows))
+                fh.write(json.dumps(merge_cross_judge_rows(members, quorum=getattr(args, "quorum", None)), ensure_ascii=False) + "\n")
+            partial = admission.ledger is not None and admission.ledger.partial
+    return 2 if refused or partial else 0
 
 
 def judge_panel_sensitivity(reports_by_judge: dict[str, dict[str, Any]], *, magnitude_eps: float = 0.1) -> dict[str, Any]:
@@ -23966,6 +24129,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--transcripts", help="directory for per-task prompt/stdout/stderr/result audit transcripts")
     p.add_argument("--out")
     add_surface_cli_options(p, "judge")
+
+    p.add_argument("--max-cost-usd", type=float, help="per-invocation USD admission ceiling for ready judge calls; admitted calls can overshoot")
+    p.add_argument("--assumed-cost-per-run-usd", type=float, help="labeled charge for one unpriced judge call; requires --max-cost-usd")
 
     p = sub.add_parser("benchmark")
     p.add_argument("manifest")
