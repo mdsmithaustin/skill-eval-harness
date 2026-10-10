@@ -90,6 +90,63 @@ class JudgeObservationTests(unittest.TestCase):
                 out[key] = [self.legacy(child) for child in out[key]]
         return out
 
+    def test_saved_nested_diagnostics_calculate_both_positions_and_keep_supplied_origin(self):
+        groups = []
+        for model in ("a", "b"):
+            rows = [{**self.leaf(model=model, repeat=repeat), "cost_usd": 0.6,
+                     "cost_normalized": sb.normalize_cost(0.6)} for repeat in (1, 2)]
+            groups.append(sb.merge_repeated_judge_rows(rows))
+        nested = sb.merge_cross_judge_rows(groups)
+        reason = "judge aggregate summary returncode is absent"
+        for index in (0, 1):
+            for stale in (False, True):
+                with self.subTest(index=index, stale=stale):
+                    raw = self.legacy(nested)
+                    raw.update(judge_observation_complete=False, availability="partial")
+                    del raw["judge_panel"][index]["returncode"]
+                    raw.pop("incomplete_judge_members", None)
+                    supplied = [{"member": 2 if index == 0 else 1, "reason": "stale supplied message"}]
+                    if stale:
+                        raw["incomplete_judge_members"] = supplied
+                    projected = jv._judge_observation_fields(jv._judge_observation_from_row(raw))
+                    self.assertEqual(projected.get("incomplete_judge_members"), [{"member": index + 1, "reason": reason}])
+                    self.assertEqual(projected["judge_diagnostic_evidence"],
+                                     {"version": 1, "supplied": {"kind": "present", "value": supplied} if stale
+                                      else {"kind": "absent"}})
+                    self.assertEqual(projected["judge_aggregate_summary"],
+                                     {"version": 1, "kind": "saved", "status": {"kind": "integer", "value": 0}})
+                    self.assertEqual(projected["judge_panel"][index]["judge_aggregate_summary"],
+                                     {"version": 1, "kind": "saved", "status": {"kind": "absent"}})
+                    self.assertEqual(sb.judge_observation_incomplete_reason(projected), f"member {index + 1}: {reason}")
+                    for _ in range(5):
+                        wire = json.loads(json.dumps(projected, allow_nan=False))
+                        self.assertEqual(jv._judge_observation_fields(jv._judge_observation_from_row(wire)), projected)
+                        loaded = self.load(wire)
+                        self.assertEqual(loaded, projected)
+                        self.assertEqual([len(child["judge_runs"]) for child in loaded["judge_panel"]], [2, 2])
+                        costs = sb.judge_cost_block({"task": loaded})
+                        self.assertEqual((costs["requested_calls"], costs["billed_calls"], costs["not_started_calls"],
+                                          costs["nonbillable_calls"], costs["unverified_calls"]), (4, 4, 0, 0, 0))
+                        self.assertEqual(loaded["cost_aggregate"]["USD"]["value"], "2.40")
+                        self.assertFalse(loaded["judge_observation_complete"])
+                        projected = loaded
+
+    def test_fresh_missing_local_diagnostics_survive_first_fold_projection_and_loader(self):
+        reason = "judge call was not started: budget_exhausted"
+        row = self.leaf(missing=True)
+        missing = jv._judge_leaf_observation(None, row, attempt_kind="not_started", complete=False, reasons=(reason,))
+        complete = jv._judge_observation_from_row(self.leaf(repeat=2))
+        folded = jv._fold_judge_observations((missing, complete))
+        projected = jv._judge_observation_fields(folded)
+        self.assertEqual(projected["incomplete_judge_members"], [{"member": 1, "reason": reason}])
+        self.assertEqual(projected["judge_runs"][0].get("judge_diagnostic_evidence"),
+                         {"version": 1, "supplied": {"kind": "absent"}, "leaf_reasons": [reason]})
+        for _ in range(5):
+            projected = json.loads(json.dumps(projected, allow_nan=False))
+            self.assertEqual(jv._judge_observation_fields(jv._judge_observation_from_row(projected)), projected)
+            self.assertEqual(self.load(projected), projected)
+            self.assertEqual(sb.judge_observation_incomplete_reason(projected), f"member 1: {reason}")
+
     def test_saved_historical_aggregate_status_defers_with_stable_literal_causes(self):
         cases = (("absent", None, "judge aggregate summary returncode is absent"),
                  ("null", None, "judge aggregate summary returncode is null"),
