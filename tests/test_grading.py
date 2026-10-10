@@ -44,7 +44,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def complete_judge_fixtures(case, text, output_path, rows, *, run_base=None,
                             model=None):
-    """Attach the lifecycle/input binding a real judge invocation persists."""
     _, tasks = sb.grade_case_variant(
         case, "with_skill", text, output_path, {}, run_base=run_base,
         judge_results={}, model=model)
@@ -52,7 +51,17 @@ def complete_judge_fixtures(case, text, output_path, rows, *, run_base=None,
     complete = {}
     for jid, row in rows.items():
         task = by_id[jid]
-        derived = sb.merged_qualitative_entry(task["assertion"], row, jid)
+        assertion = task["assertion"]
+        derived = sb.merged_qualitative_entry(assertion, row, jid)
+        semantic = {**row, **{key: derived[key] for key in (
+            "passed", "score", "threshold", "dimension_scores") if key in derived}}
+        if assertion.get("dynamic_rubric"):
+            semantic["minimum_criteria"] = assertion["dynamic_rubric"].get("minimum_criteria", 3)
+        elif sb.is_per_step_assertion(assertion):
+            semantic["minimum_criteria"] = sb.per_step_minimum(assertion, len(row["criteria"]))
+        canonical = sb.validated_result_row(semantic)
+        if "verdict_kind" not in row:
+            canonical.pop("verdict_kind")
         steps = None
         if sb.is_per_step_assertion(task["assertion"]):
             events, _ = sb.read_events_base(run_base)
@@ -60,7 +69,7 @@ def complete_judge_fixtures(case, text, output_path, rows, *, run_base=None,
         _, _, prompt_sha256, _ = sb.judge_input_material(
             task, text, run_base=run_base, steps=steps)
         complete[jid] = {
-            **row, "judge_task_id": jid, "passed": derived["passed"],
+            **canonical, "judge_task_id": jid,
             "returncode": 0, "judge_observation_complete": True,
             "availability": "complete",
             "judge_input_sha256": task["judge_input_sha256"],
@@ -678,11 +687,13 @@ class GradedScoringSeverityTests(unittest.TestCase):
             write_run(runs / "case-1" / "without_skill", "alpha none")
             attest_answer_design(path, runs)
             verdicts = judge_with_scores(path, runs, root / "verdicts.jsonl",
-                                         scores={"alpha high": 7, "alpha none": 1})
+                                         scores={"alpha high": 7, "alpha none": 1},
+                                         expected_exit=2)
             rows = {json.loads(line)["variant"]: json.loads(line)
                     for line in verdicts.read_text(encoding="utf-8").splitlines()}
         self.assertEqual(rows["with_skill"]["availability"], "partial")
         self.assertFalse(rows["with_skill"]["passed"])
+        self.assertEqual(rows["with_skill"]["raw_verdict_payload"]["score"], 7)
         self.assertIn("score in [1, 5] (score_scale)", rows["with_skill"]["evidence"])
         self.assertEqual((rows["without_skill"]["availability"], rows["without_skill"]["passed"],
                           rows["without_skill"]["score"]), ("complete", False, 1))
@@ -1099,12 +1110,12 @@ class ReviewFixRegressionTests(unittest.TestCase):
             base = Path(td)
             (base / "output.md").write_text("t", encoding="utf-8")
             verdicts = {}
-            for model, passed, score in (("m1", True, 5), ("m2", False, 1)):
+            for model, passed, score in (("m1", True, 5), ("m2", False, 0)):
                 model_jid = sb.judge_task_id(
                     "case-1", "with_skill", 1, assertion, model=model)
                 verdicts.update(complete_judge_fixtures(
                     case, "t", base / "output.md",
-                    {model_jid: {"passed": passed, "score": score}},
+                    {model_jid: {"passed": passed, "score": score, "threshold": 1}},
                     run_base=base, model=model))
             m1, _ = sb.grade_case_variant(case, "with_skill", "t", base / "output.md", {}, run_base=base, judge_results=verdicts, model="m1")
             m2, _ = sb.grade_case_variant(case, "with_skill", "t", base / "output.md", {}, run_base=base, judge_results=verdicts, model="m2")
@@ -1137,14 +1148,14 @@ class ReviewFixRegressionTests(unittest.TestCase):
             jid = sb.judge_task_id("c", "with_skill", 1, assertion)
             soft_verdict = complete_judge_fixtures(
                 case, "alpha", base / "output.md",
-                {jid: {"passed": False, "score": 0.0}}, run_base=base)
+                {jid: {"passed": False, "score": 0.0, "threshold": 1}}, run_base=base)
             soft, _ = sb.grade_case_variant(case, "with_skill", "alpha", base / "output.md", {}, run_base=base,
                                             judge_results=soft_verdict)
             case_gate = json.loads(json.dumps(case))
             case_gate["assertions"][1]["severity"] = "gate"
             gate_verdict = complete_judge_fixtures(
                 case_gate, "alpha", base / "output.md",
-                {jid: {"passed": False, "score": 0.0}}, run_base=base)
+                {jid: {"passed": False, "score": 0.0, "threshold": 1}}, run_base=base)
             gate, _ = sb.grade_case_variant(case_gate, "with_skill", "alpha", base / "output.md", {}, run_base=base,
                                             judge_results=gate_verdict)
         self.assertEqual(soft["combined_pass_rate"], 1.0)   # soft failure feeds graded only
@@ -1277,7 +1288,7 @@ class AssertionDependenciesTests(unittest.TestCase):
         expanded = sb.expand_judge_preset(jassert)
         jid = sb.judge_task_id("c", "with_skill", 1, expanded)
         result, _ = self._grade([jassert, {"name": "dep", "type": "contains", "value": "alpha", "depends_on": "jpre"}],
-                                judge_results={jid: {"judge_task_id": jid, "passed": False, "score": 0}})
+                                judge_results={jid: {"judge_task_id": jid, "passed": False, "score": 0, "threshold": 1}})
         dep = next(r for r in result["assertions"] if r["name"] == "dep")
         self.assertTrue(dep["skipped"])                  # resolved on the verdict-loaded pass
         self.assertEqual(result["objective_total"], 0)   # dep skipped out
@@ -1311,7 +1322,7 @@ class AssertionDependenciesTests(unittest.TestCase):
         A = {"type": "factuality", "description": "grounded"}
         B = {"name": "B", "type": "contains", "value": "ZZZ_absent", "depends_on": "grounded", "critical": True}
         jid = sb.judge_task_id("c", "with_skill", 1, sb.expand_judge_preset(A))
-        verdict = {jid: {"judge_task_id": jid, "passed": False, "score": 1}}
+        verdict = {jid: {"judge_task_id": jid, "passed": False, "score": 0, "threshold": 1}}
         for order, assertions in (("in_order", [A, B]), ("forward", [B, A])):
             result, _ = self._grade(assertions, judge_results=verdict)
             skipped = {r.get("name") for r in result["assertions"] if r.get("skipped")}
