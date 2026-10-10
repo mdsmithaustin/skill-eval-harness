@@ -58,13 +58,25 @@ def complete_judge_fixtures(case, text, output_path, rows, *, run_base=None,
                 raise ValueError("fixture threshold contradicts assertion threshold")
             payload["threshold"] = assertion["threshold"]
         derived = sb.merged_qualitative_entry(assertion, payload, jid)
-        semantic = {**payload, **{key: derived[key] for key in (
-            "passed", "score", "threshold", "dimension_scores") if key in derived}}
+        semantic = dict(payload)
+        for key in ("passed", "score", "threshold", "dimension_scores"):
+            if key in derived:
+                semantic.setdefault(key, derived[key])
+        if assertion.get("graded_dimensions"):
+            semantic["threshold"] = derived["threshold"]
         if assertion.get("dynamic_rubric"):
-            semantic["minimum_criteria"] = assertion["dynamic_rubric"].get("minimum_criteria", 3)
+            minimum = assertion["dynamic_rubric"].get("minimum_criteria", 3)
+            if "minimum_criteria" in semantic and semantic["minimum_criteria"] != minimum:
+                raise ValueError("fixture minimum contradicts assertion minimum")
+            semantic["minimum_criteria"] = minimum
         elif sb.is_per_step_assertion(assertion):
-            semantic["minimum_criteria"] = sb.per_step_minimum(assertion, len(row["criteria"]))
+            minimum = sb.per_step_minimum(assertion, len(row["criteria"]))
+            if "minimum_criteria" in semantic and semantic["minimum_criteria"] != minimum:
+                raise ValueError("fixture minimum contradicts assertion minimum")
+            semantic["minimum_criteria"] = minimum
         canonical = sb.validated_result_row(semantic)
+        if "passed" in payload and canonical["passed"] != derived["passed"]:
+            raise ValueError("fixture passed contradicts assertion semantics")
         if "verdict_kind" not in row:
             canonical.pop("verdict_kind")
         steps = None
@@ -412,6 +424,12 @@ class GradedScoringSeverityTests(unittest.TestCase):
                        {"passed": False, "score": 1, "criteria": [{"name": "clear", "met": True}]}), "contradict"),
             (plain, ({"passed": True, "score": 0}, {"passed": False, "score": 1}), "stored scored verdict requires threshold"),
             ({**plain, "threshold": 4}, ({"passed": True, "score": 1},), "contradict"),
+            (dimensions, ({"passed": True, "score": 0.5, "threshold": 0.75, "dimension_scores": {"clarity": 5}},),
+             "dimension aggregate score contradicts"),
+            (dynamic, ({"passed": True, "score": 0.5, "criteria": [{"name": "clear", "met": True}]},),
+             "dynamic score/passed contradict"),
+            (dynamic, ({"passed": True, "criteria": [{"name": "clear", "met": True}], "minimum_criteria": 2},),
+             "fixture minimum contradicts assertion minimum"),
         ):
             case = self.behavior_case([assertion])
             jid = sb.judge_task_id("case-x", "with_skill", 1, assertion)

@@ -717,6 +717,10 @@ def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
     models = tuple(_judge_model(member) for member in members)
     if key == "judge_panel" and "judge_models" in raw and raw["judge_models"] != list(models):
         raise ValueError("judge panel models contradict requested population")
+    if key == "judge_runs" and "judge_requested_model" in raw and any(
+            "judge_requested_model" in member.fields
+            and member.fields["judge_requested_model"] != raw["judge_requested_model"] for member in members):
+        raise ValueError("judge parent requested model contradicts members")
     for name in _BINDING_FIELDS:
         if name in raw and any(member.fields.get(name) != raw[name] for member in members):
             if name != "judge_input_sha256":
@@ -737,12 +741,18 @@ def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
     population = (_JudgePanel(members, models, policy, "judge_models" in raw) if key == "judge_panel" else
                   _JudgeRepeats(members, expected, policy))
     fields = freeze_json_mapping({name: value for name, value in raw.items() if name not in _RESULT_FIELDS}, "judge group")
-    complete = raw.get("judge_observation_complete") is True and raw.get("availability") == "complete" and not errors
+    validation_failed = bool(raw.get("schema_errors") or raw.get("verdict_validation_error"))
+    if marker == "complete" and validation_failed:
+        raise ValueError("judge verdict failed validation")
+    complete = (raw.get("judge_observation_complete") is True and raw.get("availability") == "complete"
+                and not errors and not validation_failed)
     if raw.get("judge_observation_complete") is True and errors:
         raise ValueError("complete judge group requires complete compatible children")
     if not complete:
+        reasons = (("judge verdict failed validation",) if validation_failed else ())
+        reasons += tuple(str(error["reason"]) for error in errors)
         return _MissingJudgeObservation(fields, population,
-                                        tuple(str(error["reason"]) for error in errors) or ("judge observation is not explicitly complete",), fresh)
+                                        reasons or ("judge observation is not explicitly complete",), fresh)
     if not isinstance(verdict, ConsensusVerdict):
         raise ValueError("judge group requires consensus verdict")
     agreement: Consensus | Mapping[str, Any] | None = None

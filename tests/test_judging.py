@@ -177,7 +177,7 @@ class JudgeObservationTests(unittest.TestCase):
                         forged = copy.deepcopy(group)
                         target = forged["judge_panel"][0] if target_nested else forged
                         target[field] = diagnostic
-                        assert_dies(self, lambda: self.load(forged), "judge verdict failed validation")
+                        assert_dies(self, lambda forged=forged: self.load(forged), "judge verdict failed validation")
 
     def test_saved_parent_validation_failures_remain_unavailable_with_all_members(self):
         for panel in (False, True):
@@ -225,13 +225,13 @@ class JudgeObservationTests(unittest.TestCase):
                              if nested else copy.deepcopy(repeat))
                     target = group["judge_panel"][0] if nested else group
                     target["judge_requested_model"] = "forged"
-                    assert_dies(self, lambda: self.load(group), "judge parent requested model contradicts members")
+                    assert_dies(self, lambda group=group: self.load(group), "judge parent requested model contradicts members")
 
     def test_repeat_parent_request_checks_all_declared_members_and_explicit_null(self):
         for requested, forged in ((None, "a"), ("a", None)):
             group = sb.merge_repeated_judge_rows([self.leaf(model=requested), self.leaf(model=requested, repeat=2)])
             group["judge_requested_model"] = forged
-            assert_dies(self, lambda: self.load(group), "judge parent requested model contradicts members")
+            assert_dies(self, lambda group=group: self.load(group), "judge parent requested model contradicts members")
         group = sb.merge_repeated_judge_rows([self.leaf(), self.leaf(repeat=2)])
         del group["judge_observation_kind"]
         for child in group["judge_runs"]:
