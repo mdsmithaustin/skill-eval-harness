@@ -415,14 +415,10 @@ reading guide, honesty rules, boundary — is written down in [`docs/README.md`]
       mean different things in each, and which harness output answers each guide step.
       Runnable offline on `examples/demo-skill` (real `noise_check` output, refreshed 2026-09-30:
       2 cases at 4 repeats, every pair moved, `too-few-cases-moved`).
-- [ ] **"Did my skill change HOW the model works, not just whether it passes?"** — the
-      machinery shipped with the trace-depth slice: Claude answer runs now stream real
-      tool-use traces, the report's `trajectory_diff` block shows paired command/count/skill-load
-      deltas per case, and a `per_step` judge grades each completed step (raw records resolved
-      through `raw_ref`). The walkthrough should run the demo offline, read a no-lift case
-      through `trajectory_diff`, then escalate to `per_step` where outcome assertions saturate.
-- [ ] **"Did removing this description actually break discovery?"** — extends
-      [`docs/tuning-skill-activation.md`](docs/tuning-skill-activation.md): baseline
-      `skill-trigger-matrix` run + `--ablation` run → `skill-benchmark trigger-compare` →
-      read the evidence class (confirmed/refuted/indeterminate), the ≥6-query significance
-      bound, and blocked-pair reasons before editing the description again.
+- [x] **"Did my skill change how the model works?"**. The
+      [offline trajectory journey](docs/did-my-skill-change-how-the-model-works.md)
+      shows a no-lift case with different paths, then grades a redundant path with
+      process assertions and a per-step judge.
+- [x] **"Did removing this description actually break discovery?"**. The
+      [offline discovery journey](docs/did-removing-this-break-discovery.md)
+      reproduces refuted, indeterminate, and confirmed evidence with authored queries.

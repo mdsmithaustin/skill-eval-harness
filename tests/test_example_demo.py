@@ -10,10 +10,44 @@ from pathlib import Path
 
 from helpers import run_cli
 
+import run_trigger_matrix as tm
 import skill_benchmark as sb
 
 ROOT = Path(__file__).resolve().parents[1]
 DEMO = ROOT / "examples" / "demo-skill"
+
+DEMO_MANIFEST = DEMO / "evals" / "shared-benchmark.json"
+TRAJECTORY_MANIFEST = DEMO / "trajectory-benchmark.json"
+TRIGGER_EVAL_SET = DEMO / "evals" / "trigger-eval-set.json"
+
+
+def run_demo_suite(test: unittest.TestCase, manifest_path: Path, *,
+                   runner_flags: str = "", judge_flags: str = "") -> tuple[dict, list[dict]]:
+    tmp = tempfile.TemporaryDirectory(prefix="demo-journey-")
+    test.addCleanup(tmp.cleanup)
+    td = Path(tmp.name)
+    commands = [
+        ("prepare", manifest_path, "--split", "tune", "--out", td / "tasks.jsonl"),
+        ("run-codex", "--tasks", td / "tasks.jsonl", "--runs", td / "runs",
+         "--codex-cmd", f"{sys.executable} {DEMO / 'stub_runner.py'}{runner_flags}", "--timeout", "120"),
+        ("judge", manifest_path, "--runs", td / "runs", "--out", td / "judge.jsonl",
+         "--judge-cmd", f"{sys.executable} {DEMO / 'stub_judge.py'}{judge_flags}"),
+        ("benchmark", manifest_path, "--runs", td / "runs", "--out", td / "bench.json",
+         "--judge-results", td / "judge.jsonl"),
+    ]
+    for command in commands:
+        code, _, stderr = run_cli(*command)
+        test.assertEqual(code, 0, stderr)
+    report = json.loads((td / "bench.json").read_text(encoding="utf-8"))
+    verdicts = [json.loads(line) for line in (td / "judge.jsonl").read_text(encoding="utf-8").splitlines()]
+    return report, verdicts
+
+
+def assertion_row(report: dict, case_id: str, variant: str, name: str) -> dict:
+    result = next(r for r in report["results"]
+                  if r["case_id"] == case_id and r["variant"] == variant)
+    return next(a for a in result["assertions"] + result["qualitative_assertions"]
+                if a["name"] == name)
 
 
 def _min_runs_for_significance() -> int:
@@ -304,6 +338,84 @@ class DemoJudgeTests(unittest.TestCase):
         kinds = {f["kind"] for f in robust["findings"]}
         self.assertEqual(kinds, {"passes-empty-control", "passes-master-key-control"})
 
+
+class DemoTrajectoryJourneyTests(unittest.TestCase):
+    def test_no_lift_case_still_shows_the_skill_changing_the_path(self):
+        report, _ = run_demo_suite(self, TRAJECTORY_MANIFEST)
+        for variant in ("with_skill", "without_skill"):
+            self.assertTrue(assertion_row(report, "c-weak-outcome", variant, "gives-a-review")["passed"])
+        flags = next(f["flags"] for f in report["case_flags"] if f["case_id"] == "c-weak-outcome")
+        self.assertIn("no objective lift", flags)
+        case = next(c for c in report["trajectory_diff"]["cases"] if c["case_id"] == "c-weak-outcome")
+        self.assertEqual(case["commands_only_with_skill"],
+                         ["cat skills/demo/SKILL.md",
+                          "cat skills/demo/references/checklist.md"])
+        self.assertEqual(case["commands_only_without_skill"], [])
+        self.assertEqual(case["skill_invoked"], {"with_skill": 1.0, "without_skill": 0.0})
+        self.assertEqual(case["mean_deltas"]["commands"], 2.0)
+
+    def test_careful_path_passes_the_process_and_per_step_checks(self):
+        report, verdicts = run_demo_suite(self, TRAJECTORY_MANIFEST)
+        for name in ("severity-label", "skill-read", "no-reread-loop", "sound-steps"):
+            with self.subTest(name=name):
+                self.assertTrue(assertion_row(report, "c-review-path", "with_skill", name)["passed"])
+        per_step = next(v for v in verdicts if v["judge_task_id"].endswith("::sound-steps"))
+        self.assertEqual(per_step["criteria"], [{"name": "step-1", "met": True},
+                                                {"name": "step-2", "met": True}])
+
+    def test_looping_path_keeps_the_answer_and_fails_only_the_path_checks(self):
+        report, verdicts = run_demo_suite(self, TRAJECTORY_MANIFEST, runner_flags=" --loop")
+        self.assertTrue(assertion_row(report, "c-review-path", "with_skill", "severity-label")["passed"])
+        self.assertTrue(assertion_row(report, "c-review-path", "with_skill", "skill-read")["passed"])
+        self.assertFalse(assertion_row(report, "c-review-path", "with_skill", "no-reread-loop")["passed"])
+        self.assertFalse(assertion_row(report, "c-review-path", "with_skill", "sound-steps")["passed"])
+        per_step = next(v for v in verdicts if v["judge_task_id"].endswith("::sound-steps"))
+        self.assertEqual([c["met"] for c in per_step["criteria"]], [True, True, False, False])
+        case = next(c for c in report["trajectory_diff"]["cases"] if c["case_id"] == "c-review-path")
+        self.assertEqual(case["mean_deltas"]["commands"], 4.0)
+
+    def test_lenient_per_step_judge_misses_the_loop(self):
+        report, _ = run_demo_suite(self, TRAJECTORY_MANIFEST, runner_flags=" --loop",
+                                   judge_flags=" --lenient")
+        self.assertTrue(assertion_row(report, "c-review-path", "with_skill", "sound-steps")["passed"])
+        self.assertFalse(assertion_row(report, "c-review-path", "with_skill", "no-reread-loop")["passed"])
+
+
+class DemoDiscoveryJourneyTests(unittest.TestCase):
+    @staticmethod
+    def _compare(rows):
+        kwargs = {"agents": ["stub"], "models": None, "runs_per_query": 3, "timeout": 30, "workers": 1}
+        baseline = tm.run_matrix(DEMO_MANIFEST, rows, **kwargs)
+        ablated = tm.run_matrix(DEMO_MANIFEST, rows, ablation="weaker-description", **kwargs)
+        return sb.build_trigger_comparison(baseline, ablated)
+
+    @staticmethod
+    def _eval_set_rows():
+        return tm.validate_trigger_rows(
+            json.loads(TRIGGER_EVAL_SET.read_text(encoding="utf-8"))["queries"],
+            str(TRIGGER_EVAL_SET))
+
+    def test_manifest_queries_refute_the_ablation(self):
+        rows = tm.cases_from_manifest(tm.load_manifest(DEMO_MANIFEST), None)
+        out = self._compare(rows)
+        self.assertTrue(out["provenance"]["verified"])
+        self.assertEqual(out["evidence_class"], "refuted")
+        self.assertEqual(out["regressed_queries"], [])
+
+    def test_three_queries_in_the_users_words_are_indeterminate(self):
+        rows = [r for r in self._eval_set_rows() if r["query_id"].startswith("wtu-")][:3]
+        out = self._compare(rows)
+        self.assertEqual(out["evidence_class"], "indeterminate")
+        self.assertEqual(len(out["regressed_queries"]), 3)
+        self.assertIn("not significant", out["note"])
+
+    def test_full_eval_set_confirms_the_ablation(self):
+        rows = self._eval_set_rows()
+        out = self._compare(rows)
+        self.assertEqual(out["evidence_class"], "confirmed_causal")
+        regressed = {r["query_id"] for r in out["regressed_queries"]}
+        self.assertEqual(regressed, {r["query_id"] for r in rows if r["query_id"].startswith("wtu-")})
+        self.assertEqual(len(regressed), 6)
 
 
 if __name__ == "__main__":

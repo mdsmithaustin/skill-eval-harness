@@ -71,15 +71,15 @@ with its own note. At four repeats the smallest possible p is 0.125, and the not
 needs at least 6 matched replicate pairs that move the same way (the smallest reachable p with 6
 is 0.03125)`. Without step 4 the report is partial and the note
 reads `grading evidence is incomplete`, however many repeats you ran, because a declared
-grader has not produced its verdicts. Swap the stub for a real runner
-(`--codex-cmd "codex exec"`, etc.) to run it against an actual model — for Claude, use `skill-benchmark run-claude` instead, which parses the `claude -p` JSON envelope and captures cost.
+grader has not produced its verdicts. Use a real runner such as `--codex-cmd "codex exec"` to evaluate a live model.
+For Claude, use `skill-benchmark run-claude`, which captures the streamed trace and cost.
 
 ## Measure activation (does the skill load on its own?)
 
 Everything above force-loads the skill, so it says nothing about whether an agent
 would *discover* it. The manifest also carries one should-fire and one
 should-not-fire `kind: "trigger"` case for that question. Offline first (the stub
-'agent' decides from the mounted description, deterministically):
+'agent' decides from the mounted description and `when_to_use`, deterministically):
 
 ```bash
 python3 ../../run_trigger_matrix.py evals/shared-benchmark.json \
@@ -111,3 +111,18 @@ To exercise the bundled discovery ablation, add
   the **readiness** block reports `ready: no blockers` (ablations materialized, no
   leak-saturated cases). `--fail-on-blockers` turns that into a CI gate — this demo
   is what a ready manifest looks like.
+
+## Grade the path and compare discovery
+
+The [trajectory journey](../../docs/did-my-skill-change-how-the-model-works.md)
+uses `trajectory-benchmark.json`. The stub records each actual skill read as a
+Codex command event. `--loop` reads `SKILL.md` twice more without changing the
+answer. Process assertions and the careful per-step judge reject the repeated
+path. The lenient judge passes it.
+
+The [discovery journey](../../docs/did-removing-this-break-discovery.md) uses
+`evals/trigger-eval-set.json`. It has two positive queries in the description's
+words, six in `when_to_use`'s words, and three negative queries. Removing
+`when_to_use` regresses the six matching queries on the offline stub. The
+manifest-only queries show no regression. These fixtures establish stub behavior,
+not live provider behavior.
