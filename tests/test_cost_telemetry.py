@@ -108,7 +108,7 @@ class NormalizeUsageCostTests(unittest.TestCase):
         normalized = sb.run_cost_facts({
             "usage_normalized": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "source": "provider_reported"},
             "cost_normalized": {"currency": "USD", "total_cost": 0.5, "source": "provider_reported"},
-            "total_tokens": 999, "cost_usd": 9.9,   # stale flat fields must lose
+            "total_tokens": 999, "cost_usd": 9.9,
         })
         self.assertEqual(normalized["total_tokens"], 15)
         self.assertEqual(normalized["cost_usd"], 0.5)
