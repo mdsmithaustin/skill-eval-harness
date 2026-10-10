@@ -263,7 +263,6 @@ class JudgeConfigSlotTests(unittest.TestCase):
 
 
 class JudgePresetTests(unittest.TestCase):
-    """1.1 — factuality preset expands to a canned anchored rubric."""
 
     def test_factuality_type_expands_with_rubric_and_threshold(self):
         expanded = sb.expand_judge_preset({"type": "factuality"})
@@ -907,11 +906,6 @@ STEP_EVENTS = [
 
 
 class PerStepJudgeTests(unittest.TestCase):
-    """Per-step judging: a `judge` assertion with `per_step` grades EACH
-    completed trajectory step. The verdict is the EXISTING dynamic-criteria
-    shape — one criterion per step, minimum_criteria derived from the run's
-    actual step count — so storage, merge, and repeat/panel machinery are
-    untouched."""
 
     def _run_dir(self, td, *, with_events=True, with_trace=True, events=None):
         run = Path(td) / "run"
@@ -1049,7 +1043,6 @@ class PerStepJudgeTests(unittest.TestCase):
 
 
 class CrossJudgeConsensusTests(unittest.TestCase):
-    """G3 — merge_cross_judge_rows consensus + effective_judge_models panel."""
 
     @staticmethod
     def _row(model, passed, score=None, cost=None):
@@ -1703,9 +1696,6 @@ class StrictJudgeVerdictTests(unittest.TestCase):
 
 
 class NullOptionalVerdictFieldTests(unittest.TestCase):
-    """Codex structured output turns optional verdict fields into required,
-    nullable ones, so a judge answers `"score": null` for "no score". A null
-    optional field means absent; a null required field is still incomplete."""
 
     def judge(self, assertion: dict, answer: dict, *, expected_exit=0) -> dict:
         with tempfile.TemporaryDirectory() as td:
@@ -1907,7 +1897,6 @@ class JudgeAlignmentTests(unittest.TestCase):
 
 
 class JudgeCalibrationTests(unittest.TestCase):
-    """judge-alignment's calibration block: does the judge's score mean what it says?"""
 
     # id -> (judge score, human passed). Every score sits in its own ECE bin.
     SCORED = {"a": (0.9, True), "b": (0.8, True), "c": (0.7, False), "d": (0.6, True),

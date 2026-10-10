@@ -52,8 +52,13 @@ def complete_judge_fixtures(case, text, output_path, rows, *, run_base=None,
     for jid, row in rows.items():
         task = by_id[jid]
         assertion = task["assertion"]
-        derived = sb.merged_qualitative_entry(assertion, row, jid)
-        semantic = {**row, **{key: derived[key] for key in (
+        payload = dict(row)
+        if "threshold" in assertion:
+            if "threshold" in payload and payload["threshold"] != assertion["threshold"]:
+                raise ValueError("fixture threshold contradicts assertion threshold")
+            payload["threshold"] = assertion["threshold"]
+        derived = sb.merged_qualitative_entry(assertion, payload, jid)
+        semantic = {**payload, **{key: derived[key] for key in (
             "passed", "score", "threshold", "dimension_scores") if key in derived}}
         if assertion.get("dynamic_rubric"):
             semantic["minimum_criteria"] = assertion["dynamic_rubric"].get("minimum_criteria", 3)
@@ -273,7 +278,6 @@ class OracleSchemaClosureTests(unittest.TestCase):
 
 
 class GradedScoringSeverityTests(unittest.TestCase):
-    """2.2 — graded scoring, three-tier severity, veto, and statistical lift."""
 
     def grade(self, case: dict, output: str, judge_results: dict | None = None, strict: bool = False) -> dict:
         with tempfile.TemporaryDirectory() as td:
@@ -379,6 +383,21 @@ class GradedScoringSeverityTests(unittest.TestCase):
         ):
             with self.subTest(row=row), self.assertRaisesRegex(ValueError, diagnostic):
                 complete_judge_fixtures(case, "text", Path("out.md"), {jid: row})
+
+    def test_complete_judge_fixture_uses_declared_threshold(self):
+        assertion = {"name": "q", "type": "judge", "rubric": ["good"], "threshold": 4}
+        case = self.behavior_case([assertion])
+        jid = sb.judge_task_id("case-x", "with_skill", 1, assertion)
+        for row in ({"passed": False, "score": 1},
+                    {"passed": False, "score": 1, "threshold": 4}):
+            with self.subTest(row=row):
+                verdict = complete_judge_fixtures(case, "text", Path("out.md"), {jid: row})[jid]
+                self.assertEqual(verdict["threshold"], 4)
+                self.assertEqual(verdict["score"], 1)
+                self.assertFalse(verdict["passed"])
+        with self.assertRaisesRegex(ValueError, "fixture threshold contradicts assertion threshold"):
+            complete_judge_fixtures(case, "text", Path("out.md"),
+                                    {jid: {"passed": False, "score": 1, "threshold": 1}})
 
     def test_graded_dimensions_below_threshold_fail(self):
         assertion = {"name": "q", "type": "judge", "graded_dimensions": [{"name": "d", "rubric": "anchored"}]}
@@ -1052,8 +1071,6 @@ class MultiTurnCaseTests(unittest.TestCase):
 
 
 class ReviewFixRegressionTests(unittest.TestCase):
-    """Regression tests for the PR #22 review findings — each encodes one
-    reported defect so it cannot return."""
 
     def graded_case(self) -> tuple[dict, dict]:
         assertion = {"name": "quality", "type": "judge",
@@ -1097,14 +1114,12 @@ class ReviewFixRegressionTests(unittest.TestCase):
         self.assertEqual(row["score"], 1.0)
 
     def test_p1_judge_task_ids_are_model_scoped(self):
-        # Without the model segment, case-1/m1/with_skill and case-1/m2/with_skill
-        # shared an ID and the last verdict silently applied to both models.
         assertion = {"name": "q", "type": "judge", "rubric": ["good"]}
         self.assertNotEqual(
             sb.judge_task_id("case-1", "with_skill", 1, assertion, model="m1"),
             sb.judge_task_id("case-1", "with_skill", 1, assertion, model="m2"))
         self.assertEqual(sb.judge_task_id("case-1", "with_skill", 1, assertion),
-                         "case-1::with_skill::run-1::q")   # single-model shape unchanged
+                         "case-1::with_skill::run-1::q")
         case = {"id": "case-1", "split": "tune", "kind": "behavior", "prompt": "p", "assertions": [assertion]}
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -1158,9 +1173,9 @@ class ReviewFixRegressionTests(unittest.TestCase):
                 {jid: {"passed": False, "score": 0.0, "threshold": 1}}, run_base=base)
             gate, _ = sb.grade_case_variant(case_gate, "with_skill", "alpha", base / "output.md", {}, run_base=base,
                                             judge_results=gate_verdict)
-        self.assertEqual(soft["combined_pass_rate"], 1.0)   # soft failure feeds graded only
+        self.assertEqual(soft["combined_pass_rate"], 1.0)
         self.assertEqual(soft["graded_score"], 0.0)
-        self.assertEqual(gate["combined_pass_rate"], 0.5)   # gate judge stays in the rate
+        self.assertEqual(gate["combined_pass_rate"], 0.5)
 
     def test_p2_junit_counts_qualitative_gate_failures_not_soft(self):
         result = {"case_id": "c", "variant": "with_skill", "run_number": 1, "missing_output": False,
@@ -1190,8 +1205,6 @@ class ReviewFixRegressionTests(unittest.TestCase):
 
 
 class AssertionDependenciesTests(unittest.TestCase):
-    """G2 — depends_on / staged grading. Mutation-killing: exact totals, and the
-    critical-tie both-directions (a running critical vetoes; a skipped one does not)."""
 
     def _grade(self, assertions, text="alpha", judge_results=None):
         case = {"id": "c", "split": "tune", "kind": "behavior", "assertions": assertions}
@@ -1290,8 +1303,8 @@ class AssertionDependenciesTests(unittest.TestCase):
         result, _ = self._grade([jassert, {"name": "dep", "type": "contains", "value": "alpha", "depends_on": "jpre"}],
                                 judge_results={jid: {"judge_task_id": jid, "passed": False, "score": 0, "threshold": 1}})
         dep = next(r for r in result["assertions"] if r["name"] == "dep")
-        self.assertTrue(dep["skipped"])                  # resolved on the verdict-loaded pass
-        self.assertEqual(result["objective_total"], 0)   # dep skipped out
+        self.assertTrue(dep["skipped"])
+        self.assertEqual(result["objective_total"], 0)
         self.assertEqual((result["qualitative_total"], result["qualitative_passed"]), (1, 0))
 
     def test_no_depends_on_is_byte_identical_grading(self):
@@ -1315,19 +1328,15 @@ class AssertionDependenciesTests(unittest.TestCase):
         self.assertEqual(result["qualitative_total"], 0)      # skipped judge dependent drops out of the qual denominator
 
     def test_forward_reference_to_preset_prerequisite_resolves_both_orders(self):
-        # A preset prerequisite's row name is rewritten (-> "factuality") while depends_on
-        # targets the author's label ("grounded"). A forward reference (dependent listed
-        # first) must STILL skip, not spuriously veto. Regression for the order-dependent
-        # bug: the post-pass keyed row_by_label on the emitted name, missing the preset.
         A = {"type": "factuality", "description": "grounded"}
         B = {"name": "B", "type": "contains", "value": "ZZZ_absent", "depends_on": "grounded", "critical": True}
         jid = sb.judge_task_id("c", "with_skill", 1, sb.expand_judge_preset(A))
-        verdict = {jid: {"judge_task_id": jid, "passed": False, "score": 0, "threshold": 1}}
+        verdict = {jid: {"judge_task_id": jid, "passed": False, "score": 1}}
         for order, assertions in (("in_order", [A, B]), ("forward", [B, A])):
             result, _ = self._grade(assertions, judge_results=verdict)
             skipped = {r.get("name") for r in result["assertions"] if r.get("skipped")}
-            self.assertEqual(skipped, {"B"}, order)            # dependent skipped in BOTH orders
-            self.assertFalse(result.get("vetoed"), order)      # never a spurious critical veto
+            self.assertEqual(skipped, {"B"}, order)
+            self.assertFalse(result.get("vetoed"), order)
             self.assertEqual(result["skipped_total"], 1, order)
 
     def test_reverse_order_transitive_chain_needs_fixed_point(self):

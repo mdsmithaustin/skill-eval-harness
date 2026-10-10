@@ -857,10 +857,6 @@ def claude_streams_ending_after_result() -> list[tuple[str, str]]:
 
 def judge_with_scores(manifest: Path, runs: Path, out: Path, *,
                       scores: dict[str, float], expected_exit: int = 0) -> Path:
-    """Write judge verdicts through the real `skill-benchmark judge` command
-    with a local stub judge (no model) that answers only a `score`: the score
-    of the first marker in `scores` that appears in its prompt. For judges
-    that declare a `score_scale`, whose pass/fail the harness derives."""
     stub = out.parent / "score_judge.py"
     stub.write_text(
         "import json, sys\n"
