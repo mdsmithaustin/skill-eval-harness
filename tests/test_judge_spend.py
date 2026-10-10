@@ -9,9 +9,9 @@ from helpers import make_eval_repo, run_cli, write_run
 
 class JudgeSpendTests(unittest.TestCase):
     def batch(self, root, *, verdict=None, cost=0.6):
-        manifest = make_eval_repo(root, variants=['with_skill'], cases=[{
+        manifest = make_eval_repo(root, cases=[{
             'id': 'case-1', 'split': 'tune', 'prompt': 'Do the task.',
-            'assertions': [{'name': 'quality', 'type': 'judge', 'rubric': 'Be correct.'}],
+            'assertions': [{'name': 'quality', 'type': 'judge', 'rubric': ['Be correct.']}],
         }])
         runs = root / 'runs'
         write_run(runs / 'case-1' / 'with_skill', 'candidate')
@@ -38,7 +38,7 @@ print({json.dumps(payload)!r} if '--output-format' in sys.argv else {json.dumps(
         route_flags = ('--judge-cmd', str(stub)) if route == 'shell' else (
             '--judge-model', 'judge-a', '--claude-bin', str(stub))
         code, stdout, stderr = run_cli('judge', manifest, '--runs', runs,
-                                     '--out', out, *route_flags, *flags)
+                                     '--out', out, '--variant', 'with_skill', *route_flags, *flags)
         return code, stdout, stderr, out, runs, marker
 
     def test_zero_cap_preserves_ready_results_without_starting(self):
