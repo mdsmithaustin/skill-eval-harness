@@ -250,6 +250,9 @@ observations plus optional traces rather than answer grades.
 Native answer backends return the frozen `Completed | TimedOut | SpawnFailed | ProviderFailed`
 union from `runner_contracts.py`. `OutcomeContext` validates provider, telemetry, and elapsed-time
 fields; `write_runner_outcome` exhaustively writes the ordinary disk contract.
+`OutcomeContext` extras cannot set the derived `cost_availability`, `observed_subtotal_usd`, or
+`cost_reason` fields. The publisher derives those fields from typed timeout cost
+evidence. Nested subagent rejection diagnostics retain their reported cost labels.
 Recovery rows use the separate lifecycle described above. A backend therefore cannot
 independently set timeout, return code, answer, and failure into a contradictory bag. The harness
 calls no model during default grading; it reads what the runner left behind. The explicit

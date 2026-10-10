@@ -30,6 +30,7 @@ _RESERVED_EVIDENCE_KEYS = frozenset({
     "skill_invoked", "skill_invocation_evidence", "parse_errors",
     "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
     "cache_write_tokens", "cache_creation_tokens", "cost_usd",
+    "cost_availability", "observed_subtotal_usd", "cost_reason",
     "usage_normalized", "cost_normalized", "otel",
     "returncode", "timed_out", "elapsed_ms", "invocation_state",
     "artifact_terminal_state", "subagent_refusals", "subagent_rejection",
