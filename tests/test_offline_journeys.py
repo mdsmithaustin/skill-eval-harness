@@ -1,4 +1,3 @@
-"""Execute the offline tutorials and check the reports their readers inspect."""
 import json
 import re
 import shlex
