@@ -1,4 +1,4 @@
-# How do I stop a native answer batch at a dollar ceiling?
+# How do I stop an answer or subagent batch at a dollar ceiling?
 
 Use `--max-cost-usd` on `run-agent`, `run-claude`, or `run-codex` to limit admission for one command invocation. A call can exceed the ceiling. The command finishes that call and refuses later calls.
 

@@ -9543,12 +9543,6 @@ class _NoProcessArtifact:
 
 def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome | _NoProcessArtifact,
                                 sidecars: Path | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Publish process outcomes and private subagent terminal roots.
-
-    All runners share telemetry precedence, failure bodies, sidecar validation,
-    and committed inventory. A complete inventory does not certify a complete
-    provider response. Raw traces never become fallback candidate answers.
-    """
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / ARTIFACT_COMMIT_NAME).unlink(missing_ok=True)
     context = outcome.context
@@ -15190,9 +15184,6 @@ def run_subagent(args: argparse.Namespace) -> int:
             if error:
                 return _SubagentResponseRejected(str(error), evidence)
             try:
-                # The provider's usage as run-claude records it, with the cost the
-                # subagent contract reads from usage.cost_usd. Only numeric fields:
-                # the subagent usage contract rejects labels such as `source`.
                 usage = dict(result.get("usage") or {})
                 if isinstance(result.get("cost_usd"), (int, float)):
                     usage["cost_usd"] = result["cost_usd"]
@@ -15207,8 +15198,6 @@ def run_subagent(args: argparse.Namespace) -> int:
                 if served:
                     completion["served_models"] = served
                 trace, _ = parse_trace_jsonl_text(str(result.get("raw_response") or ""), strict=False)
-                # Each turn is its own `claude -p` call, so its usage, cost and
-                # time are that turn's alone and sum to the run's.
                 response = {"answer": result.get("answer"), "returncode": result.get("returncode"),
                         "timed_out": result.get("timed_out", False), "elapsed_ms": result.get("elapsed_ms"),
                         "usage": usage, "trace": trace, "telemetry_scope": "turn_delta",

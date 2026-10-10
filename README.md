@@ -402,7 +402,7 @@ Those rows retain one fixture across an intentional checkpoint stop, fresh recov
 They write `recovery.json` and raw process evidence rather than an ordinary answer grade.
 Completed phases establish runner capability, not provider eligibility or permission enforcement.
 
-`run-agent`, `run-codex`, `run-claude`, and `run-subagent` accept `--max-cost-usd` and `--assumed-cost-per-run-usd` for a per-invocation admission ceiling. A zero ceiling starts no calls. Missing prices close later admission unless an explicit assumption applies. Capped batches reject every recovery row before any run starts. See [the native spend walkthrough](docs/limit-native-spend.md) for offline examples, refusal records, and report references. Subagent admission prices each external callback turn. A refused conversation root is incomplete. An invocation that starts no turn preserves any prior destination content.
+`run-agent`, `run-codex`, `run-claude`, and `run-subagent` accept `--max-cost-usd` and `--assumed-cost-per-run-usd` for a per-invocation admission ceiling. A zero ceiling starts no calls. Missing prices close later admission unless an explicit assumption applies. Capped batches reject every recovery row before any run starts. See [the answer and subagent spend walkthrough](docs/limit-native-spend.md) for offline examples, refusal records, and report references. Subagent admission prices each external callback turn. A refused conversation root is incomplete. An invocation that starts no turn preserves any prior destination content.
 
 Ordinary answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
 temporary workspace and delete it afterwards. Before deletion they diff it against a copy taken
@@ -643,7 +643,7 @@ skill-eval-harness/
 ├── grading_contracts.py        # closed assertion observations and immutable judge tasks
 ├── report_contracts.py         # empty/complete/partial report coverage cohorts and rates
 ├── runner_contracts.py         # closed answer-runner outcome union
-├── spend_contracts.py          # immutable native call plan and spend receipts
+├── spend_contracts.py          # immutable answer and subagent call plans and spend receipts
 ├── spend_runtime.py            # serial admission and invocation ledger publication
 ├── judge_verdict.py            # strict imported/stored judge verdict variants
 ├── jetty_contracts.py          # closed Jetty lifecycle and observation contract
