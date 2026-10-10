@@ -78,6 +78,11 @@ score and pass while its process evidence is incomplete. A missing repeat or pan
 child and has no usable aggregate decision. Saved readers reject malformed nested verdicts and
 forged fresh consensus. Loading historical rows preserves absent kind labels, so normalization
 cannot turn an unrecorded decision rule into a calibrated score.
+Nested exclusions identify retained member positions. Normalized `incomplete_judge_members` records
+contain calculated locations; original supplied claims remain in `judge_diagnostic_evidence.supplied`.
+Unavailable leaf messages persist in `leaf_reasons` for diagnostic round trips. The parser decides
+availability independently of those strings. This format checks consistency and supplies no
+authentication of a saved claim. Canonical records that contradict the retained tree reject.
 
 ## Probe stability first (`judge-robustness`) — no labels needed
 

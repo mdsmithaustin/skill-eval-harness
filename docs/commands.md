@@ -506,6 +506,10 @@ Boolean and float codes reject. Historical absent, null, noninteger, or nonzero 
 status defers even with complete children. The reserved `judge_aggregate_summary` envelope retains
 the original status cause across reloads. Its `derived` form belongs to fresh groups and new folds.
 The projected `returncode` is a compatibility summary and attests no parent process or launch.
+Normalized groups calculate `incomplete_judge_members` from all retained causes. Nested explanations
+identify one-based member paths, such as `member 2, member 1: ...`; root-local wording stays unchanged.
+Original supplied member diagnostics remain under `judge_diagnostic_evidence.supplied`, separately
+from calculated records. Canonical rewrites must preserve both fields; contradictory records reject.
 Missing observations serialize the exact false `consensus` shell with `judge_observation_kind:
 missing`; this shell cannot vote or establish a behavioral failure. Partial paid observations keep
 their canonical verdict. Saved readers validate every child, including below an incomplete parent,

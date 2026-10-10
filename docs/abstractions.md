@@ -410,6 +410,30 @@ The parser rejects malformed envelopes, leaf placement, saved evidence on fresh 
 unavailable saved evidence under Complete. Caller metadata cannot replace this reserved field.
 Consumers that rewrite canonical rows must retain the envelope to preserve original status causes.
 
+The owner also reserves `incomplete_judge_members` and `judge_diagnostic_evidence`.
+Every normalized group emits calculated `{member, reason}` records, including an empty array
+for Complete. Member numbers are one-based positions in the retained population. A group's own
+cause uses `member: "aggregate"`. Deeper locations appear in the reason, such as `member 1: ...`
+inside member 2's record. Scalar explanations render that path as `member 2, member 1: ...`.
+Root-local reasons keep their existing wording. The scalar ends with `...` when it exceeds
+512 characters; calculated records retain the full text, every cause, and repeated identical texts.
+Missing groups derive their reasons from the immutable tree rather than storing descendant copies.
+
+The version-1 diagnostic envelope has `supplied: {"kind": "absent"}` or
+`supplied: {"kind": "present", "value": ...}`. First normalization captures a legacy supplied
+member value once, including null or malformed-looking claims, separately from calculated records.
+Canonical reload retains that original value and rejects calculated arrays whose JSON types,
+values, or order disagree with the retained tree. Unavailable leaves omit the member array and
+add a nonempty `leaf_reasons` array to the envelope. These existing local messages survive their
+first fresh fold and reload. The parser determines availability before decoding messages.
+Messages cannot establish a verdict, execution fact, identity, or policy. The envelope validates
+format consistency, not authenticity. Complete observations and groups cannot carry `leaf_reasons`.
+Rewriters must retain the diagnostic envelope and calculated group records together.
+
+Both merge helpers validate a singleton and return the original row object. That identity operation
+can retain legacy supplied diagnostic bytes. Direct projection and saved loading normalize the
+calculated and supplied channels without inventing a parent or member 1.
+
 The existing price leaves also supply disjoint execution counts. `requested_calls` equals
 `billed_calls + not_started_calls + nonbillable_calls + unverified_calls`. Billed means an affirmative
 launch, including a zero or unknown charge. Guards and spawn failures are nonbillable. Explicit

@@ -85,6 +85,7 @@ class JudgeObservationTests(unittest.TestCase):
         out = copy.deepcopy(row)
         out.pop("judge_observation_kind", None)
         out.pop("judge_aggregate_summary", None)
+        out.pop("judge_diagnostic_evidence", None)
         for key in ("judge_runs", "judge_panel"):
             if key in out:
                 out[key] = [self.legacy(child) for child in out[key]]
@@ -108,6 +109,8 @@ class JudgeObservationTests(unittest.TestCase):
                     supplied = [{"member": 2 if index == 0 else 1, "reason": "stale supplied message"}]
                     if stale:
                         raw["incomplete_judge_members"] = supplied
+                    self.assertIs(sb.merge_repeated_judge_rows([raw]), raw)
+                    self.assertIs(sb.merge_cross_judge_rows([raw]), raw)
                     projected = jv._judge_observation_fields(jv._judge_observation_from_row(raw))
                     self.assertEqual(projected.get("incomplete_judge_members"), [{"member": index + 1, "reason": reason}])
                     self.assertEqual(projected["judge_diagnostic_evidence"],
@@ -127,7 +130,7 @@ class JudgeObservationTests(unittest.TestCase):
                         costs = sb.judge_cost_block({"task": loaded})
                         self.assertEqual((costs["requested_calls"], costs["billed_calls"], costs["not_started_calls"],
                                           costs["nonbillable_calls"], costs["unverified_calls"]), (4, 4, 0, 0, 0))
-                        self.assertEqual(loaded["cost_aggregate"]["USD"]["value"], "2.40")
+                        self.assertEqual(loaded["cost_aggregate"]["USD"]["value"], "2.4")
                         self.assertFalse(loaded["judge_observation_complete"])
                         projected = loaded
 
@@ -137,7 +140,7 @@ class JudgeObservationTests(unittest.TestCase):
         missing = jv._judge_leaf_observation(None, row, attempt_kind="not_started", complete=False, reasons=(reason,))
         complete = jv._judge_observation_from_row(self.leaf(repeat=2))
         folded = jv._fold_judge_observations((missing, complete))
-        projected = jv._judge_observation_fields(folded)
+        projected = sb._judge_result_row(folded)
         self.assertEqual(projected["incomplete_judge_members"], [{"member": 1, "reason": reason}])
         self.assertEqual(projected["judge_runs"][0].get("judge_diagnostic_evidence"),
                          {"version": 1, "supplied": {"kind": "absent"}, "leaf_reasons": [reason]})
@@ -146,6 +149,199 @@ class JudgeObservationTests(unittest.TestCase):
             self.assertEqual(jv._judge_observation_fields(jv._judge_observation_from_row(projected)), projected)
             self.assertEqual(self.load(projected), projected)
             self.assertEqual(sb.judge_observation_incomplete_reason(projected), f"member 1: {reason}")
+
+    def test_recursive_diagnostics_retain_duplicates_parent_causes_and_full_paths(self):
+        text = "distinctive unavailable leaf"
+        missing = jv._judge_leaf_observation(None, self.leaf(missing=True), attempt_kind="not_started",
+                                             complete=False, reasons=(text, text))
+        inner = jv._fold_judge_observations((missing, jv._judge_observation_from_row(self.leaf(repeat=2))))
+        complete = jv._judge_observation_from_row(self.leaf(model="b"))
+        population = jv._JudgePanel((complete, inner), ("b", "a"), saved_summary=jv._AbsentSummary())
+        outer = jv._MissingJudgeObservation({**inner.fields, "schema_errors": ["invalid parent"]}, population, (), fresh=False)
+        projected = sb._judge_result_row(outer)
+        expected = [{"member": "aggregate", "reason": "judge verdict failed validation"},
+                    {"member": "aggregate", "reason": "judge aggregate summary returncode is absent"},
+                    {"member": 2, "reason": "member 1: distinctive unavailable leaf"},
+                    {"member": 2, "reason": "member 1: distinctive unavailable leaf"}]
+        self.assertEqual(projected["incomplete_judge_members"], expected)
+        self.assertEqual(outer.reasons, ("judge verdict failed validation", "judge aggregate summary returncode is absent",
+                                       "member 2, member 1: distinctive unavailable leaf", "member 2, member 1: distinctive unavailable leaf"))
+        self.assertEqual(jv._judge_observation_reason(outer), "judge verdict failed validation")
+        inner_only = sb._judge_result_row(jv._fold_judge_observations((complete, inner), panel=True))
+        self.assertEqual(sb.judge_observation_incomplete_reason(inner_only), "member 2, member 1: distinctive unavailable leaf")
+        for _ in range(5):
+            projected = json.loads(json.dumps(projected, allow_nan=False))
+            self.assertEqual(self.load(projected), projected)
+            self.assertEqual(projected["incomplete_judge_members"], expected)
+        with self.assertRaisesRegex(ValueError, "cannot carry leaf local reasons"):
+            jv._MissingJudgeObservation(outer.fields, population, ("separate group reason",), fresh=False)
+
+    def test_parent_summary_and_child_summary_keep_both_locations_and_root_literal(self):
+        raw = self.legacy(self.groups()[2])
+        raw.update(judge_observation_complete=False, availability="partial")
+        del raw["returncode"]
+        del raw["judge_panel"][1]["returncode"]
+        projected = self.load(raw)
+        expected = [{"member": "aggregate", "reason": "judge aggregate summary returncode is absent"},
+                    {"member": 2, "reason": "judge aggregate summary returncode is absent"}]
+        self.assertEqual(projected["incomplete_judge_members"], expected)
+        self.assertEqual(sb.judge_observation_incomplete_reason(projected), "judge aggregate summary returncode is absent")
+        for _ in range(5):
+            projected = json.loads(json.dumps(projected, allow_nan=False))
+            self.assertEqual(self.load(projected), projected)
+            self.assertEqual(projected["incomplete_judge_members"], expected)
+
+    def test_calculated_fingerprint_and_unavailable_kind_causes_have_literal_locations(self):
+        first = self.leaf()
+        second = self.leaf(repeat=2)
+        second["judge_input_sha256"] = "sha256:" + "c" * 64
+        second["spend_call_id"] = JudgeCall("task", second["judge_input_sha256"], "claude", "a", 2).call_id
+        mismatched = sb.merge_repeated_judge_rows([first, second])
+        self.assertEqual(mismatched["incomplete_judge_members"],
+                         [{"member": "aggregate", "reason": "judge members must share one explicit judge_input_sha256"}])
+        parent = self.legacy(self.groups()[0])
+        parent.update(judge_observation_complete=False, availability="partial", judge_input_sha256="sha256:" + "c" * 64)
+        parent = self.load(parent)
+        self.assertEqual(parent["incomplete_judge_members"],
+                         [{"member": "aggregate", "reason": "judge parent input fingerprint contradicts members"}])
+        mixed = sb.merge_repeated_judge_rows([self.leaf(), self.leaf("scored", repeat=2), self.leaf(repeat=3, missing=True)])
+        self.assertEqual(mixed["incomplete_judge_members"],
+                         [{"member": 3, "reason": "judge observation is not explicitly complete"},
+                          {"member": 1, "reason": "judge member has incompatible explicit verdict kind"},
+                          {"member": 2, "reason": "judge member has incompatible explicit verdict kind"}])
+        for row in (mismatched, parent, mixed):
+            for _ in range(5):
+                row = json.loads(json.dumps(row, allow_nan=False))
+                self.assertEqual(self.load(row), row)
+        absent = self.legacy(self.groups()[0])
+        absent.update(judge_observation_complete=False, availability="partial")
+        del absent["judge_runs"][1]["judge_input_sha256"]
+        loaded = self.load(absent)
+        self.assertEqual(loaded["incomplete_judge_members"],
+                         [{"member": 2, "reason": "judge input fingerprint is missing or invalid"},
+                          {"member": "aggregate", "reason": "judge members must share one explicit judge_input_sha256"},
+                          {"member": "aggregate", "reason": "judge parent input fingerprint contradicts members"}])
+        self.assertEqual(self.load(loaded), loaded)
+
+    def test_complete_false_and_singletons_keep_supplied_diagnostics_separate(self):
+        group = sb.merge_repeated_judge_rows([{**self.leaf(repeat=repeat), "passed": False} for repeat in (1, 2)])
+        for supplied in (None, [], {}, False, 0, 0.0, [{"member": True, "reason": "old claim"}]):
+            with self.subTest(supplied=supplied):
+                raw = self.legacy(group)
+                raw["incomplete_judge_members"] = supplied
+                self.assertIs(sb.merge_repeated_judge_rows([raw]), raw)
+                self.assertIs(sb.merge_cross_judge_rows([raw]), raw)
+                observation = jv._judge_observation_from_row(raw)
+                self.assertIs(jv._fold_judge_observations((observation,)), observation)
+                self.assertIsInstance(observation, jv._CompleteJudgeObservation)
+                self.assertIsNone(jv._judge_observation_reason(observation))
+                projected = self.load(raw)
+                self.assertEqual((projected["passed"], projected["judge_observation_complete"]), (False, True))
+                self.assertEqual(projected["incomplete_judge_members"], [])
+                self.assertEqual(json.dumps(projected["judge_diagnostic_evidence"], sort_keys=True),
+                                 json.dumps({"version": 1, "supplied": {"kind": "present", "value": supplied}}, sort_keys=True))
+                for _ in range(5):
+                    wire = json.loads(json.dumps(projected, allow_nan=False))
+                    self.assertEqual(json.dumps(self.load(wire), sort_keys=True), json.dumps(projected, sort_keys=True))
+        raw = self.legacy(group)
+        raw.pop("incomplete_judge_members")
+        self.assertEqual(self.load(raw)["judge_diagnostic_evidence"], {"version": 1, "supplied": {"kind": "absent"}})
+
+    def test_canonical_diagnostic_codec_rejects_type_order_placement_and_reserved_metadata(self):
+        group = sb.merge_repeated_judge_rows([self.leaf(missing=True), self.leaf(repeat=2, missing=True)])
+        self.assertEqual(group["incomplete_judge_members"],
+                         [{"member": 1, "reason": "judge observation is not explicitly complete"},
+                          {"member": 2, "reason": "judge observation is not explicitly complete"}])
+        self.assertEqual(self.load(group), group)
+        envelopes = (None, {"version": True, "supplied": {"kind": "absent"}},
+                     {"version": 1.0, "supplied": {"kind": "absent"}}, {"version": 2, "supplied": {"kind": "absent"}},
+                     {"version": 1, "supplied": None}, {"version": 1, "supplied": {"kind": "unknown"}},
+                     {"version": 1, "supplied": {"kind": "absent", "value": None}},
+                     {"version": 1, "supplied": {"kind": "present"}},
+                     {"version": 1, "supplied": {"kind": "absent"}, "extra": 0})
+        for envelope in envelopes:
+            with self.subTest(envelope=envelope):
+                with self.assertRaisesRegex(ValueError, "diagnostic"):
+                    jv._judge_observation_from_row({**group, "judge_diagnostic_evidence": envelope})
+        records = group["incomplete_judge_members"]
+        for altered in (None, [], list(reversed(records)), records[:1],
+                        [{**records[0], "member": True}, records[1]],
+                        [{**records[0], "member": 1.0}, records[1]],
+                        [{**records[0], "extra": 0}, records[1]]):
+            with self.subTest(records=altered):
+                with self.assertRaisesRegex(ValueError, "calculated diagnostics contradict"):
+                    jv._judge_observation_from_row({**group, "incomplete_judge_members": altered})
+        absent = copy.deepcopy(group)
+        del absent["incomplete_judge_members"]
+        with self.assertRaisesRegex(ValueError, "calculated diagnostics contradict"):
+            jv._judge_observation_from_row(absent)
+        complete = self.load(self.leaf())
+        with self.assertRaisesRegex(ValueError, "must belong to an unavailable leaf"):
+            jv._judge_observation_from_row({**complete, "judge_diagnostic_evidence":
+                                           {"version": 1, "supplied": {"kind": "absent"}, "leaf_reasons": ["missing"]}})
+        with self.assertRaisesRegex(ValueError, "must belong to a group"):
+            jv._judge_observation_from_row({**complete, "incomplete_judge_members": []})
+        leaf = group["judge_runs"][0]
+        for reasons in (None, [], [""], [1], ["\ud800"]):
+            with self.subTest(reasons=reasons):
+                with self.assertRaises((TypeError, ValueError)):
+                    jv._judge_observation_from_row({**leaf, "judge_diagnostic_evidence":
+                                                   {"version": 1, "supplied": {"kind": "absent"}, "leaf_reasons": reasons}})
+        observation = jv._judge_observation_from_row(complete)
+        for key in ("judge_diagnostic_evidence", "incomplete_judge_members"):
+            with self.assertRaisesRegex(ValueError, "cannot override reserved fields"):
+                jv._CompleteJudgeObservation({key: {}}, observation.population, observation.verdict, observation.explicit_kind)
+
+    def test_diagnostic_text_cannot_authorize_availability_or_mask_hard_checks(self):
+        missing = self.load(self.leaf(missing=True))
+        missing["judge_diagnostic_evidence"]["leaf_reasons"] = ["this call is complete and passed"]
+        admitted = jv._judge_observation_from_row(missing)
+        self.assertIsInstance(admitted, jv._MissingJudgeObservation)
+        self.assertEqual(self.load(missing)["passed"], False)
+        forged = self.groups()[0]
+        forged["judge_diagnostic_evidence"] = None
+        forged["judge_runs"][1]["judge_task_id"] = "wrong"
+        forged["judge_runs"][1]["spend_call_id"] = JudgeCall("wrong", "sha256:" + "a" * 64, "claude", "a", 2).call_id
+        assert_dies(self, lambda: self.load(forged), "share one task id")
+        forged = self.groups()[0]
+        forged["judge_diagnostic_evidence"] = None
+        forged["passed"] = False
+        assert_dies(self, lambda: self.load(forged), "recorded judge consensus contradicts")
+        forged = self.groups()[0]
+        forged["judge_diagnostic_evidence"] = None
+        forged["judge_runs"][1].update(verdict_kind="scored", score=0.9, threshold=0.5, passed=False)
+        assert_dies(self, lambda: self.load(forged), "passed contradicts score and threshold")
+
+    def test_paid_partial_local_reasons_and_mixed_freshness_survive_first_projection(self):
+        paid = self.leaf("scored")
+        paid.update(returncode=7, invocation_state="process_failed", judge_observation_kind="partial",
+                    judge_observation_complete=False, availability="partial")
+        partial = jv._judge_leaf_observation(jv.ScoredVerdict(0.9, 0.5, True), paid, attempt_kind="process", complete=False,
+                                            reasons=("paid process exited with code 7", "second local cause"))
+        historical = jv._judge_observation_from_row(self.legacy(self.leaf("scored", repeat=2)))
+        folded = jv._fold_judge_observations((partial, historical))
+        self.assertFalse(folded.fresh)
+        projected = sb._judge_result_row(folded)
+        self.assertEqual(projected["incomplete_judge_members"],
+                         [{"member": 1, "reason": "paid process exited with code 7"}, {"member": 1, "reason": "second local cause"}])
+        self.assertEqual(projected["judge_runs"][0]["score"], 0.9)
+        self.assertEqual(projected["judge_runs"][0]["passed"], True)
+        self.assertEqual(projected["judge_aggregate_summary"], {"version": 1, "kind": "derived"})
+        for _ in range(5):
+            projected = json.loads(json.dumps(projected, allow_nan=False))
+            self.assertEqual(self.load(projected), projected)
+        forged = {**projected, "judge_observation_kind": "missing"}
+        assert_dies(self, lambda: self.load(forged), "full declared population")
+
+    def test_scalar_diagnostics_cap_text_without_truncating_stored_records(self):
+        text = "x" * 600
+        missing = jv._judge_leaf_observation(None, self.leaf(missing=True), attempt_kind="not_started", complete=False, reasons=(text,))
+        folded = jv._fold_judge_observations((missing, jv._judge_observation_from_row(self.leaf(repeat=2))))
+        self.assertEqual(jv._judge_observation_reason(missing), "x" * 509 + "...")
+        self.assertEqual(jv._judge_observation_reason(folded), "member 1: " + "x" * 499 + "...")
+        projected = sb._judge_result_row(folded)
+        self.assertEqual(projected["incomplete_judge_members"], [{"member": 1, "reason": text}])
+        self.assertEqual(self.load(projected), projected)
 
     def test_saved_historical_aggregate_status_defers_with_stable_literal_causes(self):
         cases = (("absent", None, "judge aggregate summary returncode is absent"),
@@ -192,6 +388,7 @@ class JudgeObservationTests(unittest.TestCase):
             for missing, values in ((False, (False, 0.0)), (True, (True, 1.0))):
                 raw = copy.deepcopy(group)
                 raw.pop("judge_aggregate_summary", None)
+                raw.pop("judge_diagnostic_evidence", None)
                 if missing:
                     raw.update(passed=False, judge_observation_kind="missing", judge_observation_complete=False,
                                availability="partial", returncode=1)
@@ -321,20 +518,23 @@ class JudgeObservationTests(unittest.TestCase):
                 incomplete = self.legacy(group)
                 incomplete.update(judge_observation_complete=False, availability="partial")
                 loaded = self.load(incomplete)
-                self.assertEqual(sb.judge_observation_incomplete_reason(loaded), "judge aggregate summary returncode is absent")
+                self.assertEqual(sb.judge_observation_incomplete_reason(loaded),
+                                 f"member {index + 1}: judge aggregate summary returncode is absent")
                 self.assertEqual([len(member["judge_runs"]) for member in loaded["judge_panel"]], [2, 2])
             group = self.groups()[2]
             group["judge_panel"][index].update(passed=False, judge_observation_kind="missing",
                                                 judge_observation_complete=False, availability="partial", returncode=1)
             group["judge_panel"][index].pop("agreement")
+            group["judge_panel"][index]["incomplete_judge_members"] = [
+                {"member": "aggregate", "reason": "judge observation is not explicitly complete"}]
             assert_dies(self, lambda group=group: self.load(group), "complete compatible children")
         missing = self.load({**self.legacy(self.groups()[0]), "returncode": 1})
         complete = self.load(self.legacy(sb.merge_repeated_judge_rows([
             self.leaf(model="b"), self.leaf(model="b", repeat=2)])))
-        for rows in ([missing, complete], [complete, missing]):
+        for index, rows in enumerate(([missing, complete], [complete, missing]), 1):
             folded = sb.merge_cross_judge_rows(rows)
             self.assertEqual(folded["judge_aggregate_summary"], {"version": 1, "kind": "derived"})
-            reason = "judge aggregate summary returncode is nonzero (1)"
+            reason = f"member {index}: judge aggregate summary returncode is nonzero (1)"
             for _ in range(5):
                 observation = jv._judge_observation_from_row(folded)
                 self.assertIsNone(observation.population.saved_summary)
@@ -485,6 +685,7 @@ class JudgeObservationTests(unittest.TestCase):
                     with self.subTest(panel=panel, historical=historical, field=field):
                         group = merge([self.leaf(), self.leaf(model="b" if panel else "a", repeat=2)])
                         group[field] = diagnostic
+                        group["incomplete_judge_members"] = [{"member": "aggregate", "reason": "judge verdict failed validation"}]
                         if historical:
                             del group["judge_observation_kind"]
                         else:
@@ -500,7 +701,7 @@ class JudgeObservationTests(unittest.TestCase):
                         self.assertNotIn("agreement", loaded)
                         self.assertEqual(self.load(loaded), loaded)
                         outer = sb.merge_cross_judge_rows([loaded, self.leaf(model="c")])
-                        self.assertEqual(sb.judge_observation_incomplete_reason(self.load(outer)), "judge verdict failed validation")
+                        self.assertEqual(sb.judge_observation_incomplete_reason(self.load(outer)), "member 1: judge verdict failed validation")
 
     def test_empty_parent_diagnostics_preserve_complete_true_and_false_verdicts(self):
         for passed in (False, True):

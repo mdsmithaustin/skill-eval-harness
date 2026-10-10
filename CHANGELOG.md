@@ -4,6 +4,10 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Saved judge groups calculate member diagnostics from every retained cause. Nested explanations
+  identify the member path, while original supplied claims remain separately inspectable in
+  `judge_diagnostic_evidence`. Canonical diagnostic records must match the retained tree.
+
 - Saved historical judge groups defer when their aggregate summary status is absent, null,
   noninteger, or nonzero. Fresh groups reject Boolean and float status codes. The reserved
   `judge_aggregate_summary` envelope preserves original historical status causes across reloads

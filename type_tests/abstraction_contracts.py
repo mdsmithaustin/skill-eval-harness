@@ -52,8 +52,10 @@ from judge_verdict import (
     JudgeVerdict,
     ScoredVerdict,
     _AbsentSummary,
+    _AbsentSuppliedDiagnostics,
     _CompleteJudgeObservation,
     _IntegerSummary,
+    _JudgeCause,
     _JudgeLeaf,
     _JudgeObservation,
     _JudgePanel,
@@ -65,6 +67,8 @@ from judge_verdict import (
     _NullSummary,
     _PartialJudgeObservation,
     _SavedAggregateSummary,
+    _SuppliedDiagnosticEvidence,
+    _SuppliedDiagnostics,
 )
 from manifest_contracts import (
     CaseId,
@@ -173,6 +177,7 @@ def judge_observation_is_exhaustive(observation: _JudgeObservation) -> None:
         assert_type(observation.population, _JudgeLeaf)
     elif isinstance(observation, _MissingJudgeObservation):
         assert_type(observation.reasons, tuple[str, ...])
+        assert_type(observation.local_reasons, tuple[str, ...])
         assert_type(observation.population, _JudgePopulation)
     else:
         _assert_never(observation)
@@ -199,6 +204,18 @@ def saved_aggregate_summary_is_exhaustive(summary: _SavedAggregateSummary) -> No
         assert_type(summary.json_type, Literal["array", "object"])
     else:
         _assert_never(summary)
+
+
+def judge_diagnostic_types_are_precise(cause: _JudgeCause, supplied: _SuppliedDiagnosticEvidence) -> None:
+    assert_type(cause.path, tuple[int, ...])
+    assert_type(cause.scope, Literal["observation", "aggregate"])
+    assert_type(cause.reason, str)
+    if isinstance(supplied, _AbsentSuppliedDiagnostics):
+        assert_type(supplied, _AbsentSuppliedDiagnostics)
+    elif isinstance(supplied, _SuppliedDiagnostics):
+        assert_type(supplied.value, Any)
+    else:
+        _assert_never(supplied)
 
 
 def prepared_task_identity_is_precise(task: PreparedTask) -> None:

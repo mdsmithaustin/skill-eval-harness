@@ -5,12 +5,18 @@ import math
 import re
 import statistics
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Literal, TypeAlias
 
 from invocation_contracts import InvocationState, validate_invocation_lifecycle
-from json_contracts import freeze_json_mapping, thaw_json_value
+from json_contracts import (
+    freeze_json_mapping,
+    freeze_json_value,
+    strict_json_equal,
+    thaw_json_value,
+    validate_json_text,
+)
 from spend_contracts import JudgeCall
 
 
@@ -428,6 +434,47 @@ _JudgePopulation: TypeAlias = _JudgeLeaf | _JudgeRepeats | _JudgePanel
 
 
 @dataclass(frozen=True)
+class _AbsentSuppliedDiagnostics:
+    pass
+
+
+@dataclass(frozen=True)
+class _SuppliedDiagnostics:
+    value: Any
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", freeze_json_value(self.value, "supplied judge diagnostics"))
+
+
+_SuppliedDiagnosticEvidence: TypeAlias = _AbsentSuppliedDiagnostics | _SuppliedDiagnostics
+
+
+@dataclass(frozen=True)
+class _JudgeCause:
+    path: tuple[int, ...]
+    scope: Literal["observation", "aggregate"]
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, tuple) or any(type(index) is not int or index < 1 for index in self.path):
+            raise ValueError("judge diagnostic path requires positive integer ordinals")
+        if self.scope not in ("observation", "aggregate"):
+            raise ValueError("judge diagnostic scope must be observation or aggregate")
+        validate_json_text(self.reason, "judge diagnostic reason")
+        if not self.reason:
+            raise ValueError("judge diagnostic reason must be nonempty")
+
+
+def _check_local_reasons(reasons: tuple[str, ...]) -> None:
+    if not isinstance(reasons, tuple) or not reasons:
+        raise ValueError("unavailable judge leaf requires nonempty local reasons")
+    for reason in reasons:
+        validate_json_text(reason, "judge local reason")
+        if not reason:
+            raise ValueError("judge local reason must be nonempty")
+
+
+@dataclass(frozen=True)
 class _CompleteJudgeObservation:
     fields: Mapping[str, Any]
     population: _JudgePopulation
@@ -435,6 +482,7 @@ class _CompleteJudgeObservation:
     explicit_kind: VerdictKind | None
     fresh: bool = True
     agreement: Consensus | Mapping[str, Any] | None = None
+    supplied_diagnostics: _SuppliedDiagnosticEvidence = _AbsentSuppliedDiagnostics()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", freeze_json_mapping(self.fields, "judge metadata"))
@@ -469,20 +517,21 @@ class _PartialJudgeObservation:
     explicit_kind: VerdictKind | None
     reasons: tuple[str, ...]
     fresh: bool = True
+    supplied_diagnostics: _SuppliedDiagnosticEvidence = _AbsentSuppliedDiagnostics()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", freeze_json_mapping(self.fields, "judge metadata"))
         _check_observation_fields(self.fields)
-        if not self.reasons:
-            raise ValueError("partial judge observation requires a reason")
+        _check_local_reasons(self.reasons)
 
 
 @dataclass(frozen=True)
 class _MissingJudgeObservation:
     fields: Mapping[str, Any]
     population: _JudgePopulation
-    reasons: tuple[str, ...]
+    local_reasons: tuple[str, ...]
     fresh: bool = True
+    supplied_diagnostics: _SuppliedDiagnosticEvidence = _AbsentSuppliedDiagnostics()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", freeze_json_mapping(self.fields, "judge metadata"))
@@ -490,8 +539,14 @@ class _MissingJudgeObservation:
         if (self.fresh and isinstance(self.population, (_JudgeRepeats, _JudgePanel))
                 and self.population.saved_summary is not None):
             raise ValueError("fresh judge group cannot carry saved historical summary")
-        if not self.reasons:
-            raise ValueError("missing judge observation requires a reason")
+        if isinstance(self.population, _JudgeLeaf):
+            _check_local_reasons(self.local_reasons)
+        elif not isinstance(self.local_reasons, tuple) or self.local_reasons:
+            raise ValueError("missing judge group cannot carry leaf local reasons")
+
+    @property
+    def reasons(self) -> tuple[str, ...]:
+        return tuple(_render_judge_reason(cause.path, cause.reason) for cause in _judge_diagnostics(self))
 
 
 _JudgeObservation: TypeAlias = _CompleteJudgeObservation | _PartialJudgeObservation | _MissingJudgeObservation
@@ -500,6 +555,7 @@ _RESULT_FIELDS = _SEMANTIC_FIELDS | frozenset({
     "verdict_kind", "judge_observation_kind", "judge_observation_complete", "availability",
     "judge_runs", "judge_panel", "agreement", "judge_expected_repeats", "judge_models",
     "judge_consensus_policy", "judge_execution_kind", "judge_aggregate_summary",
+    "incomplete_judge_members", "judge_diagnostic_evidence",
 }) | _ATTEMPT_FIELDS
 _BINDING_FIELDS = (
     "judge_task_id", "id", "case_id", "variant", "run_number", "judge_backend",
@@ -660,16 +716,110 @@ def _judge_leaf_observation(verdict: JudgeVerdict | None, raw: Mapping[str, Any]
 
 
 def _judge_observation_reason(observation: _JudgeObservation) -> str | None:
-    if isinstance(observation, _CompleteJudgeObservation):
+    causes = _judge_diagnostics(observation)
+    if not causes:
         return None
-    return observation.reasons[0]
+    reason = _render_judge_reason(causes[0].path, causes[0].reason)
+    return reason if len(reason) <= 512 else reason[:509] + "..."
+
+
+def _render_judge_reason(path: tuple[int, ...], reason: str) -> str:
+    return ", ".join(f"member {index}" for index in path) + ": " + reason if path else reason
+
+
+def _judge_diagnostic_records(causes: tuple[_JudgeCause, ...]) -> list[dict[str, Any]]:
+    return [{"member": cause.path[0] if cause.path else "aggregate",
+             "reason": _render_judge_reason(cause.path[1:], cause.reason)} for cause in causes]
+
+
+def _judge_diagnostic_tree(observation: _JudgeObservation) -> dict[int, tuple[_JudgeCause, ...]]:
+    subtrees: dict[int, tuple[_JudgeCause, ...]] = {}
+
+    def visit(node: _JudgeObservation) -> tuple[_JudgeCause, ...]:
+        population = node.population
+        children = tuple(visit(member) for member in population.members) if not isinstance(population, _JudgeLeaf) else ()
+        if isinstance(node, _CompleteJudgeObservation):
+            causes = ()
+        elif isinstance(population, _JudgeLeaf):
+            local = node.local_reasons if isinstance(node, _MissingJudgeObservation) else node.reasons
+            causes = tuple(_JudgeCause((), "observation", reason) for reason in local)
+        else:
+            own = []
+            if node.fields.get("schema_errors") or node.fields.get("verdict_validation_error"):
+                own.append(_JudgeCause((), "aggregate", "judge verdict failed validation"))
+            reason = _aggregate_summary_reason(population.saved_summary)
+            if reason is not None:
+                own.append(_JudgeCause((), "aggregate", reason))
+            causes = tuple(own) + _judge_population_causes(population, node.fields, children)
+            if not causes:
+                causes = (_JudgeCause((), "aggregate", "judge observation is not explicitly complete"),)
+        subtrees[id(node)] = causes
+        return causes
+
+    visit(observation)
+    return subtrees
+
+
+def _judge_diagnostics(observation: _JudgeObservation) -> tuple[_JudgeCause, ...]:
+    return _judge_diagnostic_tree(observation)[id(observation)]
+
+
+def _judge_diagnostic_evidence_fields(observation: _JudgeObservation) -> dict[str, Any]:
+    supplied = observation.supplied_diagnostics
+    evidence = {"version": 1, "supplied": {"kind": "present", "value": thaw_json_value(supplied.value)}
+                if isinstance(supplied, _SuppliedDiagnostics) else {"kind": "absent"}}
+    if isinstance(observation.population, _JudgeLeaf) and not isinstance(observation, _CompleteJudgeObservation):
+        evidence["leaf_reasons"] = list(observation.local_reasons if isinstance(observation, _MissingJudgeObservation)
+                                        else observation.reasons)
+    return evidence
+
+
+def _admit_judge_diagnostic_evidence(observation: _JudgeObservation, raw: Mapping[str, Any]) -> _JudgeObservation:
+    if "judge_diagnostic_evidence" not in raw:
+        return replace(observation, supplied_diagnostics=_SuppliedDiagnostics(raw["incomplete_judge_members"])
+                       if "incomplete_judge_members" in raw else _AbsentSuppliedDiagnostics())
+    envelope = raw["judge_diagnostic_evidence"]
+    if (not isinstance(envelope, Mapping) or type(envelope.get("version")) is not int
+            or envelope["version"] != 1):
+        raise ValueError("judge diagnostic evidence requires integer version 1")
+    unavailable_leaf = isinstance(observation.population, _JudgeLeaf) and not isinstance(observation, _CompleteJudgeObservation)
+    if "leaf_reasons" in envelope and not unavailable_leaf:
+        raise ValueError("judge leaf reasons must belong to an unavailable leaf")
+    if set(envelope) != ({"version", "supplied", "leaf_reasons"} if unavailable_leaf else {"version", "supplied"}):
+        raise ValueError("judge diagnostic evidence has invalid fields")
+    supplied = envelope["supplied"]
+    if not isinstance(supplied, Mapping):
+        raise ValueError("judge supplied diagnostics must be an object")
+    kind = supplied.get("kind")
+    if kind not in ("absent", "present") or set(supplied) != (
+            {"kind"} if kind == "absent" else {"kind", "value"}):
+        raise ValueError("judge supplied diagnostics has invalid kind or fields")
+    observation = replace(observation, supplied_diagnostics=_SuppliedDiagnostics(supplied["value"])
+                          if kind == "present" else _AbsentSuppliedDiagnostics())
+    if unavailable_leaf:
+        reasons = envelope["leaf_reasons"]
+        if not isinstance(reasons, list):
+            raise ValueError("judge leaf reasons must be a nonempty array")
+        local = tuple(reasons)
+        _check_local_reasons(local)
+        if isinstance(observation, _MissingJudgeObservation):
+            observation = replace(observation, local_reasons=local)
+        elif isinstance(observation, _PartialJudgeObservation):
+            observation = replace(observation, reasons=local)
+    if isinstance(observation.population, _JudgeLeaf):
+        if "incomplete_judge_members" in raw:
+            raise ValueError("canonical judge member diagnostics must belong to a group")
+    elif "incomplete_judge_members" not in raw or not strict_json_equal(
+            raw["incomplete_judge_members"], _judge_diagnostic_records(_judge_diagnostics(observation))):
+        raise ValueError("judge calculated diagnostics contradict retained population")
+    return observation
 
 
 def _judge_model(observation: _JudgeObservation) -> Any:
     return observation.fields.get("judge_requested_model", observation.fields.get("judge_model"))
 
 
-def _judge_group_errors(members: tuple[_JudgeObservation, ...], *, panel: bool) -> list[dict[str, Any]]:
+def _validate_judge_group_identity(members: tuple[_JudgeObservation, ...], *, panel: bool) -> None:
     if not members:
         raise ValueError("judge group requires at least one member")
     ids = {member.fields.get("judge_task_id", member.fields.get("id")) for member in members}
@@ -696,23 +846,36 @@ def _judge_group_errors(members: tuple[_JudgeObservation, ...], *, panel: bool) 
         values = [member.fields.get(key) for member in members]
         if any(member.fresh for member in members) and any(value != values[0] for value in values):
             raise ValueError(f"judge members must share one {key}")
-    errors = [{"member": index, "reason": reason} for index, member in enumerate(members, 1)
-              if (reason := _judge_observation_reason(member)) is not None]
+
+
+def _judge_population_causes(population: _JudgeRepeats | _JudgePanel, fields: Mapping[str, Any],
+                              children: tuple[tuple[_JudgeCause, ...], ...]) -> tuple[_JudgeCause, ...]:
+    members = population.members
+    causes = [_JudgeCause((index,) + cause.path, cause.scope, cause.reason)
+              for index, child in enumerate(children, 1) for cause in child]
     fingerprints = [member.fields.get("judge_input_sha256") for member in members]
     if any(not isinstance(value, str) for value in fingerprints) or len(set(fingerprints)) != 1:
-        errors.append({"member": "aggregate", "reason": "judge members must share one explicit judge_input_sha256"})
+        causes.append(_JudgeCause((), "aggregate", "judge members must share one explicit judge_input_sha256"))
     kinds = {member.explicit_kind for member in members
              if isinstance(member, (_CompleteJudgeObservation, _PartialJudgeObservation))
              and member.explicit_kind is not None}
+    if len(kinds) > 1 and not causes:
+        raise ValueError("judge panel rows must share one verdict kind" if isinstance(population, _JudgePanel) else
+                         "judge repeats must share one task id and verdict kind")
+    if "judge_input_sha256" in fields and any(value != fields["judge_input_sha256"] for value in fingerprints):
+        causes.append(_JudgeCause((), "aggregate", "judge parent input fingerprint contradicts members"))
     if len(kinds) > 1:
-        if not errors:
-            raise ValueError("judge panel rows must share one verdict kind" if panel else
-                             "judge repeats must share one task id and verdict kind")
-        errors.extend({"member": index, "reason": "judge member has incompatible explicit verdict kind"}
-                      for index, member in enumerate(members, 1)
-                      if isinstance(member, (_CompleteJudgeObservation, _PartialJudgeObservation))
-                      and member.explicit_kind is not None)
-    return errors
+        causes.extend(_JudgeCause((index,), "observation", "judge member has incompatible explicit verdict kind")
+                       for index, member in enumerate(members, 1)
+                       if isinstance(member, (_CompleteJudgeObservation, _PartialJudgeObservation))
+                       and member.explicit_kind is not None)
+    return tuple(causes)
+
+
+def _judge_group_errors(members: tuple[_JudgeObservation, ...], *, panel: bool) -> list[dict[str, Any]]:
+    _validate_judge_group_identity(members, panel=panel)
+    population = _JudgePanel(members, tuple(_judge_model(member) for member in members)) if panel else _JudgeRepeats(members)
+    return _judge_diagnostic_records(_judge_population_causes(population, {}, tuple(_judge_diagnostics(member) for member in members)))
 
 
 def _fold_judge_observations(members: tuple[_JudgeObservation, ...], *, panel: bool = False,
@@ -741,10 +904,9 @@ def _fold_judge_observations(members: tuple[_JudgeObservation, ...], *, panel: b
     population = (_JudgePanel(members, tuple(_judge_model(member) for member in members), policy if fresh else None)
                   if panel else _JudgeRepeats(members, len(members) if fresh else None, policy if fresh else None))
     if errors:
-        fields["incomplete_judge_members"] = errors
         fields["evidence"] = "judge aggregate incomplete: " + "; ".join(str(error["reason"]) for error in errors[:5])
         return _MissingJudgeObservation(freeze_json_mapping(fields, "judge group"), population,
-                                        tuple(str(error["reason"]) for error in errors), fresh)
+                                        (), fresh)
     complete_members = tuple(member for member in members if isinstance(member, _CompleteJudgeObservation))
     consensus = _resolve_judge_observations(complete_members, policy)
     fields["evidence"] = " | ".join(str(member.fields.get("evidence", "")) for member in members
@@ -762,39 +924,46 @@ def _resolve_judge_observations(members: tuple[_CompleteJudgeObservation, ...],
 
 
 def _judge_observation_fields(observation: _JudgeObservation) -> dict[str, Any]:
-    out = thaw_json_value(observation.fields, "judge metadata")
-    if isinstance(observation, _MissingJudgeObservation):
-        out.update(verdict_fields(ConsensusVerdict(False)))
-        kind, complete = "missing", False
-    else:
-        out.update(verdict_fields(observation.verdict))
-        if not observation.fresh and observation.explicit_kind is None:
-            out.pop("verdict_kind", None)
-        kind, complete = ("complete", True) if isinstance(observation, _CompleteJudgeObservation) else ("partial", False)
-    out.update(judge_observation_complete=complete, availability="complete" if complete else "partial")
-    if observation.fresh:
-        out["judge_observation_kind"] = kind
-    population = observation.population
-    if isinstance(population, _JudgeLeaf):
-        out.update(thaw_json_value(population.attempt.facts, "judge execution"))
+    subtrees = _judge_diagnostic_tree(observation)
+
+    def project(observation: _JudgeObservation) -> dict[str, Any]:
+        out = thaw_json_value(observation.fields, "judge metadata")
+        if isinstance(observation, _MissingJudgeObservation):
+            out.update(verdict_fields(ConsensusVerdict(False)))
+            kind, complete = "missing", False
+        else:
+            out.update(verdict_fields(observation.verdict))
+            if not observation.fresh and observation.explicit_kind is None:
+                out.pop("verdict_kind", None)
+            kind, complete = ("complete", True) if isinstance(observation, _CompleteJudgeObservation) else ("partial", False)
+        out.update(judge_observation_complete=complete, availability="complete" if complete else "partial")
         if observation.fresh:
-            out["judge_execution_kind"] = population.attempt.kind
-    else:
-        key = "judge_panel" if isinstance(population, _JudgePanel) else "judge_runs"
-        out[key] = [_judge_observation_fields(member) for member in population.members]
-        out["returncode"] = 0 if complete else 1
-        out["judge_aggregate_summary"] = _aggregate_summary_fields(population.saved_summary)
-        if isinstance(population, _JudgePanel):
-            if population.models_recorded:
-                out["judge_models"] = list(population.requested_models)
-        elif population.expected_count is not None:
-            out["judge_expected_repeats"] = population.expected_count
-        if population.policy is not None:
-            out["judge_consensus_policy"] = {"threshold": population.policy.threshold, "quorum": population.policy.quorum}
-        if isinstance(observation, _CompleteJudgeObservation) and observation.agreement is not None:
-            out["agreement"] = (observation.agreement.agreement() if isinstance(observation.agreement, Consensus)
-                                else thaw_json_value(observation.agreement, "judge agreement"))
-    return out
+            out["judge_observation_kind"] = kind
+        population = observation.population
+        if isinstance(population, _JudgeLeaf):
+            out.update(thaw_json_value(population.attempt.facts, "judge execution"))
+            if observation.fresh:
+                out["judge_execution_kind"] = population.attempt.kind
+        else:
+            key = "judge_panel" if isinstance(population, _JudgePanel) else "judge_runs"
+            out[key] = [project(member) for member in population.members]
+            out["incomplete_judge_members"] = _judge_diagnostic_records(subtrees[id(observation)])
+            out["returncode"] = 0 if complete else 1
+            out["judge_aggregate_summary"] = _aggregate_summary_fields(population.saved_summary)
+            if isinstance(population, _JudgePanel):
+                if population.models_recorded:
+                    out["judge_models"] = list(population.requested_models)
+            elif population.expected_count is not None:
+                out["judge_expected_repeats"] = population.expected_count
+            if population.policy is not None:
+                out["judge_consensus_policy"] = {"threshold": population.policy.threshold, "quorum": population.policy.quorum}
+            if isinstance(observation, _CompleteJudgeObservation) and observation.agreement is not None:
+                out["agreement"] = (observation.agreement.agreement() if isinstance(observation.agreement, Consensus)
+                                    else thaw_json_value(observation.agreement, "judge agreement"))
+        out["judge_diagnostic_evidence"] = _judge_diagnostic_evidence_fields(observation)
+        return out
+
+    return project(observation)
 
 
 def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
@@ -846,9 +1015,10 @@ def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
             reason = _judge_leaf_incomplete_reason(fields, attempt)
         if marker == "complete" and reason is not None:
             raise ValueError(reason)
-        return _judge_leaf_observation(None if marker == "missing" else verdict, raw,
-                                       attempt_kind=kind, complete=reason is None,
-                                       reasons=(reason,) if reason else (), fresh=fresh, explicit_kind=explicit)
+        observation = _judge_leaf_observation(None if marker == "missing" else verdict, raw,
+                                              attempt_kind=kind, complete=reason is None,
+                                              reasons=(reason,) if reason else (), fresh=fresh, explicit_kind=explicit)
+        return _admit_judge_diagnostic_evidence(observation, raw)
     if marker == "partial":
         raise ValueError("partial judge observation must be a leaf")
     key = memberships[0]
@@ -856,7 +1026,9 @@ def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
     if not isinstance(children, list) or not children:
         raise ValueError("judge members must be a non-empty list")
     members = tuple(_judge_observation_from_row(child) for child in children)
-    errors = _judge_group_errors(members, panel=key == "judge_panel")
+    _validate_judge_group_identity(members, panel=key == "judge_panel")
+    provisional = _JudgePanel(members, tuple(_judge_model(member) for member in members)) if key == "judge_panel" else _JudgeRepeats(members)
+    errors = _judge_population_causes(provisional, raw, tuple(_judge_diagnostics(member) for member in members))
     expected = raw.get("judge_expected_repeats")
     if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int)
                                  or expected != len(members) or expected < 1):
@@ -875,10 +1047,8 @@ def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
             and member.fields["judge_requested_model"] != raw["judge_requested_model"] for member in members):
         raise ValueError("judge parent requested model contradicts members")
     for name in _BINDING_FIELDS:
-        if name in raw and any(member.fields.get(name) != raw[name] for member in members):
-            if name != "judge_input_sha256":
-                raise ValueError(f"judge parent {name} contradicts members")
-            errors.append({"member": "aggregate", "reason": "judge parent input fingerprint contradicts members"})
+        if name != "judge_input_sha256" and name in raw and any(member.fields.get(name) != raw[name] for member in members):
+            raise ValueError(f"judge parent {name} contradicts members")
     if fresh and any(name in raw for name in ("spend_call_id", "judge_repeat", "judge_served_model", "invocation_state", "timed_out", "provider_error", "judge_execution_kind")):
         raise ValueError("judge aggregate cannot carry leaf execution facts")
     policy_raw = raw.get("judge_consensus_policy")
@@ -915,12 +1085,10 @@ def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
             agreement = raw["agreement"]
     summary_reason = _aggregate_summary_reason(summary)
     if not complete or summary_reason is not None:
-        reasons = (("judge verdict failed validation",) if validation_failed else ())
-        reasons += (summary_reason,) if summary_reason is not None else ()
-        reasons += tuple(str(error["reason"]) for error in errors)
-        return _MissingJudgeObservation(fields, population,
-                                        reasons or ("judge observation is not explicitly complete",), fresh)
-    return _CompleteJudgeObservation(fields, population, verdict, explicit, fresh, agreement)
+        observation = _MissingJudgeObservation(fields, population, (), fresh)
+    else:
+        observation = _CompleteJudgeObservation(fields, population, verdict, explicit, fresh, agreement)
+    return _admit_judge_diagnostic_evidence(observation, raw)
 
 
 def _judge_observation_matches_steps(observation: _JudgeObservation, *, fingerprint: str | None,
