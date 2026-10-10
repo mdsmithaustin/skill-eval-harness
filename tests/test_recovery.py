@@ -190,7 +190,6 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
                                    ("wrong", "json", "checkpoint_mismatch"),
                                    ("stop", "bytes", "checkpoint_mismatch"),
                                    ("early", "json", "natural_completion"),
-                                   ("terminal", "json", "natural_completion"),
                                    ("changed", "json", "checkpoint_mismatch"),
                                    ("removed", "json", "checkpoint_mismatch"),
                                    ("exit-handler", "json", "natural_completion"),
@@ -208,6 +207,50 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
                 self.assertFalse(Path(record["workspace"]).exists())
                 if mode == "timeout":
                     self.assertEqual(process["os_returncode"], -signal.SIGKILL)
+
+    def test_natural_exit_with_matching_checkpoint_blocks_recovery(self):
+        popen = sb.subprocess.Popen
+        children = []
+        def spawn_exited(*arguments, **keywords):
+            child = popen(*arguments, **keywords)
+            children.append(child)
+            try:
+                self.assertEqual(child.wait(timeout=2), 0)
+            except sb.subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=2)
+                raise
+            return child
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+                sb.subprocess, "Popen", side_effect=spawn_exited):
+            result, base = self.run_case(Path(temporary), mode="terminal")
+            self.assertEqual(result[0], 1, result[2])
+            record = json.loads((base / "recovery.json").read_text())
+            self.assertEqual((record["status"], record["failure"]),
+                             ("failed", "natural_completion"))
+            self.assertEqual([phase["phase"] for phase in record["phases"]], ["initial"])
+            evidence = base / "recovery"
+            process = json.loads((evidence / "initial/process.json").read_text())
+            self.assertEqual((process["state"], process["os_returncode"], process["signal_sent"]),
+                             ("natural_completion", 0, None))
+            self.assertEqual((process["leader_reaped"], process["pipes_drained"],
+                              process["group_stopped"], process["checkpoint_observed_live"]),
+                             (True, True, True, False))
+            self.assertEqual((evidence / "initial/stdout.bin").read_bytes(),
+                             b'{"role": "assistant", "content": "early"}\n')
+            self.assertEqual((evidence / "initial/stderr.bin").read_bytes(), b"")
+            self.assertEqual(self.read_snapshot(evidence / "final", "checkpoint.json"),
+                             b'{"phase":1}')
+            turns = [json.loads(line) for line in self.read_snapshot(
+                evidence / "final", "turns.jsonl").splitlines()]
+            self.assertEqual([turn["phase"] for turn in turns], ["INITIAL"])
+            self.assertEqual(len(children), 1)
+            self.assertEqual(children[0].returncode, 0)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(children[0].pid, 0)
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(children[0].pid, 0)
+            self.assertFalse(Path(record["workspace"]).exists())
 
     def test_matching_external_symlink_checkpoint_cannot_authorize_stop(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -641,21 +684,35 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
 
     def test_pipe_capture_exception_still_drains_and_reaps_real_child(self):
         communicate = sb.subprocess.Popen.communicate
-        attempts = 0
+        read = sb.recovery_file_bytes
+        ready = False
+        injected = False
+        def observe_ready(workspace, relative):
+            nonlocal ready
+            content = read(workspace, relative)
+            if relative == "checkpoint.json" and content == b'{ "phase": 1 }\n':
+                ready = True
+            return content
         def fail_read(process, *arguments, **keywords):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 2:
+            nonlocal injected
+            if ready and not injected:
+                injected = True
                 raise OSError("pipe read failed")
             return communicate(process, *arguments, **keywords)
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
-                sb.subprocess.Popen, "communicate", autospec=True, side_effect=fail_read):
+                sb.subprocess.Popen, "communicate", autospec=True, side_effect=fail_read), \
+                mock.patch.object(sb, "recovery_file_bytes", side_effect=observe_ready):
             result, base = self.run_case(Path(temporary))
             self.assertEqual(result[0], 1, result[2])
+            self.assertTrue(injected)
             process = json.loads((base / "recovery/initial/process.json").read_text())
             self.assertEqual(process["state"], "capture_failed")
+            self.assertEqual(process["error"], "OSError: pipe read failed")
             self.assertTrue(process["leader_reaped"])
             self.assertTrue(process["group_stopped"])
+            self.assertEqual((base / "recovery/initial/stdout.bin").read_bytes(),
+                             b'{"role": "assistant", "content": "initial"}\n' +
+                             json.dumps({"raw": "z" * 16000}).encode() + b"\r\n")
             self.assertEqual((base / "recovery/initial/stderr.bin").read_bytes(),
                              b"raw-secret\xff" + b"x" * 16000)
 

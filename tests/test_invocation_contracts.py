@@ -1,3 +1,6 @@
+import os
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -142,6 +145,59 @@ class ReachedExitTests(unittest.TestCase):
                 self.assertIs(state.reached_exit, reached)
         outcome = InvocationOutcome.from_process(stdout="", stderr="", returncode=0, elapsed_ms=0)
         self.assertIs(outcome.process_observation_complete, outcome.state.reached_exit)
+
+
+class ProcessCaptureTests(unittest.TestCase):
+    def test_natural_exit_after_poll_timeout_preserves_captured_stderr(self):
+        communicate = sb.subprocess.Popen.communicate
+        for stderr in ("", "provider stderr\n"):
+            for returncode in (0, 7):
+                with self.subTest(stderr=stderr, returncode=returncode), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    release = root / "release"
+                    child = root / "child.py"
+                    child.write_text(
+                        "import pathlib, sys, time\n"
+                        f"while not pathlib.Path({str(release)!r}).exists():\n"
+                        "    time.sleep(0.005)\n"
+                        "sys.stdout.write('fixture stdout\\n')\n"
+                        f"sys.stderr.write({stderr!r})\n"
+                        f"raise SystemExit({returncode})\n", encoding="utf-8")
+                    owned = []
+
+                    def exit_after_poll(process, *arguments, owned=owned,
+                                        release=release, **keywords):
+                        try:
+                            return communicate(process, *arguments, **keywords)
+                        except sb.subprocess.TimeoutExpired:
+                            if not owned:
+                                owned.append(process)
+                                release.touch()
+                                process.wait(timeout=3)
+                            raise
+
+                    with mock.patch.object(sb.subprocess.Popen, "communicate",
+                                           autospec=True, side_effect=exit_after_poll):
+                        outcome = sb.invoke_argv_with_timeout(
+                            ProcessInvocationPlan.from_values(
+                                [sys.executable, str(child)], input_text=None,
+                                cwd=root, timeout_s=5))
+
+                    self.assertEqual(len(owned), 1)
+                    self.assertEqual(owned[0].returncode, returncode)
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(owned[0].pid, 0)
+                    if hasattr(os, "killpg"):
+                        with self.assertRaises(ProcessLookupError):
+                            os.killpg(owned[0].pid, 0)
+                    self.assertEqual(outcome.stdout, "fixture stdout\n")
+                    self.assertEqual(outcome.returncode, returncode)
+                    self.assertFalse(outcome.timed_out)
+                    self.assertIs(outcome.state, InvocationState.COMPLETE if returncode == 0
+                                  else InvocationState.PROCESS_FAILED)
+                    self.assertTrue(outcome.process_observation_complete)
+                    self.assertEqual(outcome.stderr, stderr)
 
 
 if __name__ == "__main__":

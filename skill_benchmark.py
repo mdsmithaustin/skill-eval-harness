@@ -7381,8 +7381,11 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
             )
             group_cleanup = {**group_cleanup, "pipe_drain": pipe_action, "warning": pipe_warning}
         stdout, stdout_utf8_valid = _wire_text(out or exc.stdout, redact_stdout)
+        captured_stderr = err if err is not None else exc.stderr
+        if not leader_exited:
+            captured_stderr = captured_stderr or exc.stderr or str(exc)
         stderr, stderr_utf8_valid = _wire_text(
-            err or exc.stderr or str(exc), redact_stderr)
+            captured_stderr, redact_stderr)
         stderr = stderr[:4000]
         returncode = proc.returncode if leader_exited and proc.returncode is not None else 124
     else:
