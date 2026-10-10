@@ -285,7 +285,7 @@ class JudgePresetTests(unittest.TestCase):
             (base / "output.md").write_text("claims", encoding="utf-8")
             _result, tasks = sb.grade_case_variant(case, "with_skill", "claims", base / "output.md", {}, run_base=base)
             self.assertEqual(len(tasks), 1)
-            self.assertTrue(tasks[0]["assertion"]["rubric"])   # canned rubric rides the judge task
+            self.assertTrue(tasks[0]["assertion"]["rubric"])
             jid = tasks[0]["judge_task_id"]
             _, _, prompt_sha256, _ = sb.judge_input_material(
                 tasks[0], "claims", run_base=base)
@@ -297,7 +297,6 @@ class JudgePresetTests(unittest.TestCase):
                        "judge_evidence_mode": "text-only"}
             merged, _ = sb.grade_case_variant(case, "with_skill", "claims", base / "output.md", {}, run_base=base,
                                               judge_results={jid: verdict})
-        # factuality is soft by default: the verdict fills the soft/graded channel.
         self.assertEqual(merged["soft_passed"], 1)
         self.assertTrue(merged["qualitative_assertions"][0]["passed"])
         self.assertEqual(merged["qualitative_assertions"][0]["oracle"], "live")
@@ -1016,7 +1015,7 @@ class PerStepJudgeTests(unittest.TestCase):
             vf.write_text(json.dumps({"criteria": [
                 {"name": "vibes", "met": True}, {"name": "step-2", "met": True}]}), encoding="utf-8")
             row = sb.run_one_judge_task(self._task(run), judge_cmd=f"cat {vf}")
-        self.assertFalse(row["passed"])   # a verdict about invented steps is not evidence
+        self.assertFalse(row["passed"])
         self.assertEqual(row["verdict_kind"], "consensus")
         self.assertEqual(row["judge_observation_kind"], "missing")
 
@@ -1203,7 +1202,7 @@ class CrossJudgeConsensusTests(unittest.TestCase):
             for key in ("judge_input_sha256", "judge_prompt_sha256", "judge_evidence_mode"):
                 member[key] = consensus[key]
         result, _ = sb.grade_case_variant(case, "with_skill", "x", Path("o.md"), {}, judge_results={jid: consensus})
-        self.assertEqual(len(result["qualitative_assertions"]), 1)                 # exactly one merged verdict per jid
+        self.assertEqual(len(result["qualitative_assertions"]), 1)
         self.assertEqual((result["qualitative_total"], result["qualitative_passed"]), (1, 1))
 
     def test_consensus_score_is_median_not_mean(self):
@@ -1381,11 +1380,6 @@ class JudgeRobustnessTests(unittest.TestCase):
 
 
 class ToolUsingJudgeTests(unittest.TestCase):
-    """G1 follow-on — the opt-in tool-using judge explores a SANITIZED copy of the
-    run dir. The security invariant is safety-by-CONSTRUCTION: the oracle is never
-    copied, so a filesystem-reading judge cannot read the answer key. The keystone
-    test proves that through the real run_one_judge_task path with a stub judge that
-    lists the directory it was actually given."""
 
     ORACLE = {"grading.json": '{"answer": "BLOCK"}', "answer_key.txt": "BLOCK",
               "rubric.md": "grade on X", "expected.json": "{}", "GOLD.txt": "g"}
@@ -1489,20 +1483,17 @@ class ToolUsingJudgeTests(unittest.TestCase):
             row = sb.run_one_judge_task(self._task(run), judge_model="m", claude_bin=str(stub), explore=True)
             probe = json.loads((Path(td) / "probe.json").read_text(encoding="utf-8"))
             leftover = self._explore_dirs(private)
-        self.assertTrue(row["passed"])                                     # verdict flows back unchanged
+        self.assertTrue(row["passed"])
         self.assertEqual(row["score"], 5)
-        self.assertIn("--add-dir", probe["argv"])                          # tools were armed
+        self.assertIn("--add-dir", probe["argv"])
         self.assertIn("--allowedTools", probe["argv"])
         self.assertEqual(probe["argv"][probe["argv"].index("--allowedTools") + 1], "Read,Grep,Glob,LS")
         self.assertIn("--json-schema", probe["argv"])
-        self.assertIn("output.md", probe["seen"])                          # judge saw the real output...
+        self.assertIn("output.md", probe["seen"])
         for oracle in self.ORACLE:
-            self.assertNotIn(oracle, probe["seen"])                        # ...but NEVER the answer key
-        # The judge runs WITH the sanitized copy as cwd — not the repo root, which holds
-        # the live oracle. Read/Grep with no path would otherwise range over the repo.
+            self.assertNotIn(oracle, probe["seen"])
         self.assertIn("judge-call-", probe["cwd"])
         self.assertNotEqual(probe["cwd"], os.getcwd())
-        # The scratch copy was made in the temp dir, and cleaned up afterwards.
         self.assertTrue(Path(probe["cwd"]).resolve().is_relative_to(private), probe["cwd"])
         self.assertEqual(leftover, set())
 
@@ -2259,7 +2250,7 @@ class JudgeCalibrationTests(unittest.TestCase):
         merged = sb.merge_cross_judge_rows(members)
         forged = dict(merged)
         forged["judge_panel"] = [dict(forged["judge_panel"][0], passed=False),
-                                 *forged["judge_panel"][1:]]   # member's passed no longer matches its score
+                                 *forged["judge_panel"][1:]]
         row = sb.validated_result_row(forged)
         self.assertEqual(sb.judge_decision(row), ("majority_consensus", 0.5))
         report = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})

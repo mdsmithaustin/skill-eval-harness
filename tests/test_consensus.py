@@ -60,11 +60,7 @@ class ResolveConsensusTests(unittest.TestCase):
 class BothMergesShareTheRuleTests(unittest.TestCase):
     def test_repeats_and_a_panel_fold_the_same_votes_the_same_way(self):
         cases = [
-            # (passed, score) votes, threshold -> passed, unresolved
-            # A tie with no threshold was a silent fail for repeats; now both
-            # merges report it as unresolved.
             ([(True, None), (False, None)], None, False, True),
-            # A tie decided by the median score against an explicit threshold.
             ([(True, 0.9), (False, 0.6)], 0.7, True, False),
             ([(True, 1.0), (True, 0.9), (False, 0.0)], 0.7, True, False),
         ]

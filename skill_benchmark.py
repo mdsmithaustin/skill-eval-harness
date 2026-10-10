@@ -13887,26 +13887,15 @@ def _prepare_judge_task(task: dict[str, Any], judge_cmd: str | None = None,
             f"{judge_backend} remains text/trajectory-only")
     output_path = Path(task.get("output_path", ""))
     output_text = output_path.read_text(encoding="utf-8", errors="replace") if output_path.exists() else ""
-    # A task without an explicit run_base has no run dir to inspect. Do NOT let an
-    # empty path resolve to '.' — that is the repo root, which holds the live oracle
-    # (runs/<case>/<variant>/grading.json). Both the trajectory and explore paths
-    # require a real run_base; absent one, they degrade to output-only.
     rb = task.get("run_base")
     run_base = Path(rb) if rb else None
     has_run_base = run_base is not None and run_base.exists()
-    # Per-step judging is trace-evidence-backed: resolve the run's steps BEFORE
-    # any model spend, and fail closed — like a process assertion — when there
-    # is nothing to judge. grade_case_variant already refuses to emit such a
-    # task; this guard covers re-run task files whose run dirs have changed.
     step_events: list[dict[str, Any]] | None = None
     per_step_steps: list[dict[str, Any]] | None = None
     per_step_fingerprint: str | None = None
     if is_per_step_assertion(task.get("assertion", {})):
         step_events, step_error = read_events_base(run_base) if has_run_base else (None, "missing run directory")
         if step_events is None:
-            # No model was invoked BY DESIGN, so judge spend is not_applicable
-            # on both channels — never "missing", which would read as lost
-            # telemetry from a run that happened.
             fallback_hash, _, fallback_prompt_hash, _ = judge_input_material(
                 task, output_text)
             return _guarded_judge_slot({
@@ -14163,9 +14152,6 @@ def _run_judge_slot(slot: _JudgeSlot, admission: SpendAdmission,
         parsed = {}
         parse_error = str(exc)
     assertion = task.get("assertion", {})
-    # Validate every newly produced verdict before it can establish pass/fail.
-    # `report` controls whether diagnostics are surfaced, not whether malformed
-    # provider evidence is accepted; both modes fail closed.
     if parse_error is None and isinstance(parsed, dict):
         # A null optional field means absent: Codex structured output makes
         # every optional verdict field required and nullable. A null required
@@ -14195,8 +14181,6 @@ def _run_judge_slot(slot: _JudgeSlot, admission: SpendAdmission,
     if assertion.get("graded_dimensions") and isinstance(parsed.get("dimension_scores"), dict):
         graded_payload["dimension_scores"] = parsed["dimension_scores"]
     if is_per_step_assertion(assertion) and per_step_steps:
-        # The verdict must cover EXACTLY the steps the run took, in order — a
-        # verdict about invented or skipped steps is not evidence about this run.
         criteria = parsed.get("criteria")
         names = ([str(c.get("name")) for c in criteria if isinstance(c, dict)]
                  if isinstance(criteria, list) else [])
@@ -14212,10 +14196,6 @@ def _run_judge_slot(slot: _JudgeSlot, admission: SpendAdmission,
         graded_payload["criteria"] = parsed["criteria"]
         graded_payload["minimum_criteria"] = max(1, int((assertion.get("dynamic_rubric") or {}).get("minimum_criteria", 3)))
     if graded_payload and parse_error is None:
-        # Graded shapes (roadmap 2.2): the verdict comes from the SAME owner the
-        # merge uses (merged_qualitative_entry), and the graded payload rides
-        # the row so the merge can re-derive it — a graded response carries no
-        # top-level passed/score, so the plain path would file it as failed.
         graded_entry = merged_qualitative_entry(
             assertion, {**parsed, **graded_payload}, task["judge_task_id"])
         passed = bool(graded_entry.get("passed"))
@@ -14226,7 +14206,6 @@ def _run_judge_slot(slot: _JudgeSlot, admission: SpendAdmission,
         passed = False
     else:
         if at_least is not None or scale is not None:
-            # The harness, not the judge, decides pass from the score.
             passed = (
                 parse_error is None and isinstance(score, (int, float))
                 and not isinstance(score, bool) and float(score) >= float(threshold)
@@ -14243,8 +14222,6 @@ def _run_judge_slot(slot: _JudgeSlot, admission: SpendAdmission,
         **_judge_row_identity(task, judge_model=judge_model_label,
                               judge_backend=judge_backend, judge_cmd=judge_cmd),
         "cost_usd": cost_usd,
-        # Judge-model spend is suite cost too, but a SEPARATE ledger line from
-        # the model under test (issue #21); normalized like every runner path.
         "usage_normalized": normalize_usage(judge_usage, source=usage_source),
         "cost_normalized": normalize_cost(cost_usd, source="provider_reported", pricing_model=judge_model_label),
         "judge_input_sha256": current_input_sha256,
@@ -15629,7 +15606,7 @@ def judge_command(args: argparse.Namespace) -> int:
     judge_backend = getattr(args, "judge_backend", None) or ("cmd" if judge_cmd else "claude")
     panel = effective_judge_models(manifest_for_judge, getattr(args, "judge_panel", None), getattr(args, "judge_model", None))
     if judge_backend in (set(JUDGE_BACKENDS) - {"claude"}) and not panel:
-        panel = [None]  # use the CLI's configured default model
+        panel = [None]
     _ = getattr(args, "strict_judge_schema", False)
     include_trajectory = getattr(args, "judge_trajectory", False)
     explore = getattr(args, "judge_explore", False)
