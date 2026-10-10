@@ -169,6 +169,8 @@ Every invocation also appends `--setting-sources project --strict-mcp-config --s
 
 A backend that declares missing dollars requires an assumption before a paid start. A zero ceiling starts no calls. An unexpected missing price closes later admission unless an assumption applies. Charges distinguish observed dollars, labeled assumptions, unknown prices, and proven nonbillable calls. Assumptions cannot be below an observed subtotal.
 
+Claude captures unambiguous reported dollars before validating sibling answer and token fields. A process timeout retains those dollars as an observed subtotal, with unavailable whole-call cost. The ledger closes later admission unless an assumption applies. A $0.01 assumption cannot reduce a $0.06 subtotal. Timeout artifacts retain actual return code 124 and false provider completeness. They never publish that subtotal as full provider cost. Exited responses retain safe full charges even when answer or token validation rejects them. Malformed token records remain raw diagnostics rather than valid normalized usage.
+
 Ledgers live at `runs/spend/<invocation-id>/spend-ceiling.json`. Before dispatch, the harness flushes and syncs the ledger file, then atomically replaces the snapshot. It also syncs the directory where the platform supports it. Unresolved calls remain partial evidence after interruption. A second invocation creates a new ledger and a fresh ceiling. `benchmark` and `cost-summary` include each ledger in `spend_invocations`, separate from artifact-derived grades and model cost totals. The immutable answer design remains unchanged.
 
 A capped batch containing a recovery row rejects before any provider call or runs-root write, including ordinary rows before that recovery row. Uncapped recovery retains its existing behavior. Other execution commands retain their current policies. See [the offline native spend walkthrough](limit-native-spend.md).
@@ -209,6 +211,16 @@ Pairing checks effort too. Every comparison pairs through a declared contrast (`
 ```bash
 skill-benchmark run-subagent --tasks tasks.jsonl --runs eval-runs/subagent --tool-replay record
 ```
+
+`--max-cost-usd` sets a per-invocation ceiling for external callback turns. Each required turn has a task digest, run coordinate, and external turn number in the invocation ledger. An admitted call can exceed the ceiling. Every later refused required turn has a `not_started` receipt, with no backend call, history entry, or `turn-N` provider artifact. A single-call task plans turn 1. Provider-internal maximum turns do not create external calls. Any selected recovery row rejects a capped batch before runs-root writes; uncapped behavior is unchanged.
+
+Safe finite, nonnegative JSON `usage.cost_usd` is observed dollars, including zero. The default Claude backend retains its independently parsed dollars and actual exit code even when the provider returns an error or malformed answer. A shell command's strict JSON dollars survive nonzero process exit or bad response schema. The runner stores rejected raw envelopes as diagnostic text under `subagent_rejected_calls`. Invalid, ambiguous, boolean, negative, or nonfinite cost certifies no price. Multi-turn pricing requires explicit `telemetry_scope: turn_delta`. `conversation_cumulative` or omitted scope remains diagnostic evidence, with no subtraction or per-turn charge. An unavailable price closes later admission unless `--assumed-cost-per-run-usd` supplies a labeled charge for each external turn. Assumptions never fill provider telemetry.
+
+After a process timeout, trustworthy captured dollars are a partial subtotal. Strict complete shell JSON and valid original UTF-8 are required. Claude requires one terminal result and no later session content. Neither source proves that a still-running process incurred no further cost. Actual timeout evidence overrides response-body claims. The answer remains rejected, whole-call provider cost remains unavailable, and an assumption cannot reduce the eligible subtotal. Rejection diagnostics retain reported dollars and label their partial availability. Multi-turn subtotals still require explicit `turn_delta` scope.
+
+A refusal or partial unpriced ledger makes the command exit 2. A started conversation with refused required turns publishes an incomplete root with a recognized failure body, false provider completeness, retained actual turn artifacts, safe partial totals, and workspace edits. The root has `artifact_terminal_state: budget_stopped` and null process return code. An opaque rejected or raised callback without actual process evidence uses `response_rejected`, also with no process code; it does not claim `not_started`. Inventory completeness and provider completeness remain independent, so these newly incomplete roots cannot grade as successful conversations. If this invocation starts no call and any destination content already exists, the command preserves all of it and records only the new ledger refusals. Prior output is not a new result. Publication failures preserve settled charges and the previous committed root.
+
+See [the subagent ceiling example](limit-native-spend.md#subagent-external-turns) for an offline run. `benchmark` and `cost-summary` include `spend_invocations` separately from observed provider cost totals. Allowed capped and uncapped calls use the same prompts, answer design, trace dialect, and workspace sidecars.
 
 Three optional reply fields say how the run stopped and which model answered; `run-subagent` records them as the [completion fields](#effort-and-how-answer-runs-ended) `run-claude` writes:
 
@@ -460,6 +472,21 @@ skill-benchmark benchmark ../repo/evals/shared-benchmark.json \
 ```
 
 Native Claude uses `claude -p --output-format json --no-session-persistence --safe-mode --disable-slash-commands`, so judges are not given skills, agents, instruction files (`CLAUDE.md`, `AGENTS.md`), hooks, or MCP servers, whether they come from the operator's home or from the folder the judge runs in; tool-using judges keep `--safe-mode` too; tool-free judges add `--tools ""`, and every native Claude judge passes the harness verdict schema through `--json-schema`. Native Codex uses isolated `CODEX_HOME` outside the model workdir, `-c skills.include_instructions=false --disable apps` so no skill is listed at all, plus `codex exec --output-last-message <file> --output-schema <schema.json>` so verdict parsing reads the final assistant message rather than the event JSONL stream. Native Gemini uses isolated `GEMINI_CLI_HOME`, `--output-format stream-json`, conditional nested sandboxing, and a deny-all tool policy; only the stream's final validated assistant segment reaches verdict parsing, while the raw lifecycle stream and session/model metadata are saved as transcript sidecars. It rejects observed tool lifecycles and nonzero aggregate tool counts. Native Vibe uses isolated `VIBE_HOME` outside the model workdir plus `vibe --prompt "$PROMPT" --output json` with tools disabled (`--enabled-tools re:^$`) and reads the final assistant message as the verdict JSON; `--judge-model` is passed through `VIBE_ACTIVE_MODEL`. Native judges run from an explicit working directory: a sanitized run-copy when tool exploration is enabled (it leaves out oracle files, symlinks, and every `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`, `.claude/`, and `.agents/` at any depth, since a run's `outputs/` holds whatever the candidate wrote), otherwise a fresh empty temp directory so they cannot accidentally read the harness repo cwd. For Codex/OpenAI structured output, the harness adapts the canonical verdict schema into a strict provider schema (`additionalProperties:false`; optional fields become nullable) while still validating the returned verdict against the canonical schema. Gemini and Vibe do not expose provider-enforced schema here, so harness-side schema validation is the gate. A shell judge command should return JSON like `{"passed": true, "score": 4, "rationale": "..."}`. Bare or fenced JSON is accepted using `json.raw_decode` scanning rather than brace counting. `--transcripts` saves the exact prompt, stdout, stderr, parsed result, and any provider response/metadata sidecars.
+
+An actual Claude judge timeout retains safe captured dollars as `observed_subtotal_usd`,
+with `cost_availability="partial"` and `cost_reason="process_timeout"`. Its full `cost_usd`
+is null, normalized cost is missing, and the verdict remains incomplete with actual code 124.
+Repeated and panel judges count each nested invocation once. Two $0.06 floors produce
+`cost_aggregate.USD` with a partial $0.12 known subtotal, `observed_count=0`, and
+`unavailable_count=2`. Consensus parents do not retain a member's subtotal field.
+`benchmark.cost_summary.judge` and `cost-summary` preserve that known subtotal while
+`total_cost_usd` stays null. `verdicts_with_cost` counts only whole prices.
+
+Saved judge readers validate all supplied scalar, normalized, and v3 price channels and their
+member projections. They reject full timeout prices, conflicting channels, stale parent totals,
+and competing `judge_runs` and `judge_panel` membership paths. Regenerate contradictory judge
+artifacts. Completed legacy rows remain supported. Timeout floors cannot establish ordinary
+complete-price estimates or ratios.
 
 ### Repeated judges and panels
 

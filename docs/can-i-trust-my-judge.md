@@ -64,6 +64,12 @@ Substitute a real judge by swapping `--judge-cmd` for `--judge-model <model>`
 (the native adapter, which also records the judge's dollar cost); everything
 below reads the same either way.
 
+For an actual native Claude timeout, saved member rows keep trustworthy captured dollars as
+`observed_subtotal_usd` and leave full `cost_usd` null. Repeat and panel reports retain partial
+known dollars without counting a floor as a whole price. Saved readers reject contradictory
+timeout prices or parent projections. Regenerate those artifacts before using them in a report.
+See [judge price reporting](commands.md#judge-backends).
+
 ## Probe stability first (`judge-robustness`) — no labels needed
 
 The cheapest check needs nothing but the judge itself: re-judge each task with

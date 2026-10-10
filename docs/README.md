@@ -17,7 +17,7 @@ title is the question; the body is the loop that answers it, runnable on
 | How do I make my skill trigger reliably? | [`tuning-skill-activation.md`](tuning-skill-activation.md) |
 | Which parts of my skill are load-bearing? | [`ablation-study-walkthrough.md`](ablation-study-walkthrough.md) |
 | Is my skill worth its tokens? | [`is-my-skill-worth-its-tokens.md`](is-my-skill-worth-its-tokens.md) |
-| How do I stop a native answer batch at a dollar ceiling? | [`limit-native-spend.md`](limit-native-spend.md) |
+| How do I stop an answer or subagent batch at a dollar ceiling? | [`limit-native-spend.md`](limit-native-spend.md) |
 | How do I gate my skill repo's CI on this? | [`gating-ci-on-evals.md`](gating-ci-on-evals.md) |
 | Did my skill edit regress anything? | [`did-my-skill-edit-regress.md`](did-my-skill-edit-regress.md) |
 | Which model should my skill target? | [`which-model-should-my-skill-target.md`](which-model-should-my-skill-target.md) |

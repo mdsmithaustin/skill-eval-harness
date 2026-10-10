@@ -49,7 +49,7 @@ from decimal import ROUND_CEILING, Decimal
 from enum import Enum
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
-from typing import Any, NoReturn, Protocol, cast
+from typing import Any, Literal, NoReturn, Protocol, cast
 
 # Direct ``python skill_benchmark.py`` execution must share the canonical module
 # identity used by lazy backend references. Otherwise importing
@@ -194,6 +194,7 @@ from jetty_contracts import (
 )
 from json_contracts import (
     StrictJSONViolation,
+    freeze_json_mapping,
     parse_stream_json,
     stream_json_loads,
     strict_json_decoder,
@@ -229,7 +230,15 @@ from manifest_contracts import (
     Split,
 )
 from observation_contracts import COST_SOURCES, USAGE_SOURCES, Availability
-from spend_contracts import AnswerCall, NoModelSpend, SpendPlan, SpendPolicy
+from spend_contracts import (
+    AnswerCall,
+    NoModelSpend,
+    Refused,
+    SpendPlan,
+    SpendPolicy,
+    SpendStopReason,
+    SubagentTurnCall,
+)
 from spend_runtime import NotStarted, Priced, SpendAdmission, spend_invocations
 from text_contracts import (
     ComparisonProfile,
@@ -9256,6 +9265,19 @@ def write_trace_artifacts(
             record_lines = list(range(1, len(records) + 1))
     else:
         records, parse_errors = parsed_records, parsed_errors
+    if source.casefold() == "claude" and retain_invalid_provider_trace:
+        retained_records = []
+        for line, record in zip(record_lines, records):
+            try:
+                for holder in (record, record.get("message")):
+                    if isinstance(holder, dict) and isinstance(holder.get("usage"), dict):
+                        normalize_usage(holder["usage"], source="trace_normalized")
+            except ValueError as exc:
+                parse_errors.append(f"line {line}: invalid Claude usage: {exc}")
+                retained_records.append(_claude_protocol_error(f"invalid Claude usage: {exc}"))
+            else:
+                retained_records.append(record)
+        records = retained_records
     events, metrics = normalize_trace_records(
         records, source=source, pi_stream=pi_stream, record_lines=record_lines)
     semantic_protocol_error = trace_dialect_for(source).protocol_error(records, pi_stream)
@@ -9479,32 +9501,70 @@ def _install_staged_run(run_dir: Path, staged: Path) -> None:
             shutil.rmtree(backup)
 
 
-def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome,
+@_dataclass(frozen=True)
+class _BudgetRefusal:
+    refused: tuple[Refused, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.refused, tuple) or not self.refused or not all(
+                isinstance(row, Refused) and isinstance(row.call, SubagentTurnCall)
+                and isinstance(row.reason, SpendStopReason)
+                for row in self.refused):
+            raise ValueError("subagent budget refusal requires refused turn calls")
+        if len({row.call.call_id for row in self.refused}) != len(self.refused):
+            raise ValueError("subagent budget refusal contains duplicate calls")
+
+
+@_dataclass(frozen=True)
+class _OpaqueResponseRejected:
+    call: SubagentTurnCall
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.call, SubagentTurnCall):
+            raise TypeError("subagent rejection requires a turn call")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("subagent rejection requires a reason")
+        validate_json_text(self.reason, "subagent rejection reason")
+
+
+@_dataclass(frozen=True)
+class _NoProcessArtifact:
+    context: OutcomeContext
+    terminal: _BudgetRefusal | _OpaqueResponseRejected
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.context, OutcomeContext) or self.context.provider is not Provider.SUBAGENT:
+            raise ValueError("no-process artifact requires the subagent provider")
+        if isinstance(self.terminal, _BudgetRefusal):
+            calls = tuple(row.call for row in self.terminal.refused)
+            if (self.context.cost_usd is not None or self.context.usage is not None
+                    or self.context.elapsed_ms is not None or self.context.stderr):
+                raise ValueError("budget refusal cannot claim new process telemetry")
+        elif isinstance(self.terminal, _OpaqueResponseRejected):
+            calls = (self.terminal.call,)
+        else:
+            raise TypeError("unsupported no-process artifact reason")
+        for call in calls:
+            if (call.task_sha256 != self.context.metadata_extra.get("answer_task_sha256")
+                    or call.coordinate != RunCoordinate.of(
+                        self.context.metadata_extra.get("case_id"),
+                        self.context.metadata_extra.get("variant"),
+                        self.context.metadata_extra.get("run_number"), self.context.model)):
+                raise ValueError("terminal call does not match its subagent root")
+
+
+def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome | _NoProcessArtifact,
                                 sidecars: Path | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    """The ONE exhaustive adapter from a closed answer outcome to disk, shared by
-    every answer runner (codex/claude/subagent). Provider-specific work — spawning
-    the tool and parsing its wire format — happens in the runner; everything from
-    here down is identical for all providers:
-
-      * events.json / metrics.json / metadata.json / trace.jsonl come from
-        write_trace_artifacts, so the telemetry-precedence rule (a provider block
-        beats the trace-derived one; missing telemetry is marked, never zero) and
-        the current-run-only metadata guarantee have a single owner.
-      * usage/cost are normalized here from the provider-reported numbers; passing
-        the blocks through metadata lets write_trace_artifacts stamp them into both
-        artifacts (or fall back to trace-derived / explicit missing).
-      * output.md is formatted through RunnerOutcome.output_body, so a timeout is
-        encoded the same way everywhere (timed_out=True + returncode 124 in
-        metadata, a failure marker in the body) and no runner can hand-roll a body
-        that slips a crashed run past execution_valid().
-
-    `Completed` always carries a non-empty final answer; raw traces are telemetry,
-    never a fallback candidate answer."""
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / ARTIFACT_COMMIT_NAME).unlink(missing_ok=True)
-    context = outcome_context(outcome)
+    context = outcome.context
     trace_text = context.trace_text
-    if isinstance(outcome, Completed):
+    invocation_state: InvocationState | None
+    if isinstance(outcome, _NoProcessArtifact):
+        returncode, timed_out, answer = None, False, ""
+        invocation_state = None
+    elif isinstance(outcome, Completed):
         returncode, timed_out, answer = 0, False, outcome.answer
         invocation_state = InvocationState.COMPLETE
     elif isinstance(outcome, TimedOut):
@@ -9521,7 +9581,11 @@ def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome,
     else:  # pragma: no cover - closed union exhaustiveness guard
         raise TypeError(f"unsupported answer outcome {type(outcome).__name__}")
     usage_block = normalize_usage(dict(context.usage) if context.usage is not None else None, source="provider_reported")
-    cost_block = normalize_cost(context.cost_usd, source="provider_reported", pricing_model=context.model)
+    cost_block = normalize_cost(None if isinstance(outcome, TimedOut) else context.cost_usd,
+                                source="provider_reported", pricing_model=context.model)
+    partial_cost = ({"cost_availability": "partial", "observed_subtotal_usd": context.cost_usd,
+                     "cost_reason": "process_timeout"}
+                    if isinstance(outcome, TimedOut) and context.cost_usd is not None else {})
     elapsed = context.elapsed_ms
     # Completion evidence every answer run records. A runner that observed a
     # stop reason, a served model or an effort setting overrides these through
@@ -9539,23 +9603,36 @@ def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome,
         "model": context.model,
         "returncode": returncode,
         "timed_out": timed_out,
-        "invocation_state": invocation_state.value,
+        **({"invocation_state": invocation_state.value} if invocation_state is not None else {}),
         "stderr": context.stderr,
         "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
         "usage_normalized": usage_block,
         "cost_normalized": cost_block,
+        **partial_cost,
         **({"elapsed_ms": elapsed} if elapsed is not None else {}),
     }
-    extra_metrics = {**dict(context.metrics_extra), "returncode": returncode,
-                     "invocation_state": invocation_state.value,
+    if isinstance(outcome, _NoProcessArtifact):
+        if isinstance(outcome.terminal, _BudgetRefusal):
+            metadata.update(artifact_terminal_state="budget_stopped", subagent_refusals=[
+                {"call_id": row.call.call_id, "call": row.call.as_dict(),
+                 "state": "not_started", "reason": row.reason.value}
+                for row in outcome.terminal.refused])
+        else:
+            metadata.update(artifact_terminal_state="response_rejected", subagent_rejection={
+                "call_id": outcome.terminal.call.call_id,
+                "call": outcome.terminal.call.as_dict(), "reason": outcome.terminal.reason})
+    extra_metrics = {**dict(context.metrics_extra), **partial_cost, "returncode": returncode,
+                     **({"invocation_state": invocation_state.value} if invocation_state is not None else {}),
                      **({"elapsed_ms": elapsed} if elapsed is not None else {})}
     events, metrics = write_trace_artifacts(
         run_dir, trace_text, source=(context.trace_source or context.provider).value, metadata=metadata,
         extra_metrics=extra_metrics,
         environment=dict(context.environment) if context.environment is not None else None,
         write_metadata=True, write_raw_trace=bool(trace_text),
-        process_observation_complete=process_observation_complete(outcome),
-        provider_response_complete=provider_response_complete(outcome),
+        process_observation_complete=(False if isinstance(outcome, _NoProcessArtifact)
+                                      else process_observation_complete(outcome)),
+        provider_response_complete=(False if isinstance(outcome, _NoProcessArtifact)
+                                    else provider_response_complete(outcome)),
         artifact_set_complete=None,
         # Failed/partial provider output is still evidence. Preserve hostile
         # JSON as raw bytes plus diagnostics instead of aborting the artifact
@@ -9564,7 +9641,11 @@ def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome,
         trace_utf8_valid=context.trace_utf8_valid,
     )
     marker = RUNNER_FAILURE_MARKER_BY_PROVIDER[context.provider.value]
-    if isinstance(outcome, TimedOut):
+    if isinstance(outcome, _NoProcessArtifact):
+        reason = ("required subagent turns refused by spend admission"
+                  if isinstance(outcome.terminal, _BudgetRefusal) else outcome.terminal.reason)
+        body = f"{marker}: {reason}]\n"
+    elif isinstance(outcome, TimedOut):
         body = (f"{TIMEOUT_FAILURE}: {outcome.reason}]\n" if outcome.reason
                 else f"{marker}: timed out after {outcome.timeout_s}s]\n" if outcome.timeout_s is not None
                 else f"{marker}: timed out]\n")
@@ -9595,7 +9676,7 @@ def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome,
     return events, metrics
 
 
-def write_runner_outcome(run_dir: Path, outcome: AnswerOutcome,
+def write_runner_outcome(run_dir: Path, outcome: AnswerOutcome | _NoProcessArtifact,
                          *, sidecars: Path | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     run_dir.parent.mkdir(parents=True, exist_ok=True)
     staged = Path(tempfile.mkdtemp(prefix=f".{run_dir.name}.artifact-stage-",
@@ -11307,7 +11388,9 @@ class ClaudeBackend(AgentBackend):
             error=(result.get("provider_error") or result.get("parse_error")),
             trace_text=result.get("raw_response") or "",
             trace_utf8_valid=(result.get("trace_utf8_valid") is not False),
-            usage=result.get("usage"), cost_usd=result.get("cost_usd"), model=request.model,
+            usage=result.get("usage"),
+            cost_usd=(result.get("observed_subtotal_usd") if result.get("timed_out") is True
+                      else result.get("cost_usd")), model=request.model,
             environment={
                 **dict(result.get("environment") or {}),
                 "runner": "claude",
@@ -11655,7 +11738,11 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                         no_spend = (NoModelSpend("spawn_failed_before_process")
                                     if isinstance(outcome, SpawnFailed) else
                                     NoModelSpend("offline_adapter") if cost_support == "not_applicable" else None)
-                        return Priced((outcome, workspace.attestation), cost, no_model_spend=no_spend)
+                        subtotal = cost.value if isinstance(outcome, TimedOut) else None
+                        if subtotal is not None:
+                            cost = telemetry_domain.Measurement.unavailable("runner_cost_incomplete_after_timeout")
+                        return Priced((outcome, workspace.attestation), cost,
+                                      observed_subtotal=subtotal, no_model_spend=no_spend)
 
                     execution = admission.run(call, invoke)
                 if isinstance(execution, NotStarted):
@@ -11770,11 +11857,15 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     text = stdout if isinstance(stdout, str) else ""
     env: dict[str, Any] | None = None
     stream_records: list[dict[str, Any]] = []
+    duplicate_keys: Sequence[str] = ()
     stripped = text.strip()
     try:
-        single = stream_json_loads(stripped)
+        parsed_single = parse_stream_json(stripped)
+        single = parsed_single.value
+        duplicate_keys = parsed_single.duplicate_keys
     except json.JSONDecodeError:
-        records, errors = parse_trace_jsonl_text(text, strict=False)
+        records, errors, _, duplicate_keys = parse_trace_jsonl_text_with_lines(
+            text, strict=False, strict_json_errors=False)
         stream_records = records
         results = [record for record in records if record.get("type") == "result"]
         if errors:
@@ -11793,31 +11884,36 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     else:
         if isinstance(single, dict):
             env = single
-    if not isinstance(env, dict) or "result" not in env:
+    if not isinstance(env, dict) or ("result" not in env and env.get("type") != "result"):
         return {"answer": "", "raw_response": text, "cost_usd": None,
                 "usage": {}, "parse_error": "not a claude -p json envelope"}
     if "type" in env and env.get("type") != "result":
         return {"answer": "", "raw_response": text, "cost_usd": None,
                 "usage": {}, "parse_error": "Claude envelope type must be 'result'"}
+    cost = env.get("total_cost_usd")
+    normalized_cost = _num(cost)
+    ambiguous_price = any(key.rsplit(": ", 1)[-1] in {"type", "result", "total_cost_usd"}
+                          for key in duplicate_keys)
+    reported_cost = (normalized_cost
+                     if normalized_cost is not None and normalized_cost >= 0 and not ambiguous_price
+                     else None)
     if "is_error" in env and not isinstance(env.get("is_error"), bool):
-        return {"answer": "", "raw_response": text, "cost_usd": None,
+        return {"answer": "", "raw_response": text, "cost_usd": reported_cost,
                 "usage": {}, "parse_error": "Claude is_error must be boolean"}
     api_error_status = env.get("api_error_status")
     if (api_error_status is not None
             and (isinstance(api_error_status, bool)
                  or not isinstance(api_error_status, int)
                  or not 100 <= api_error_status <= 599)):
-        return {"answer": "", "raw_response": text, "cost_usd": None,
+        return {"answer": "", "raw_response": text, "cost_usd": reported_cost,
                 "usage": {}, "parse_error": "Claude api_error_status must be an HTTP status integer"}
     raw_usage = env.get("usage") if isinstance(env.get("usage"), dict) else {}
     try:
         normalized_usage = normalize_usage(raw_usage, source="provider_reported")
     except ValueError as exc:
-        return {"answer": "", "raw_response": text, "cost_usd": None,
+        return {"answer": "", "raw_response": text, "cost_usd": reported_cost,
                 "usage": {}, "parse_error": f"invalid Claude usage: {exc}"}
     usage = {key: value for key, value in normalized_usage.items() if key != "source"}
-    cost = env.get("total_cost_usd")
-    normalized_cost = _num(cost)
     result = env.get("result")
     result_error = None if isinstance(result, str) else "claude result must be a string"
     if cost is not None and (normalized_cost is None or normalized_cost < 0):
@@ -11835,9 +11931,7 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     ]
     return {
         "answer": result if isinstance(result, str) else "",
-        "cost_usd": (normalized_cost
-                     if normalized_cost is not None and normalized_cost >= 0
-                     else None),
+        "cost_usd": reported_cost,
         "usage": usage,
         "parse_error": result_error,
         "is_error": env.get("is_error", False),
@@ -11917,6 +12011,8 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
     """Single owner for invoking Claude via `claude -p`.
 
     Returns the parsed envelope plus returncode/elapsed_ms/stderr/raw_response.
+    Actual timeouts publish captured dollars as observed_subtotal_usd and leave
+    cost_usd unavailable. Natural exits retain independently safe full cost.
     `claude_bin` is an executable path (tests inject a stub that emits a canned
     envelope), NOT a shell string — so there is no shell-quoting seam between
     the harness and the model. `output_format` selects `json` (one envelope; the
@@ -11954,8 +12050,16 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
     else:
         result = invoke(cwd)
     command = " ".join(shlex.quote(a) for a in ["claude", *argv[1:]])
+    parsed = (
+        parse_claude_cli_json(result.stdout)
+        if result.stdout_utf8_valid
+        else {"answer": "", "cost_usd": None, "usage": {},
+              "parse_error": "Claude stdout is not valid UTF-8"}
+    )
     if result.timed_out:
-        return {"answer": "", "cost_usd": None, "usage": {}, "parse_error": None,
+        return {"answer": "", "cost_usd": None,
+                "observed_subtotal_usd": parsed.get("cost_usd"), "usage": {},
+                "parse_error": parsed.get("parse_error"),
                 "returncode": 124, "timed_out": True, "elapsed_ms": result.elapsed_ms,
                 "stderr": result.stderr, "raw_response": result.stdout, "command": command,
                 "context_isolation": list(isolation_args),
@@ -11963,12 +12067,6 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
                 "trace_utf8_valid": result.stdout_utf8_valid,
                 **({"environment": dict(result.adapter_metadata or {})}
                    if recovery_capture is not None else {})}
-    parsed = (
-        parse_claude_cli_json(result.stdout)
-        if result.stdout_utf8_valid
-        else {"answer": "", "cost_usd": None, "usage": {},
-              "parse_error": "Claude stdout is not valid UTF-8"}
-    )
     provider_error = (
         "Claude provider error"
         + (f" (HTTP {parsed['api_error_status']})"
@@ -13135,6 +13233,10 @@ def load_judge_results(path: str | None) -> dict[str, dict[str, Any]]:
             die(f"judge results duplicate id {jid!r} at rows {positions[jid]} and {position}")
         try:
             validated = validated_result_row(row)
+            leaves = _judge_cost_leaves([validated])
+            buckets = _judge_cost_buckets(leaves)
+            if any(key in validated for key in ("judge_runs", "judge_panel")):
+                validated.update(_judge_cost_projection(buckets))
         except (TypeError, ValueError) as exc:
             die(f"judge results row {position} ({jid}): {exc}")
         lookup[jid] = validated
@@ -13522,9 +13624,11 @@ def claude_judge_invoke(prompt: str, *, judge_model: str | None, claude_bin: str
             provider_error=(provider_error if isinstance(provider_error, str) else None)),
         provider_error=(provider_error if isinstance(provider_error, str) else None),
         cost_usd=res.get("cost_usd"),
+        observed_subtotal_usd=res.get("observed_subtotal_usd"),
         usage=res.get("usage") if isinstance(res.get("usage"), dict) else None,
         usage_source="provider_reported",
         model_label=judge_model,
+        raw_response=res.get("raw_response"),
         # Same isolation contract as the answer runner: recorded here, not on the
         # verdict row, since only --transcripts persists it (provider-metadata.json).
         metadata=({"context_isolation": list(context_isolation)}
@@ -14003,6 +14107,12 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
            if context_sha256 is not None else {}),
         "judge_observation_complete": invocation_complete and parse_error is None,
         "invocation_state": invocation.invocation_state.value,
+        "timed_out": invocation.invocation_state is InvocationState.TIMED_OUT,
+        **({"cost_availability": "partial", "observed_subtotal_usd": invocation.observed_subtotal_usd,
+            "cost_reason": "process_timeout"}
+           if invocation.observed_subtotal_usd is not None else
+           {"cost_availability": "unavailable", "cost_reason": "process_timeout"}
+           if invocation.invocation_state is InvocationState.TIMED_OUT else {}),
         **({"provider_error": invocation.provider_error}
            if invocation.provider_error is not None else {}),
         "availability": ("complete" if invocation_complete and parse_error is None
@@ -14049,6 +14159,176 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
     return row
 
 
+def _judge_price_facts(
+    row: Mapping[str, Any],
+) -> tuple[telemetry_domain.Measurement[telemetry_domain.Money], telemetry_domain.Money | None]:
+    basis = telemetry_domain.basis_from_run(row, source="judge", population="judge")
+    channels: list[telemetry_domain.Measurement[telemetry_domain.Money]] = []
+    for key in ("cost_usd", "cost"):
+        amount = row.get(key)
+        if amount is not None:
+            telemetry_domain.finite_nonnegative(amount, f"judge {key}")
+            channels.append(telemetry_domain.Measurement.available(
+                telemetry_domain.Money.from_raw(amount), provenance="legacy_unverified", basis=basis))
+    normalized = row.get("cost_normalized")
+    if normalized is not None:
+        if not isinstance(normalized, Mapping):
+            raise ValueError("judge cost_normalized must be an object")
+        amount = normalized.get("total_cost")
+        if amount is not None:
+            telemetry_domain.finite_nonnegative(amount, "judge normalized cost")
+            if normalized.get("source") not in telemetry_domain.PROVENANCE:
+                raise ValueError("judge normalized cost contradicts its availability")
+        measurement = telemetry_domain.measurement_from_cost_block(normalized, basis=basis)
+        if measurement.reason in {"invalid_cost_block", "unknown_cost_provenance"}:
+            raise ValueError("judge normalized cost is invalid")
+        channels.append(measurement)
+    envelope = row.get("telemetry")
+    if isinstance(envelope, Mapping) and envelope.get("schema_version") == 3:
+        measurements = envelope.get("measurements")
+        if isinstance(measurements, Mapping) and "cost" in measurements:
+            wire = measurements["cost"]
+            if (isinstance(wire, Mapping) and wire.get("availability") != telemetry_domain.AVAILABLE
+                    and (wire.get("value") is not None or wire.get("provenance") is not None)):
+                raise ValueError("judge v3 cost contradicts its availability")
+            measurement = telemetry_domain.Measurement.from_dict(wire)
+            if measurement.availability == telemetry_domain.AVAILABLE:
+                if not isinstance(measurement.value, telemetry_domain.Money):
+                    raise ValueError("judge v3 cost must be money")
+                if not math.isfinite(float(measurement.value.amount)):
+                    raise ValueError("judge v3 cost must fit a finite float")
+            channels.append(measurement)
+    if channels and any(
+            channel.availability != channels[0].availability or channel.value != channels[0].value
+            for channel in channels[1:]):
+        raise ValueError("judge cost channels contradict one another")
+    whole = telemetry_domain.measurement_from_envelope_or_cost(row, source="judge", population="judge")
+    parent = any(row.get(key) is not None for key in ("judge_runs", "judge_panel"))
+    amount = row.get("observed_subtotal_usd")
+    floor = None
+    if amount is not None:
+        telemetry_domain.finite_nonnegative(amount, "judge observed subtotal")
+        if parent:
+            raise ValueError("judge parent price cannot retain a member subtotal")
+        if (row.get("invocation_state") != InvocationState.TIMED_OUT.value
+                or type(row.get("returncode")) is not int or row.get("returncode") != 124
+                or row.get("timed_out", True) is not True):
+            raise ValueError("judge observed subtotal requires an actual timeout with code 124")
+        if row.get("cost_availability") != telemetry_domain.PARTIAL:
+            raise ValueError("judge observed subtotal requires partial cost availability")
+        if row.get("cost_reason") != "process_timeout":
+            raise ValueError("judge observed subtotal requires process_timeout cost reason")
+        if whole.availability != telemetry_domain.UNAVAILABLE:
+            raise ValueError("judge observed subtotal requires unavailable full cost")
+        floor = telemetry_domain.Money.from_raw(amount)
+    if not parent:
+        timed_out = row.get("invocation_state") == InvocationState.TIMED_OUT.value
+        if "timed_out" in row and row.get("invocation_state") is not None and (
+                row.get("timed_out") is not timed_out):
+            raise ValueError("judge cost has contradictory timeout evidence")
+        if whole.availability == telemetry_domain.AVAILABLE and (
+                floor is not None or timed_out or row.get("timed_out") is True
+                or row.get("invocation_state") == InvocationState.SPAWN_FAILED.value):
+            raise ValueError("judge full cost requires a naturally exited process without a subtotal")
+        availability = row.get("cost_availability")
+        if availability is not None:
+            expected = (telemetry_domain.PARTIAL if floor is not None else
+                        telemetry_domain.COMPLETE if whole.availability == telemetry_domain.AVAILABLE
+                        else whole.availability)
+            if availability != expected:
+                raise ValueError("judge cost availability contradicts its price")
+        if timed_out:
+            whole = telemetry_domain.Measurement.unavailable("process_timeout", basis=whole.basis)
+    return whole, floor
+
+
+def _judge_cost_buckets(
+    leaves: Sequence[Mapping[str, Any]],
+) -> dict[str, telemetry_domain.Aggregate[Decimal]]:
+    facts = [_judge_price_facts(row) for row in leaves]
+    measurements = [whole for whole, _ in facts]
+    buckets = telemetry_domain.aggregate_money_by_currency(measurements)
+    floors = [floor.amount for whole, floor in facts if floor is not None
+              and whole.basis.get("population", "judge") == "judge"
+              and whole.basis.get("billing_scope", "run") == "run"]
+    rejected_floors = sum(1 for _, floor in facts if floor is not None) - len(floors)
+    foreign = sum(1 for whole in measurements if isinstance(whole.value, telemetry_domain.Money)
+                  and whole.value.currency != "USD")
+    usd = buckets.get("USD")
+    if floors or rejected_floors:
+        usd = usd or buckets.get("unknown") or telemetry_domain.Aggregate(telemetry_domain.UNAVAILABLE)
+    if usd is not None:
+        reasons = dict(usd.reason_counts)
+        if foreign:
+            reasons["currency_mismatch"] = foreign
+        if rejected_floors:
+            reasons["basis_mismatch"] = reasons.get("basis_mismatch", 0) + rejected_floors
+        observed = sum(1 for whole in measurements if isinstance(whole.value, telemetry_domain.Money)
+                       and whole.value.currency == "USD")
+        unavailable = sum(1 for whole in measurements if whole.availability == telemetry_domain.UNAVAILABLE) + foreign
+        na = sum(1 for whole in measurements if whole.availability == telemetry_domain.NOT_APPLICABLE)
+        known = usd.value if usd.availability == telemetry_domain.COMPLETE else usd.known_subtotal
+        if floors:
+            known = (known if known is not None else Decimal(0)) + sum(floors, Decimal(0))
+        if known is not None and (unavailable or na):
+            buckets["USD"] = telemetry_domain.Aggregate(
+                telemetry_domain.PARTIAL, known_subtotal=known, observed_count=observed,
+                unavailable_count=unavailable, not_applicable_count=na, reason_counts=reasons)
+            buckets.pop("unknown", None)
+        elif "basis_mismatch" in reasons:
+            buckets["USD"] = telemetry_domain.Aggregate(
+                telemetry_domain.UNAVAILABLE, unavailable_count=unavailable + observed,
+                not_applicable_count=na, reason_counts=reasons)
+            buckets.pop("unknown", None)
+    for aggregate in buckets.values():
+        amount = aggregate.value if aggregate.value is not None else aggregate.known_subtotal
+        if amount is not None and not math.isfinite(float(amount)):
+            raise ValueError("judge cost aggregate must fit a finite float")
+    return buckets
+
+
+def _judge_cost_projection(buckets: Mapping[str, telemetry_domain.Aggregate[Decimal]]) -> dict[str, Any]:
+    usd = buckets.get("USD")
+    amount = (usd.value if usd is not None and usd.availability == telemetry_domain.COMPLETE
+              and len(buckets) == 1 else None)
+    cost = float(amount) if amount is not None else None
+    return {"cost_usd": cost,
+            "cost_normalized": normalize_cost(cost, source="provider_reported", pricing_model="consensus"),
+            "cost_aggregate": {currency: aggregate.to_dict() for currency, aggregate in buckets.items()}}
+
+
+def _judge_cost_leaves(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    leaves: list[Mapping[str, Any]] = []
+    for row in rows:
+        keys = [key for key in ("judge_panel", "judge_runs") if row.get(key) is not None]
+        if not keys:
+            leaves.append(row)
+            continue
+        if len(keys) != 1:
+            raise ValueError("judge price has competing membership paths")
+        members = row[keys[0]]
+        if not isinstance(members, list) or not members or not all(isinstance(member, Mapping) for member in members):
+            raise ValueError("judge price membership must be a non-empty list of objects")
+        descendants = _judge_cost_leaves(members)
+        expected = _judge_cost_projection(_judge_cost_buckets(descendants))
+        whole, _ = _judge_price_facts(row)
+        has_price = any(key in row for key in ("cost_normalized", "cost_usd", "cost", "telemetry"))
+        if has_price:
+            expected_whole = telemetry_domain.measurement_from_envelope_or_cost(expected, population="judge")
+            if whole.availability != expected_whole.availability or whole.value != expected_whole.value:
+                raise ValueError("judge parent cost contradicts its billed leaves")
+        if "cost_aggregate" in row and row["cost_aggregate"] != expected["cost_aggregate"]:
+            raise ValueError("judge parent cost aggregate contradicts its billed leaves")
+        if row.get("cost_reason") is not None:
+            raise ValueError("judge parent price cannot retain a member cost reason")
+        if row.get("cost_availability") is not None:
+            bucket = expected["cost_aggregate"].get("USD") or expected["cost_aggregate"].get("unknown")
+            if bucket is None or row["cost_availability"] != bucket["availability"]:
+                raise ValueError("judge parent cost availability contradicts its billed leaves")
+        leaves.extend(descendants)
+    return leaves
+
+
 def aggregate_judge_member_telemetry(
     rows: list[dict[str, Any]], out: dict[str, Any],
 ) -> None:
@@ -14077,25 +14357,10 @@ def aggregate_judge_member_telemetry(
     else:
         out["usage_normalized"] = {"source": "missing"}
 
-    member_cost = [telemetry_domain.measurement_from_envelope_or_cost(
-        row, source="judge", population="judge") for row in rows]
-    cost_buckets = telemetry_domain.aggregate_money_by_currency(member_cost)
-    out["cost_aggregate"] = {
-        currency: aggregate.to_dict()
-        for currency, aggregate in cost_buckets.items()
-    }
-    usd = cost_buckets.get("USD")
-    if (usd is not None and usd.availability == telemetry_domain.COMPLETE
-            and len(cost_buckets) == 1):
-        usd_value = usd.value
-        if not isinstance(usd_value, Decimal):
-            raise TypeError("complete judge USD aggregate must be Decimal")
-        out["cost_usd"] = float(usd_value)
-        out["cost_normalized"] = normalize_cost(
-            out["cost_usd"], source="provider_reported", pricing_model="consensus")
-    else:
-        out["cost_usd"] = None
-        out["cost_normalized"] = {"source": "missing"}
+    for key in ("cost", "cost_availability", "observed_subtotal_usd", "cost_reason", "telemetry",
+                "invocation_state", "timed_out", "provider_error", "judge_runs", "judge_panel"):
+        out.pop(key, None)
+    out.update(_judge_cost_projection(_judge_cost_buckets(_judge_cost_leaves(rows))))
 
 
 def _judge_member_errors(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -14126,6 +14391,7 @@ def _incomplete_judge_consensus(
     out["evidence"] = "judge aggregate incomplete: " + "; ".join(
         str(error["reason"]) for error in errors[:5])
     aggregate_judge_member_telemetry(rows, out)
+    out[members_key] = rows
     for key in ("score", "threshold", "dimension_scores", "criteria", "minimum_criteria"):
         out.pop(key, None)
     out.update(verdict_fields(ConsensusVerdict(False)))
@@ -14174,6 +14440,7 @@ def merge_repeated_judge_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     first["availability"] = "complete"
     first["returncode"] = 0
     aggregate_judge_member_telemetry(rows, first)
+    first["judge_runs"] = rows
     for key in ("threshold", "dimension_scores", "criteria", "minimum_criteria"):
         first.pop(key, None)
     first.update(verdict_fields(consensus.verdict()))
@@ -14326,6 +14593,109 @@ def tool_replay_mode(default: str = "off") -> str:
 # how a response says it does not know, so `unavailable` is not spelled.
 SUBAGENT_STOP_CLASSES = tuple(
     item.value for item in StopClass if item is not StopClass.UNAVAILABLE)
+
+
+@_dataclass(frozen=True)
+class _SubagentPaidEvidence:
+    reported_cost: telemetry_domain.Measurement[telemetry_domain.Money]
+    scope: Literal["turn_delta", "conversation_cumulative", "unavailable"]
+    process: InvocationResult | None = None
+
+    @property
+    def incomplete_price(self) -> bool:
+        return self.process is not None and self.process.timed_out
+
+    def diagnostic(self) -> dict[str, Any]:
+        return {"reported_cost_usd": (None if self.reported_cost.value is None
+                                      else format(self.reported_cost.value.amount, "f")),
+                "telemetry_scope": self.scope,
+                "cost_availability": ("unavailable" if self.reported_cost.value is None
+                                      else "partial" if self.incomplete_price else "complete"),
+                **({"raw_response": self.process.stdout,
+                    "stdout_utf8_valid": self.process.stdout_utf8_valid,
+                    "stderr_utf8_valid": self.process.stderr_utf8_valid}
+                   if self.process is not None else {})}
+
+
+@_dataclass(frozen=True)
+class _SubagentResponseAccepted:
+    response: Mapping[str, Any]
+    evidence: _SubagentPaidEvidence
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "response", freeze_json_mapping(self.response, "subagent response"))
+
+
+@_dataclass(frozen=True)
+class _SubagentResponseRejected:
+    reason: str
+    evidence: _SubagentPaidEvidence
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("rejected subagent response requires a reason")
+        validate_json_text(self.reason, "rejected subagent response reason")
+
+
+_SubagentTurnResult = _SubagentResponseAccepted | _SubagentResponseRejected
+
+
+def _subagent_paid_evidence(value: Any, process: InvocationResult | None = None) -> _SubagentPaidEvidence:
+    usage = value.get("usage") if isinstance(value, Mapping) else None
+    cost = usage.get("cost_usd") if isinstance(usage, Mapping) else None
+    reported: telemetry_domain.Measurement[telemetry_domain.Money] = telemetry_domain.Measurement.unavailable(
+        "subagent_does_not_report_safe_dollars")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        try:
+            if math.isfinite(cost) and cost >= 0:
+                reported = telemetry_domain.Measurement.available(
+                    telemetry_domain.Money.from_raw(cost), provenance="provider_reported")
+        except OverflowError:
+            pass
+    scope = value.get("telemetry_scope") if isinstance(value, Mapping) else None
+    return _SubagentPaidEvidence(reported, scope if isinstance(scope, str) and scope in {
+        "turn_delta", "conversation_cumulative"} else "unavailable", process)
+
+
+def _classify_subagent_response(value: Any, evidence: _SubagentPaidEvidence,
+                                error: str | None = None) -> _SubagentTurnResult:
+    if error:
+        return _SubagentResponseRejected(error, evidence)
+    try:
+        return _SubagentResponseAccepted(validate_subagent_response(value), evidence)
+    except Exception as exc:
+        return _SubagentResponseRejected(f"subagent response rejected: {exc}", evidence)
+
+
+def _invoke_paid_subagent(agent_fn: Any, *, requires_delta: bool, **kwargs: Any) -> Priced[_SubagentTurnResult]:
+    value = agent_fn(**kwargs)
+    paid = (value if isinstance(value, (_SubagentResponseAccepted, _SubagentResponseRejected))
+            else _classify_subagent_response(value, _subagent_paid_evidence(value)))
+    cost = paid.evidence.reported_cost
+    if requires_delta and paid.evidence.scope != "turn_delta":
+        cost = telemetry_domain.Measurement.unavailable("subagent_turn_cost_lacks_delta_scope")
+    subtotal = cost.value if paid.evidence.incomplete_price else None
+    if subtotal is not None:
+        cost = telemetry_domain.Measurement.unavailable("subagent_cost_incomplete_after_timeout")
+    no_spend = (NoModelSpend("spawn_failed_before_process")
+                if paid.evidence.process is not None
+                and paid.evidence.process.invocation_state is InvocationState.SPAWN_FAILED else None)
+    return Priced(paid, cost, observed_subtotal=subtotal, no_model_spend=no_spend)
+
+
+def _subagent_artifact_response(paid: _SubagentTurnResult) -> tuple[dict[str, Any], str | None]:
+    if isinstance(paid, _SubagentResponseAccepted):
+        return string_keyed_dict(thaw_json_value(paid.response), "subagent response"), None
+    response: dict[str, Any] = {"answer": ""}
+    if paid.evidence.reported_cost.value is not None and not paid.evidence.incomplete_price:
+        response["usage"] = {"cost_usd": float(paid.evidence.reported_cost.value.amount)}
+    if paid.evidence.scope != "unavailable":
+        response["telemetry_scope"] = paid.evidence.scope
+    process = paid.evidence.process
+    if process is not None:
+        response.update(returncode=process.returncode, timed_out=process.timed_out,
+                        elapsed_ms=process.elapsed_ms)
+    return response, paid.reason
 
 
 def validate_subagent_response(value: Any) -> dict[str, Any]:
@@ -14582,6 +14952,7 @@ def run_subagent_tasks(
     replay_mode: str | None = None,
     trace_source: str | None = None,
     context_isolation: Sequence[str] = (),
+    spend_policy: SpendPolicy | None = None,
 ) -> int:
     """The built-in subagent runner (roadmap 2.7): no external CLI required —
     `agent_fn(prompt, workspace, model, tool_executor)` is the seam (a Claude
@@ -14601,7 +14972,7 @@ def run_subagent_tasks(
     provider's trace dialect instead of the generic one."""
     mode = replay_mode or tool_replay_mode()
     workspace_builder = registered_workspace_builder("subagent")
-    validated: list[tuple[dict[str, Any], PreparedTask, str | None, Path]] = []
+    validated: list[tuple[dict[str, Any], PreparedTask, str | None, Path, tuple[str, ...]]] = []
     seen_identities: set[tuple[str, str | None, str, int, str]] = set()
     seen_destinations: set[Path] = set()
     for task in tasks:
@@ -14621,265 +14992,399 @@ def run_subagent_tasks(
             die(f"duplicate prepared task run_dir: {pt.run_dir}")
         seen_identities.add(identity)
         seen_destinations.add(base)
-        validated.append((task, pt, row_model, base))
+        turns = tuple(str(t) for t in task.get("turns") or [] if str(t))
+        validated.append((task, pt, row_model, base, turns))
+    if spend_policy is not None:
+        for _, pt, _, _, _ in validated:
+            if pt.recovery is not None:
+                print(f"capped recovery is unsupported for case {pt.case_id}; omit --max-cost-usd", file=sys.stderr)
+                return 2
+    design = answer_design_from_tasks(tasks, default_model=model)
+    call_sets = tuple(tuple(SubagentTurnCall(
+        answer_design_identity(design, pt, row_model)["task_sha256"],
+        RunCoordinate.of(pt.case_id, pt.variant_truth, pt.run_number, row_model), n)
+        for n in range(1, (len(turns) or 1) + 1))
+        for _, pt, row_model, _, turns in validated)
+    plan = SpendPlan(tuple(call for calls in call_sets for call in calls))
     runs.mkdir(parents=True, exist_ok=True)
     design = persist_answer_design(runs, tasks, default_model=model)
-    for task, pt, row_model, base in validated:
-        base.parent.mkdir(parents=True, exist_ok=True)
-        sidecars = Path(tempfile.mkdtemp(prefix=f".{base.name}.sidecars-", dir=base.parent))
-        prov_extra = {
-            "population": "answer",
-            "case_id": pt.case_id,
-            "run_number": pt.run_number,
-            "variant": pt.variant_truth,
-            "billing_scope": "run",
-            "answer_design_sha256": design["design_sha256"],
-            "answer_task_sha256": answer_design_identity(
-                design, pt, row_model)["task_sha256"],
-            "answer_instruction_sha256": answer_design_identity(
-                design, pt, row_model)["instruction_sha256"],
-            **({"ablation": pt.ablation.as_dict()} if pt.ablation else {}),
-        }
-        replay_path = sidecars / "tool-replay.json"
-        existing_replay = base / "tool-replay.json"
-        if mode in {"replay", "strict", "auto"} and existing_replay.is_file():
-            shutil.copy2(existing_replay, replay_path)
-        store = ToolReplayStore(replay_path, mode) if mode != "off" else None
+    budget_stopped = False
+    with SpendAdmission.open(spend_policy, plan, root=runs / "spend") as admission:
+        if admission.path is not None:
+            print(f"spend ledger: {admission.path}")
+        for (task, pt, row_model, base, turns), calls in zip(validated, call_sets):
+            base.parent.mkdir(parents=True, exist_ok=True)
+            prov_extra = {
+                "population": "answer",
+                "case_id": pt.case_id,
+                "run_number": pt.run_number,
+                "variant": pt.variant_truth,
+                "billing_scope": "run",
+                "answer_design_sha256": design["design_sha256"],
+                "answer_task_sha256": answer_design_identity(
+                    design, pt, row_model)["task_sha256"],
+                "answer_instruction_sha256": answer_design_identity(
+                    design, pt, row_model)["instruction_sha256"],
+                **({"ablation": pt.ablation.as_dict()} if pt.ablation else {}),
+            }
+            if admission.path is not None:
+                prov_extra["spend_ledger_path"] = str(admission.path)
+            if admission.ledger is not None and admission.ledger.refusal is not None:
+                refused_calls: list[Refused] = []
 
-        def tool_executor(tool: str, payload: Any, replay_store=store) -> Any:
-            live = (live_tools or {}).get(tool)
-            if replay_store is None:
-                if live is None:
-                    raise ToolReplayMiss(f"no live executor for tool {tool!r}")
-                return live(payload)
-            return replay_store.resolve(tool, payload, live=live)
+                def refused_callback() -> NoReturn:
+                    raise AssertionError("refused subagent callback dispatched")
 
-        turns = [str(t) for t in task.get("turns") or [] if str(t)]
-        multi_turn_extra: dict[str, Any] = {}
-        duplicate_keys: list[str] = []
-        aggregate_cost_usd: float | None = None
-        turn_stops: list[StopObservation] = []
-        served_reported: list[str] = []
-        with captured_workspace(prefix="subagent-ws-", changes_dir=sidecars,
-                                build=functools.partial(workspace_builder, pt)) as (ws, workspace):
-            skill_rel, input_rel = workspace
-            attestation = workspace.attestation
-            if attestation.mounted_skill_tree_hash is not None:
-                prov_extra["skill_tree_hash"] = attestation.mounted_skill_tree_hash
-            prov_extra["fixture_tree_hash"] = attestation.fixture_tree_hash
-            prompt = build_task_prompt(pt, skill_paths=skill_rel, input_files=input_rel)
-            started = time.time()
-            if turns:
-                # Each attempted turn is a complete committed run-output subtree.
-                # The root remains the final-answer compatibility surface, with
-                # only explicitly turn-delta evidence eligible for aggregation.
-                outcome: dict[str, Any] = {}
-                error: str | None = None
-                history: list[dict[str, str]] = []
-                turn_rows: list[dict[str, Any]] = []
-                for n, turn_prompt in enumerate(turns, 1):
-                    sent = prompt if n == 1 else turn_prompt
-                    turn_started = time.time()
+                for call in calls:
+                    execution = admission.run(call, refused_callback)
+                    if not isinstance(execution, NotStarted):
+                        raise TypeError("refused subagent call started")
+                    refused_calls.append(Refused(execution.call, execution.reason))
+                budget_stopped = True
+                if base.exists() and (not base.is_dir() or any(base.iterdir())):
+                    continue
+                write_runner_outcome(base, _NoProcessArtifact(OutcomeContext(
+                    provider=Provider.SUBAGENT, model=row_model,
+                    metadata_extra={"tool_replay_mode": mode, **prov_extra},
+                    environment=({"context_isolation": list(context_isolation)} if context_isolation else {})),
+                    _BudgetRefusal(tuple(refused_calls))))
+                continue
+            with ExitStack() as lifetime:
+                sidecars = Path(tempfile.mkdtemp(prefix=f".{base.name}.sidecars-", dir=base.parent))
+                lifetime.callback(shutil.rmtree, sidecars, ignore_errors=True)
+                replay_path = sidecars / "tool-replay.json"
+                existing_replay = base / "tool-replay.json"
+                if mode in {"replay", "strict", "auto"} and existing_replay.is_file():
+                    shutil.copy2(existing_replay, replay_path)
+                store = ToolReplayStore(replay_path, mode) if mode != "off" else None
+
+                def tool_executor(tool: str, payload: Any, replay_store=store) -> Any:
+                    live = (live_tools or {}).get(tool)
+                    if replay_store is None:
+                        if live is None:
+                            raise ToolReplayMiss(f"no live executor for tool {tool!r}")
+                        return live(payload)
+                    return replay_store.resolve(tool, payload, live=live)
+
+                refusals: list[Refused] = []
+                opaque_rejection: _OpaqueResponseRejected | None = None
+                rejected_diagnostics: list[dict[str, Any]] = []
+                started_calls = 0
+                multi_turn_extra: dict[str, Any] = {}
+                duplicate_keys: list[str] = []
+                aggregate_cost_usd: float | None = None
+                turn_stops: list[StopObservation] = []
+                served_reported: list[str] = []
+                callback_error: Exception | None = None
+
+                def invoke_turn(**kwargs: Any) -> Priced[_SubagentTurnResult]:
+                    nonlocal callback_error
+                    callback_error = None
                     try:
-                        turn_response: dict[str, Any] = validate_subagent_response(
-                            agent_fn(prompt=sent, workspace=ws, model=row_model,
-                                     tool_executor=tool_executor, history=list(history)))
-                        turn_error: str | None = None
-                    except ToolReplayMiss as exc:
-                        turn_response = {"answer": "", "returncode": 1}
-                        turn_error = f"tool replay miss on subagent turn {n}: {exc}"
-                    except subprocess.TimeoutExpired as exc:
-                        turn_response = {"answer": "", "timed_out": True, "returncode": 124}
-                        turn_error = f"subagent turn {n} timeout: {exc}"
+                        return _invoke_paid_subagent(agent_fn, **kwargs)
                     except Exception as exc:
-                        turn_response = {"answer": "", "returncode": 1}
-                        turn_error = f"subagent turn {n} error: {exc}"
+                        callback_error = exc
+                        raise
 
-                    reported_elapsed = turn_response.get("elapsed_ms")
-                    turn_elapsed = (int(reported_elapsed)
-                                    if isinstance(reported_elapsed, (int, float))
-                                    and not isinstance(reported_elapsed, bool)
-                                    else int((time.time() - turn_started) * 1000))
-                    turn_answer = str(turn_response.get("answer") or "")
-                    raw_turn_rc = turn_response.get("returncode", 0)
-                    raw_turn_timed_out = turn_response.get("timed_out", False)
-                    if type(raw_turn_rc) is not int:
-                        turn_error = turn_error or (
-                            f"subagent turn {n} returned malformed returncode")
-                        turn_rc = 1
+                with captured_workspace(prefix="subagent-ws-", changes_dir=sidecars,
+                                        build=functools.partial(workspace_builder, pt)) as (ws, workspace):
+                    skill_rel, input_rel = workspace
+                    attestation = workspace.attestation
+                    if attestation.mounted_skill_tree_hash is not None:
+                        prov_extra["skill_tree_hash"] = attestation.mounted_skill_tree_hash
+                    prov_extra["fixture_tree_hash"] = attestation.fixture_tree_hash
+                    prompt = build_task_prompt(pt, skill_paths=skill_rel, input_files=input_rel)
+                    started = time.time()
+                    if turns:
+                        outcome: dict[str, Any] = {}
+                        error: str | None = None
+                        history: list[dict[str, str]] = []
+                        turn_rows: list[dict[str, Any]] = []
+                        for n, turn_prompt in enumerate(turns, 1):
+                            sent = prompt if n == 1 else turn_prompt
+                            turn_started = time.time()
+                            try:
+                                execution = admission.run(calls[n - 1], functools.partial(invoke_turn,
+                                    requires_delta=True, prompt=sent, workspace=ws, model=row_model,
+                                    tool_executor=tool_executor, history=list(history)))
+                            except Exception as exc:
+                                if exc is not callback_error:
+                                    raise
+                                paid: _SubagentTurnResult = _SubagentResponseRejected(
+                                    f"subagent turn {n} error: {exc}", _subagent_paid_evidence(None))
+                            else:
+                                if isinstance(execution, NotStarted):
+                                    refusals.append(Refused(execution.call, execution.reason))
+                                    budget_stopped = True
+                                    continue
+                                paid = execution.value
+                            started_calls += 1
+                            turn_response, turn_error = _subagent_artifact_response(paid)
+                            if isinstance(paid, _SubagentResponseRejected):
+                                rejected_diagnostics.append({"call_id": calls[n - 1].call_id,
+                                    "call": calls[n - 1].as_dict(), "reason": paid.reason,
+                                    **paid.evidence.diagnostic()})
+                                if paid.evidence.process is None:
+                                    opaque_rejection = _OpaqueResponseRejected(calls[n - 1], paid.reason)
+                                    error = paid.reason
+                                    if admission.ledger is not None and admission.ledger.refusal is not None:
+                                        continue
+                                    break
+
+                            reported_elapsed = turn_response.get("elapsed_ms")
+                            turn_elapsed = (int(reported_elapsed)
+                                            if isinstance(reported_elapsed, (int, float))
+                                            and not isinstance(reported_elapsed, bool)
+                                            else int((time.time() - turn_started) * 1000))
+                            turn_answer = str(turn_response.get("answer") or "")
+                            raw_turn_rc = turn_response.get("returncode", 0)
+                            raw_turn_timed_out = turn_response.get("timed_out", False)
+                            if type(raw_turn_rc) is not int:
+                                turn_error = turn_error or (
+                                    f"subagent turn {n} returned malformed returncode")
+                                turn_rc = 1
+                            else:
+                                turn_rc = raw_turn_rc
+                            if not isinstance(raw_turn_timed_out, bool):
+                                turn_error = turn_error or (
+                                    f"subagent turn {n} returned malformed timed_out")
+                                turn_timed_out = False
+                            else:
+                                turn_timed_out = raw_turn_timed_out
+                            if turn_error is None and turn_rc == 124 and not turn_timed_out:
+                                turn_error = (
+                                    f"subagent turn {n} returned timeout code without timed_out")
+                                turn_rc = 1
+                            if turn_error is None and (turn_timed_out or turn_rc != 0 or not turn_answer):
+                                turn_error = (f"subagent turn {n} did not complete"
+                                              + (" before timeout" if turn_timed_out else ""))
+                            if turn_timed_out:
+                                turn_rc = 124
+                            completed = turn_error is None
+                            if not completed:
+                                turn_answer = ""
+                            turn_response = {
+                                **turn_response, "answer": turn_answer,
+                                "timed_out": bool(turn_timed_out), "returncode": int(turn_rc),
+                            }
+                            duplicate_keys.extend(f"turn {n}: {key}" for key in cast(list[str], turn_response.get("stream_duplicate_keys", [])))
+                            turn_trace_records = (turn_response.get("trace")
+                                                  if isinstance(turn_response.get("trace"), list) else [])
+                            turn_trace_text = _subagent_trace_text(turn_trace_records)
+                            raw_turn_usage = turn_response.get("usage")
+                            turn_usage: dict[str, Any] | None = (
+                                string_keyed_dict(raw_turn_usage, "subagent turn usage")
+                                if isinstance(raw_turn_usage, dict) else None
+                            )
+                            turn_cost = _subagent_cost_usd(turn_response)
+                            turn_stops.append(subagent_stop(turn_response, f"subagent response, turn {n}"))
+                            turn_served = subagent_served_models(turn_response)
+                            served_reported.extend(turn_served)
+                            turn_ro = RunnerOutcome(
+                                provider="subagent", answer=turn_answer,
+                                returncode=int(turn_rc), timed_out=bool(turn_timed_out),
+                                error=turn_error, elapsed_ms=turn_elapsed,
+                                trace_text=turn_trace_text, trace_source=trace_source,
+                                usage=turn_usage, cost_usd=turn_cost, model=row_model,
+                                stderr=(paid.evidence.process.stderr if paid.evidence.process is not None else ""),
+                                invocation_state=(paid.evidence.process.invocation_state if paid.evidence.process is not None else None),
+                                metadata_extra={
+                                    "tool_replay_mode": mode, **prov_extra,
+                                    **({"stream_duplicate_keys": turn_response["stream_duplicate_keys"]}
+                                       if turn_response.get("stream_duplicate_keys") else {}),
+                                    "billing_scope": "turn", "turn_number": n,
+                                    **({"spend_call_id": calls[n - 1].call_id} if admission.path is not None else {}),
+                                    **({"subagent_paid_evidence": paid.evidence.diagnostic()}
+                                       if isinstance(paid, _SubagentResponseRejected) else {}),
+                                    "expected_turns": len(turns),
+                                    "telemetry_scope": turn_response.get("telemetry_scope"),
+                                    **turn_stops[-1].as_metadata(),
+                                    **ServedModel.observe(row_model, turn_served).as_metadata(),
+                                },
+                                environment=({"context_isolation": list(context_isolation)} if context_isolation else {}),
+                                diagnose_returncode=False,
+                            )
+                            _, turn_metrics = write_runner_outcome(
+                                sidecars / f"turn-{n}", turn_ro)
+                            turn_rows.append({
+                                "turn_number": n, "completed": completed,
+                                "returncode": int(turn_rc), "timed_out": bool(turn_timed_out),
+                                "elapsed_ms": turn_elapsed, "usage": turn_usage,
+                                "cost_usd": turn_cost,
+                                "telemetry_scope": turn_response.get("telemetry_scope"),
+                                "trace_records": turn_trace_records,
+                                "trace_observation_complete": turn_metrics.get(
+                                    "trace_observation_complete") is True,
+                            })
+                            outcome = turn_response
+                            if not completed:
+                                error = turn_error
+                                if admission.ledger is not None and admission.ledger.refusal is not None:
+                                    continue
+                                break
+                            history.append({"prompt": sent, "answer": turn_answer})
+
+                        (elapsed_ms, raw_usage, aggregate_cost_usd,
+                         multi_turn_summary, trace_text) = _subagent_multi_turn_aggregate(
+                             turn_rows, len(turns))
+                        multi_turn_extra = {"multi_turn_telemetry": multi_turn_summary}
                     else:
-                        turn_rc = raw_turn_rc
-                    if not isinstance(raw_turn_timed_out, bool):
-                        turn_error = turn_error or (
-                            f"subagent turn {n} returned malformed timed_out")
-                        turn_timed_out = False
-                    else:
-                        turn_timed_out = raw_turn_timed_out
-                    if turn_error is None and turn_rc == 124 and not turn_timed_out:
-                        turn_error = (
-                            f"subagent turn {n} returned timeout code without timed_out")
-                        turn_rc = 1
-                    if turn_error is None and (turn_timed_out or turn_rc != 0 or not turn_answer):
-                        turn_error = (f"subagent turn {n} did not complete"
-                                      + (" before timeout" if turn_timed_out else ""))
-                    if turn_timed_out:
-                        turn_rc = 124
-                    completed = turn_error is None
-                    if not completed:
-                        turn_answer = ""
-                    turn_response = {
-                        **turn_response, "answer": turn_answer,
-                        "timed_out": bool(turn_timed_out), "returncode": int(turn_rc),
-                    }
-                    duplicate_keys.extend(f"turn {n}: {key}" for key in cast(list[str], turn_response.get("stream_duplicate_keys", [])))
-                    turn_trace_records = (turn_response.get("trace")
-                                          if isinstance(turn_response.get("trace"), list) else [])
-                    turn_trace_text = _subagent_trace_text(turn_trace_records)
-                    raw_turn_usage = turn_response.get("usage")
-                    turn_usage: dict[str, Any] | None = (
-                        string_keyed_dict(raw_turn_usage, "subagent turn usage")
-                        if isinstance(raw_turn_usage, dict) else None
-                    )
-                    turn_cost = _subagent_cost_usd(turn_response)
-                    turn_stops.append(subagent_stop(turn_response, f"subagent response, turn {n}"))
-                    turn_served = subagent_served_models(turn_response)
-                    served_reported.extend(turn_served)
-                    turn_ro = RunnerOutcome(
-                        provider="subagent", answer=turn_answer,
-                        returncode=int(turn_rc), timed_out=bool(turn_timed_out),
-                        error=turn_error, elapsed_ms=turn_elapsed,
-                        trace_text=turn_trace_text, trace_source=trace_source,
-                        usage=turn_usage, cost_usd=turn_cost, model=row_model,
-                        metadata_extra={
-                            "tool_replay_mode": mode, **prov_extra,
-                            **({"stream_duplicate_keys": turn_response["stream_duplicate_keys"]}
-                               if turn_response.get("stream_duplicate_keys") else {}),
-                            "billing_scope": "turn", "turn_number": n,
-                            "expected_turns": len(turns),
-                            "telemetry_scope": turn_response.get("telemetry_scope"),
-                            **turn_stops[-1].as_metadata(),
-                            **ServedModel.observe(row_model, turn_served).as_metadata(),
-                        },
+                        try:
+                            execution = admission.run(calls[0], functools.partial(invoke_turn,
+                                requires_delta=False, prompt=prompt, workspace=ws,
+                                model=row_model, tool_executor=tool_executor))
+                        except Exception as exc:
+                            if exc is not callback_error:
+                                raise
+                            label = "tool replay miss" if isinstance(exc, ToolReplayMiss) else "subagent error"
+                            paid = _SubagentResponseRejected(f"{label}: {exc}", _subagent_paid_evidence(None))
+                        else:
+                            if isinstance(execution, NotStarted):
+                                refusals.append(Refused(execution.call, execution.reason))
+                                budget_stopped = True
+                                paid = None
+                            else:
+                                paid = execution.value
+                        if paid is None:
+                            outcome, error = {}, None
+                        else:
+                            started_calls += 1
+                            outcome, error = _subagent_artifact_response(paid)
+                            if isinstance(paid, _SubagentResponseRejected):
+                                rejected_diagnostics.append({"call_id": calls[0].call_id,
+                                    "call": calls[0].as_dict(), "reason": paid.reason,
+                                    **paid.evidence.diagnostic()})
+                                if paid.evidence.process is None:
+                                    opaque_rejection = _OpaqueResponseRejected(calls[0], paid.reason)
+                        elapsed_ms = outcome.get("elapsed_ms")
+                        if not isinstance(elapsed_ms, (int, float)):
+                            elapsed_ms = int((time.time() - started) * 1000)
+                        duplicate_keys = cast(list[str], outcome.get("stream_duplicate_keys", []))
+                        trace_records = (outcome.get("trace")
+                                         if isinstance(outcome.get("trace"), list) else [])
+                        trace_text = _subagent_trace_text(trace_records)
+                        raw_single_usage = outcome.get("usage")
+                        raw_usage: dict[str, Any] | None = (
+                            string_keyed_dict(raw_single_usage, "subagent usage")
+                            if isinstance(raw_single_usage, dict) else None
+                        )
+                        aggregate_cost_usd = _subagent_cost_usd(outcome)
+                        turn_stops.append(subagent_stop(outcome, "subagent response"))
+                        served_reported.extend(subagent_served_models(outcome))
+                if store is not None:
+                    store.save()
+                if started_calls == 0 and base.exists() and (not base.is_dir() or any(base.iterdir())):
+                    continue
+                completion = {
+                    **(subagent_run_stop(turn_stops) if turn_stops else StopObservation.unavailable(
+                        "subagent has no accepted response")).as_metadata(),
+                    **ServedModel.observe(row_model, served_reported).as_metadata(),
+                }
+                raw_timed_out = outcome.get("timed_out", False)
+                if not isinstance(raw_timed_out, bool):
+                    error = error or "subagent returned malformed timed_out field"
+                    raw_timed_out = False
+                    outcome = {**outcome, "returncode": 1, "answer": ""}
+                timed_out = raw_timed_out
+                raw_answer = outcome.get("answer")
+                answer = raw_answer if isinstance(raw_answer, str) else ""
+                raw_returncode = outcome.get(
+                    "returncode", 124 if timed_out else (1 if error else 0))
+                if type(raw_returncode) is not int:
+                    error = error or "subagent returned malformed returncode field"
+                    returncode = 1
+                else:
+                    returncode = raw_returncode
+                metadata_extra = {"tool_replay_mode": mode, **prov_extra, **multi_turn_extra,
+                                  **completion,
+                                  **({"stream_duplicate_keys": duplicate_keys} if duplicate_keys else {}),
+                                  **({"subagent_rejected_calls": rejected_diagnostics} if rejected_diagnostics else {})}
+                ro: AnswerOutcome | _NoProcessArtifact
+                terminal = _BudgetRefusal(tuple(refusals)) if refusals else opaque_rejection
+                if terminal is not None:
+                    ro = _NoProcessArtifact(OutcomeContext(
+                        provider=Provider.SUBAGENT, model=row_model,
+                        trace_text=trace_text, trace_source=None if trace_source is None else Provider(trace_source),
+                        cost_usd=None if refusals else aggregate_cost_usd,
+                        metadata_extra=metadata_extra,
+                        environment=({"context_isolation": list(context_isolation)} if context_isolation else {})), terminal)
+                else:
+                    ro = RunnerOutcome(
+                        provider="subagent", answer=answer,
+                        returncode=returncode, timed_out=timed_out,
+                        error=error or ("subagent timed out" if timed_out else None),
+                        elapsed_ms=(int(elapsed_ms) if isinstance(elapsed_ms, (int, float)) else None),
+                        trace_text=trace_text, trace_source=trace_source,
+                        usage=raw_usage, cost_usd=aggregate_cost_usd, model=row_model,
+                        stderr=(paid.evidence.process.stderr if not turns and paid is not None
+                                and paid.evidence.process is not None else ""),
+                        invocation_state=(paid.evidence.process.invocation_state if not turns and paid is not None
+                                          and paid.evidence.process is not None else None),
+                        metadata_extra=metadata_extra,
                         environment=({"context_isolation": list(context_isolation)} if context_isolation else {}),
-                        diagnose_returncode=False,
-                    )
-                    _, turn_metrics = write_runner_outcome(
-                        sidecars / f"turn-{n}", turn_ro)
-                    turn_rows.append({
-                        "turn_number": n, "completed": completed,
-                        "returncode": int(turn_rc), "timed_out": bool(turn_timed_out),
-                        "elapsed_ms": turn_elapsed, "usage": turn_usage,
-                        "cost_usd": turn_cost,
-                        "telemetry_scope": turn_response.get("telemetry_scope"),
-                        "trace_records": turn_trace_records,
-                        "trace_observation_complete": turn_metrics.get(
-                            "trace_observation_complete") is True,
-                    })
-                    outcome = turn_response
-                    if not completed:
-                        error = turn_error
-                        break
-                    history.append({"prompt": sent, "answer": turn_answer})
-
-                (elapsed_ms, raw_usage, aggregate_cost_usd,
-                 multi_turn_summary, trace_text) = _subagent_multi_turn_aggregate(
-                     turn_rows, len(turns))
-                multi_turn_extra = {"multi_turn_telemetry": multi_turn_summary}
-            else:
-                try:
-                    outcome: dict[str, Any] = validate_subagent_response(
-                        agent_fn(prompt=prompt, workspace=ws, model=row_model,
-                                 tool_executor=tool_executor))
-                    error = None
-                except ToolReplayMiss as exc:
-                    outcome, error = {}, f"tool replay miss: {exc}"
-                except subprocess.TimeoutExpired as exc:
-                    # The one timeout encoding (see run_argv_with_timeout): the flag
-                    # execution_valid keys on, never a generic error that loses it.
-                    outcome, error = {"timed_out": True, "returncode": 124}, f"subagent timeout: {exc}"
-                except Exception as exc:
-                    outcome, error = {}, f"subagent error: {exc}"
-                elapsed_ms = outcome.get("elapsed_ms")
-                if not isinstance(elapsed_ms, (int, float)):
-                    elapsed_ms = int((time.time() - started) * 1000)
-                duplicate_keys = cast(list[str], outcome.get("stream_duplicate_keys", []))
-                trace_records = (outcome.get("trace")
-                                 if isinstance(outcome.get("trace"), list) else [])
-                trace_text = _subagent_trace_text(trace_records)
-                raw_single_usage = outcome.get("usage")
-                raw_usage: dict[str, Any] | None = (
-                    string_keyed_dict(raw_single_usage, "subagent usage")
-                    if isinstance(raw_single_usage, dict) else None
-                )
-                aggregate_cost_usd = _subagent_cost_usd(outcome)
-                turn_stops.append(subagent_stop(outcome, "subagent response"))
-                served_reported.extend(subagent_served_models(outcome))
-        if store is not None:
-            store.save()
-        completion = {
-            **subagent_run_stop(turn_stops).as_metadata(),
-            **ServedModel.observe(row_model, served_reported).as_metadata(),
-        }
-        # The subagent seam returns structured trace records; single-turn traces
-        # remain direct. Multi-turn root traces are safe composites whose exact
-        # provider records live under turn-<n>/trace.jsonl.
-        raw_timed_out = outcome.get("timed_out", False)
-        if not isinstance(raw_timed_out, bool):
-            error = error or "subagent returned malformed timed_out field"
-            raw_timed_out = False
-            outcome = {**outcome, "returncode": 1, "answer": ""}
-        timed_out = raw_timed_out
-        raw_answer = outcome.get("answer")
-        answer = raw_answer if isinstance(raw_answer, str) else ""
-        raw_returncode = outcome.get(
-            "returncode", 124 if timed_out else (1 if error else 0))
-        if type(raw_returncode) is not int:
-            error = error or "subagent returned malformed returncode field"
-            returncode = 1
-        else:
-            returncode = raw_returncode
-        ro = RunnerOutcome(
-            provider="subagent", answer=answer,
-            returncode=returncode, timed_out=timed_out,
-            # A timeout keeps its error string (or the subagent's default) so the
-            # TIMEOUT marker, not the provider marker, heads the body.
-            error=error or ("subagent timed out" if timed_out else None),
-            elapsed_ms=(int(elapsed_ms) if isinstance(elapsed_ms, (int, float)) else None),
-            trace_text=trace_text, trace_source=trace_source,
-            usage=raw_usage, cost_usd=aggregate_cost_usd, model=row_model,
-            metadata_extra={"tool_replay_mode": mode, **prov_extra, **multi_turn_extra,
-                            **completion,
-                            **({"stream_duplicate_keys": duplicate_keys} if duplicate_keys else {})},
-            environment=({"context_isolation": list(context_isolation)} if context_isolation else {}),
-            diagnose_returncode=False)
-        try:
-            write_runner_outcome(base, ro, sidecars=sidecars)
-        finally:
-            shutil.rmtree(sidecars, ignore_errors=True)
-    return 0
-
+                        diagnose_returncode=False)
+                write_runner_outcome(base, ro, sidecars=sidecars)
+        if admission.ledger is not None and admission.ledger.partial:
+            budget_stopped = True
+    return 2 if budget_stopped else 0
 
 def shell_agent_backend(agent_cmd: str, timeout: int = DEFAULT_RUNNER_TIMEOUT_S) -> Any:
     """Adapt a shell command into the subagent seam: the prompt arrives as JSON
     on stdin, the reply is JSON on stdout ({answer, trace?, usage?,
     telemetry_scope?, stop_class?, stop_reason?, served_models?})."""
-    def backend(*, prompt: str, workspace: Path, model: str | None, tool_executor: Any, history: list | None = None) -> dict[str, Any]:
+    def backend(*, prompt: str, workspace: Path, model: str | None, tool_executor: Any, history: list | None = None) -> _SubagentTurnResult:
         payload = {"prompt": prompt, "model": model, "workspace": str(workspace)}
         if history:
             payload["history"] = history
+        def captured_text(value: str | bytes | None) -> tuple[str, bool]:
+            if value is None:
+                return "", True
+            if isinstance(value, bytes):
+                try:
+                    return value.decode("utf-8", errors="strict"), True
+                except UnicodeDecodeError:
+                    return value.decode("utf-8", errors="backslashreplace"), False
+            return value, True
+        started = time.time()
         try:
-            proc = subprocess.run(agent_cmd, shell=True, input=json.dumps(payload),
-                                  text=True, capture_output=True, timeout=timeout, check=False)
-        except subprocess.TimeoutExpired:
-            return {"answer": "", "returncode": 124, "timed_out": True}
-        if proc.returncode != 0:
-            return {"answer": "", "returncode": proc.returncode}
+            proc = subprocess.run(agent_cmd, shell=True, input=json.dumps(payload).encode("utf-8"),
+                                  capture_output=True, timeout=timeout, check=False)
+        except subprocess.TimeoutExpired as exc:
+            stdout, stdout_valid = captured_text(exc.stdout)
+            stderr, stderr_valid = captured_text(exc.stderr)
+            process = InvocationResult(
+                stdout=stdout, stderr=stderr, returncode=124,
+                elapsed_ms=int((time.time() - started) * 1000), invocation_state=InvocationState.TIMED_OUT,
+                stdout_utf8_valid=stdout_valid, stderr_utf8_valid=stderr_valid, timed_out=True)
+            parsed = None
+            if stdout_valid:
+                try:
+                    parsed = strict_json_loads(stdout)
+                except (ValueError, TypeError):
+                    pass
+            return _SubagentResponseRejected("subagent command timed out", _subagent_paid_evidence(parsed, process))
+        stdout, stdout_valid = captured_text(proc.stdout)
+        stderr, stderr_valid = captured_text(proc.stderr)
+        process = InvocationResult(
+            stdout=stdout, stderr=stderr, returncode=proc.returncode,
+            elapsed_ms=int((time.time() - started) * 1000),
+            invocation_state=InvocationState.COMPLETE if proc.returncode == 0 else InvocationState.PROCESS_FAILED,
+            stdout_utf8_valid=stdout_valid, stderr_utf8_valid=stderr_valid)
+        if not stdout_valid:
+            return _SubagentResponseRejected("subagent stdout is not valid UTF-8", _subagent_paid_evidence(None, process))
         try:
-            parsed = strict_json_loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"subagent response must be exactly one JSON object: {exc}") from exc
-        return validate_subagent_response(parsed)
+            parsed = strict_json_loads(stdout)
+        except (ValueError, TypeError) as exc:
+            return _SubagentResponseRejected(
+                f"subagent response must be exactly one JSON object: {exc}", _subagent_paid_evidence(None, process))
+        evidence = _subagent_paid_evidence(parsed, process)
+        paid = _classify_subagent_response(
+            parsed, evidence, f"subagent command exited {proc.returncode}" if proc.returncode != 0 else None)
+        if isinstance(paid, _SubagentResponseAccepted):
+            if parsed.get("returncode", 0) != 0 or parsed.get("timed_out", False):
+                return _SubagentResponseRejected("subagent command reported an incomplete response", evidence)
+            return _SubagentResponseAccepted({**parsed, "returncode": proc.returncode}, evidence)
+        return paid
     return backend
 
 
@@ -14893,7 +15398,7 @@ def run_subagent(args: argparse.Namespace) -> int:
         claude_bin = getattr(args, "claude_bin", None) or "claude"
         timeout = int(getattr(args, "timeout", DEFAULT_RUNNER_TIMEOUT_S))
 
-        def backend(*, prompt: str, workspace: Path, model: str | None, tool_executor: Any, history: list | None = None) -> dict[str, Any]:
+        def backend(*, prompt: str, workspace: Path, model: str | None, tool_executor: Any, history: list | None = None) -> _SubagentTurnResult:
             if history:
                 transcript = "\n\n".join(f"[user]\n{h['prompt']}\n\n[assistant]\n{h['answer']}" for h in history)
                 prompt = f"Conversation so far:\n{transcript}\n\n[user]\n{prompt}"
@@ -14904,38 +15409,46 @@ def run_subagent(args: argparse.Namespace) -> int:
             # skill and input paths are.
             result = claude_cli_invoke(prompt, isolation=ContextIsolation.WORKSPACE, model=model, claude_bin=claude_bin, timeout=timeout,
                                        cwd=workspace, output_format="stream-json")
-            error = result.get("provider_error") or result.get("parse_error")
-            if error and result.get("returncode") == 0:
-                # An exit-zero error envelope or unreadable output is a failed
-                # run, as run-claude records it, not an answer to grade.
-                raise RuntimeError(error)
-            # The provider's usage as run-claude records it, with the cost the
-            # subagent contract reads from usage.cost_usd. Only numeric fields:
-            # the subagent usage contract rejects labels such as `source`.
-            usage = dict(result.get("usage") or {})
-            if isinstance(result.get("cost_usd"), (int, float)):
-                usage["cost_usd"] = result["cost_usd"]
-            completion: dict[str, Any] = {}
-            stop = result.get("stop")
-            if isinstance(stop, StopObservation) and stop.stop_class is not StopClass.UNAVAILABLE:
-                completion["stop_class"] = stop.stop_class.value
-                if stop.raw is not None:
-                    completion["stop_reason"] = stop.raw
-            served = [item for item in result.get("served_models") or []
-                      if isinstance(item, str) and item.strip()]
-            if served:
-                completion["served_models"] = served
-            trace, _ = parse_trace_jsonl_text(str(result.get("raw_response") or ""), strict=False)
-            # Each turn is its own `claude -p` call, so its usage, cost and
-            # time are that turn's alone and sum to the run's.
-            return {"answer": result.get("answer"), "returncode": result.get("returncode"),
-                    "timed_out": result.get("timed_out", False), "elapsed_ms": result.get("elapsed_ms"),
-                    "usage": usage, "trace": trace, "telemetry_scope": "turn_delta",
-                    "stream_duplicate_keys": stream_duplicate_keys(str(result.get("raw_response") or "")), **completion}
+            process = InvocationResult(
+                stdout=str(result.get("raw_response") or ""), stderr=str(result.get("stderr") or ""),
+                returncode=result["returncode"], elapsed_ms=result["elapsed_ms"],
+                invocation_state=InvocationState(result["invocation_state"]),
+                stdout_utf8_valid=result.get("trace_utf8_valid", True), stderr_utf8_valid=True,
+                timed_out=result.get("timed_out", False))
+            evidence = _subagent_paid_evidence({"usage": {"cost_usd": (
+                result.get("observed_subtotal_usd") if process.timed_out else result.get("cost_usd"))},
+                                               "telemetry_scope": "turn_delta"}, process)
+            error = ("subagent Claude command timed out" if process.timed_out else
+                     result.get("provider_error") or result.get("parse_error"))
+            if error:
+                return _SubagentResponseRejected(str(error), evidence)
+            try:
+                usage = dict(result.get("usage") or {})
+                if isinstance(result.get("cost_usd"), (int, float)):
+                    usage["cost_usd"] = result["cost_usd"]
+                completion: dict[str, Any] = {}
+                stop = result.get("stop")
+                if isinstance(stop, StopObservation) and stop.stop_class is not StopClass.UNAVAILABLE:
+                    completion["stop_class"] = stop.stop_class.value
+                    if stop.raw is not None:
+                        completion["stop_reason"] = stop.raw
+                served = [item for item in result.get("served_models") or []
+                          if isinstance(item, str) and item.strip()]
+                if served:
+                    completion["served_models"] = served
+                trace, _ = parse_trace_jsonl_text(str(result.get("raw_response") or ""), strict=False)
+                response = {"answer": result.get("answer"), "returncode": result.get("returncode"),
+                        "timed_out": result.get("timed_out", False), "elapsed_ms": result.get("elapsed_ms"),
+                        "usage": usage, "trace": trace, "telemetry_scope": "turn_delta",
+                        "stream_duplicate_keys": stream_duplicate_keys(str(result.get("raw_response") or "")), **completion}
+                return _classify_subagent_response(response, evidence)
+            except Exception as exc:
+                return _SubagentResponseRejected(f"subagent Claude response rejected: {exc}", evidence)
     return run_subagent_tasks(tasks, runs, backend, model=getattr(args, "model", None),
                               replay_mode=getattr(args, "tool_replay", None) or tool_replay_mode(),
                               trace_source=None if agent_cmd else "claude",
-                              context_isolation=() if agent_cmd else CLAUDE_ISOLATION_ARGS[ContextIsolation.WORKSPACE])
+                              context_isolation=() if agent_cmd else CLAUDE_ISOLATION_ARGS[ContextIsolation.WORKSPACE],
+                              spend_policy=native_spend_policy(args))
 
 
 JUDGE_NEGATIVE_CONTROLS = {
@@ -18471,26 +18984,27 @@ def build_cost_summary(results: list[dict[str, Any]], *, judge_results: dict[str
 
 
 def judge_cost_block(judge_results: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    def leaves(row: dict[str, Any]) -> list[dict[str, Any]]:
-        for key in ("judge_panel", "judge_runs"):
-            nested = row.get(key)
-            if isinstance(nested, list) and nested:
-                return [leaf for member in nested if isinstance(member, dict)
-                        for leaf in leaves(member)]
-        return [row]
-
-    billed_rows = [leaf for row in judge_results.values() for leaf in leaves(row)]
-    measurements = [
-        telemetry_domain.measurement_from_envelope_or_cost(
-            row, source=str(row.get("provider") or "judge"), population="judge")
-        for row in billed_rows
-    ]
-    available = sum(1 for measurement in measurements if measurement.availability == telemetry_domain.AVAILABLE)
+    billed_rows = _judge_cost_leaves(judge_results.values())
+    buckets = _judge_cost_buckets(billed_rows)
+    usd = buckets.get("USD") or buckets.get("unknown")
+    if usd is None:
+        usd = telemetry_domain.Aggregate(
+            telemetry_domain.UNAVAILABLE,
+            unavailable_count=len(billed_rows),
+            reason_counts={"currency_mismatch": len(billed_rows)})
+    fields = _numeric_aggregate_fields("total_cost_usd", usd)
+    for key in ("total_cost_usd", "known_total_cost_usd"):
+        if fields.get(key) is not None:
+            fields[key] = float(fields[key])
+    available = sum(1 for row in billed_rows
+                    if telemetry_domain.measurement_from_envelope_or_cost(
+                        row, source="judge", population="judge").availability == telemetry_domain.AVAILABLE)
     return {
         "verdicts": len(judge_results),
         "billed_calls": len(billed_rows),
         "verdicts_with_cost": available,
-        **_money_aggregate_fields(measurements),
+        **fields,
+        "cost_by_currency": {currency: aggregate.to_dict() for currency, aggregate in buckets.items()},
     }
 
 
@@ -19205,7 +19719,7 @@ def build_benchmark_report(
     slice_surface: Any = build_slice_summary(results, variants)
     trajectory_surface: Any = build_trajectory_diff(results)
     cost_surface: Any = build_cost_summary(
-        results, judge_results=judge_lookup,
+        results,
         confirmed_regressions=confirmed_regression_count(ablation_regressions))
     case_flags_surface: Any = case_flags
     observed_case_flags: list[dict[str, Any]] | None = None
@@ -19279,6 +19793,8 @@ def build_benchmark_report(
         cost_surface = invalidate_design_aggregate(cost_surface, reason)
         observed_case_flags = case_flags
         case_flags_surface = []
+    if judge_lookup:
+        cost_surface["judge"] = judge_cost_block(judge_lookup)
     return {
         "manifest": str(path),
         "skill_name": manifest["skill_name"],
@@ -23417,6 +23933,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--claude-bin", default="claude", help="path to the claude executable for the default backend")
     p.add_argument("--timeout", type=int, default=DEFAULT_RUNNER_TIMEOUT_S)
     p.add_argument("--tool-replay", choices=sorted(TOOL_REPLAY_MODES), help=f"tool replay mode; defaults from ${TOOL_REPLAY_ENV} (off)")
+    p.add_argument("--max-cost-usd", type=float, help="per-invocation USD admission ceiling for external turns; admitted calls can overshoot")
+    p.add_argument("--assumed-cost-per-run-usd", type=float, help="labeled charge for one unpriced external subagent turn; requires --max-cost-usd")
 
     p = sub.add_parser("grade")
     p.add_argument("manifest")

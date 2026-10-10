@@ -17,6 +17,7 @@ from spend_contracts import (
     SpendPlan,
     SpendPolicy,
     SpendStopReason,
+    SubagentTurnCall,
     UnpricedCall,
     price_measurement,
 )
@@ -126,3 +127,38 @@ class SpendContractTests(unittest.TestCase):
                 result = admission.run(self.call(), lambda: Priced("answer", Measurement.unavailable("missing")))
                 self.assertEqual(result.value, "answer")
             self.assertFalse(root.exists())
+
+    def test_subagent_turn_identity_round_trips_without_changing_answer_bytes(self):
+        answer = self.call()
+        self.assertEqual(json.dumps(answer.as_dict(), sort_keys=True, separators=(",", ":")),
+                         '{"coordinate":{"case_id":"case-1","run_number":1,"variant":"with_skill"},'
+                         '"kind":"answer","task_sha256":"sha256:' + "a" * 64 + '"}')
+        self.assertEqual(answer.call_id, "0400b704dc143723721d3e73986247cb739228e2ca0e7edb54ec684aed1cb39e")
+        call = SubagentTurnCall(answer.task_sha256, answer.coordinate, 2)
+        self.assertEqual(call.as_dict(), {"kind": "subagent_turn", "task_sha256": "sha256:" + "a" * 64,
+                                        "coordinate": {"case_id": "case-1", "variant": "with_skill", "run_number": 1},
+                                        "external_turn": 2})
+        ledger = SpendLedger.planned("a" * 32, SpendPolicy.from_raw("1"), SpendPlan((answer, call)))
+        ledger = ledger.transition(InFlight(call)).transition(Settled(call, ObservedCharge(Money.from_raw("0.2"), "provider_reported")))
+        self.assertEqual(SpendLedger.from_dict(ledger.as_dict()).as_dict(), ledger.as_dict())
+        for value in (0, -1, True, False, 1.0, "1", None):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "positive integer"):
+                SubagentTurnCall(answer.task_sha256, answer.coordinate, value)
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            SpendPlan((call, call))
+
+    def test_subagent_ledger_rejects_unknown_kind_invalid_turn_and_contradictory_id(self):
+        answer = self.call()
+        call = SubagentTurnCall(answer.task_sha256, answer.coordinate, 1)
+        ledger = SpendLedger.planned("a" * 32, SpendPolicy.from_raw("1"), SpendPlan((call,))).as_dict()
+        for field, value, message in (("kind", "subagent", "unsupported spend call kind"),
+                                      ("external_turn", True, "positive integer"),
+                                      ("external_turn", 0, "positive integer")):
+            raw = json.loads(json.dumps(ledger))
+            raw["calls"][0]["call"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, message):
+                SpendLedger.from_dict(raw)
+        raw = json.loads(json.dumps(ledger))
+        raw["calls"][0]["call_id"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "mismatched spend call identity"):
+            SpendLedger.from_dict(raw)

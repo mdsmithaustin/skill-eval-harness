@@ -11,11 +11,11 @@ from typing import Any, Generic, TypeVar
 
 from spend_contracts import (
     SPEND_LEDGER_NAME,
-    AnswerCall,
     InFlight,
     NoModelSpend,
     Refused,
     Settled,
+    SpendCall,
     SpendLedger,
     SpendPlan,
     SpendPolicy,
@@ -42,13 +42,13 @@ class Priced(Generic[T]):
 
 @dataclass(frozen=True)
 class Started(Generic[T]):
-    call: AnswerCall
+    call: SpendCall
     value: T
 
 
 @dataclass(frozen=True)
 class NotStarted:
-    call: AnswerCall
+    call: SpendCall
     reason: SpendStopReason
 
 
@@ -91,7 +91,7 @@ class SpendAdmission:
         finally:
             os.close(descriptor)
 
-    def run(self, call: AnswerCall, invoke: Callable[[], Priced[T]]) -> Started[T] | NotStarted:
+    def run(self, call: SpendCall, invoke: Callable[[], Priced[T]]) -> Started[T] | NotStarted:
         if self.ledger is None:
             return Started(call, invoke().value)
         refusal = self.ledger.refusal

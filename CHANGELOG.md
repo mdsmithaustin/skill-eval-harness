@@ -4,6 +4,8 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- `run-subagent` accepts a per-invocation `--max-cost-usd` ceiling and a labeled `--assumed-cost-per-run-usd` charge for each unpriced external turn. Paid errors retain safe dollars and actual process codes. Refused required turns record no process result or provider turn artifact. New incomplete conversation roots preserve started evidence and fail grading. Zero-start invocations preserve existing destination content. See [the subagent ceiling example](docs/limit-native-spend.md#subagent-external-turns).
+
 - Native answer spend receipts retain an observed provider charge when later workspace capture or cleanup fails. Settlement now persists before capture. Refused calls create no model workspace or baseline. Pricing or settlement exceptions skip capture and stop the command. Returned failure and timeout outcomes still retain workspace evidence.
 
 - Native serial answer commands accept a per-invocation `--max-cost-usd` admission ceiling and an optional `--assumed-cost-per-run-usd`. Durable invocation ledgers retain charges, unresolved calls, and refusals. Capped batches reject recovery before any provider call or runs-root write. See [the native spend walkthrough](docs/limit-native-spend.md).

@@ -238,10 +238,10 @@ hashed paths are the paths an agent lists. The judge's explore-surface digest fr
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract for ordinary rows. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11719`), Claude (`run_claude:11997`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11806`), Claude (`run_claude:12095`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:14886`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4269` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:15391`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:4278` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -250,12 +250,27 @@ observations plus optional traces rather than answer grades.
 Native answer backends return the frozen `Completed | TimedOut | SpawnFailed | ProviderFailed`
 union from `runner_contracts.py`. `OutcomeContext` validates provider, telemetry, and elapsed-time
 fields; `write_runner_outcome` exhaustively writes the ordinary disk contract.
+`OutcomeContext` extras cannot set the derived `cost_availability`, `observed_subtotal_usd`, or
+`cost_reason` fields. The publisher derives those fields from typed timeout cost
+evidence. Nested subagent rejection diagnostics retain their reported cost labels.
 Recovery rows use the separate lifecycle described above. A backend therefore cannot
 independently set timeout, return code, answer, and failure into a contradictory bag. The harness
 calls no model during default grading; it reads what the runner left behind. The explicit
 `--allow-scripts` and `--embed-cmd` modes may invoke caller-supplied external oracle subprocesses.
 
-`spend_contracts.py` owns an immutable native `AnswerCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` owns serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. Native runners retain workspace, subprocess, artifact, and recovery policy. Reports read each ledger without changing the immutable answer design. The [native spend walkthrough](limit-native-spend.md) describes the operator contract.
+`spend_contracts.py` owns an immutable `AnswerCall | SubagentTurnCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` owns serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. Native runners retain workspace, subprocess, artifact, and recovery policy. Reports read each ledger without changing the immutable answer design. The [native spend walkthrough](limit-native-spend.md) describes the operator contract.
+
+Subagent admission binds each required external callback turn to its prepared task digest, `RunCoordinate`, and positive turn number. The immutable plan uses the scripted `turns` list, or turn 1 for a single call. Provider-internal turn limits do not add calls. Built-in backends capture immutable reported dollars, scope, and actual process evidence before response validation. Accepted responses freeze recursively and thaw at the existing dictionary validators. Rejected responses retain safe dollars and raw envelopes in diagnostics. Multi-turn prices require explicit `turn_delta`. Cumulative or unspecified counters remain provider diagnostics. Assumptions remain in the ledger.
+
+Actual process timeouts make trustworthy captured dollars a subtotal rather than a whole-call price. Native Claude and subagent admission pass that floor through `Priced.observed_subtotal` to the existing settlement owner. Partial artifact labels preserve the observation without publishing a complete cost. Strict original UTF-8 and complete shell JSON protect shell capture. Claude price capture separately rejects ambiguous dollars or terminal stream structure while retaining its documented last-value-wins handling for unrelated stream keys. Invalid Claude token records become protocol-error records for runner publication. Their original provider bytes remain in the raw trace.
+
+`parse_claude_cli_json` isolates reported dollars without process facts. The shared
+`claude_cli_invoke` owner classifies them after observing the process. An actual timeout
+returns `cost_usd=None` and a nullable `observed_subtotal_usd`. Natural exits retain safe
+full dollars even when provider, answer, or token validation fails. Native answer and default
+subagent callers explicitly transfer the subtotal into their existing closed timeout evidence.
+
+`run_subagent_tasks` retains conversation, workspace, replay, and turn-artifact ownership. Settlement precedes artifact publication and final workspace capture. Each remaining refusal passes through `SpendAdmission.run` without invoking its callback, adding history, or writing a provider turn. The private subagent terminal types live beside the common transactional `write_runner_outcome` publisher. They bind refused or rejected call identities to the root and derive null return codes, absent process lifecycle, and false provider completeness. The process outcome union stays closed. Committed inventory completeness remains a separate reader observation. An invocation that starts no call preserves all prior destination content. A new started conversation replaces the root with its own incomplete result and current sidecars when required turns cannot run.
 
 The native answer loop lazily enters `captured_workspace` through an `ExitStack` inside the admitted callback. It returns the priced outcome and actual `WorkspaceAttestation` before workspace exit. `SpendAdmission.run` persists settlement before capture and cleanup, so later local errors preserve the charge. The writer consumes captured sidecars after workspace exit and before the changes directory closes. Exceptions from setup, invocation, pricing, or settlement skip capture while the workspace context cleans up. Returned failure, timeout, and spawn-failure outcomes still capture evidence.
 
@@ -328,7 +343,25 @@ supply or to a native `--judge-backend` (`claude`, `codex`, `gemini`, or `vibe`)
 both routes construct the frozen `judge_contracts.JudgeInvocation` boundary before any verdict
 parsing. It closes return code, output, immutable usage/cost telemetry, provenance, and model
 identity, so a newly registered backend cannot feed a dictionary-shaped partial contract into row
-assembly. `merge_repeated_judge_rows` majority-votes pass/fail and medians scores across repeats. The
+assembly. Its keyword-only `observed_subtotal_usd` requires actual `TIMED_OUT` state and code 124.
+It cannot coexist with full `cost_usd`, including zero. Timeout and spawn failure cannot carry full
+cost. Top-level metadata reserves `cost_usd`, `cost_normalized`, `cost_availability`,
+`observed_subtotal_usd`, `cost_reason`, `cost_aggregate`, `telemetry`, and process lifecycle fields.
+Construction and dataclass reconstruction enforce the same checks. Nested diagnostics remain
+legal and cannot supply canonical process or price facts.
+
+One recursive billed-leaf policy serves repeat and panel consensus, benchmark judge spend, and
+saved reporting. Parents carry derived `cost_aggregate` buckets and never add another charge.
+Two $0.06 timeout floors retain a partial USD subtotal of $0.12, zero whole-price observations,
+and two unavailable calls. Whole-price totals, ratios, and `verdicts_with_cost` exclude those floors.
+The saved reader validates scalar, normalized, and v3 prices before choosing a channel. It rejects
+contradictory timeout or parent price projections and competing membership paths. Completed legacy
+rows retain their supported price semantics. Repeat and panel parents regenerate their price
+channels from billed leaves and omit the inherited legacy scalar `cost`. Each completed member
+keeps its original `cost` evidence. Incompatible bases and currencies retain their
+reasons without reviving rejected sums or converting money.
+
+`merge_repeated_judge_rows` majority-votes pass/fail and medians scores across repeats. The
 harness picks no model. At the result boundary, `judge_verdict.py` parses one strict variant:
 boolean, scored, dimension-scored, dynamic-rubric, or consensus. Pass is derived from the typed
 payload; duplicate IDs and contradictory score/threshold/pass rows are rejected. The serialized
@@ -438,7 +471,7 @@ by domain, difficulty, trigger type, and success goal. Case flags mark saturated
 flaky, and with-skill-failed cases, and `effect_estimates.ceiling_or_floor` separates the two
 ways a case stops discriminating: both arms always pass (ceiling) or both always fail (floor, which
 `suggest-cases` never offers for hardening). These flags, the leakage lint
-(`prompt_assertion_leakage_findings:963`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:972`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as

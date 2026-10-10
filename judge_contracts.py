@@ -16,6 +16,11 @@ from json_contracts import freeze_json_mapping, validate_json_text
 
 JudgeUsageSource = Literal["provider_reported", "trace_normalized"]
 JUDGE_USAGE_SOURCES = frozenset({"provider_reported", "trace_normalized"})
+JUDGE_METADATA_RESERVED_FIELDS = frozenset({
+    "cost_usd", "cost_normalized", "cost_availability", "observed_subtotal_usd",
+    "cost_reason", "cost_aggregate", "telemetry", "returncode", "timed_out",
+    "invocation_state", "provider_error",
+})
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,7 @@ class JudgeInvocation:
     model_label: str | None = None
     raw_response: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    observed_subtotal_usd: float | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.stdout, str) or not isinstance(self.stderr, str):
@@ -64,15 +70,24 @@ class JudgeInvocation:
             validate_json_text(self.raw_response, "judge raw_response")
         if not isinstance(self.metadata, Mapping):
             raise TypeError("judge metadata must be a mapping")
+        reserved = JUDGE_METADATA_RESERVED_FIELDS.intersection(self.metadata)
+        if reserved:
+            raise ValueError(f"judge metadata contains reserved fields: {sorted(reserved)}")
         object.__setattr__(self, "metadata", freeze_json_mapping(
             self.metadata, "judge metadata"))
-        if self.cost_usd is not None:
-            telemetry.finite_nonnegative(self.cost_usd, "judge cost_usd")
-            try:
-                object.__setattr__(self, "cost_usd", float(self.cost_usd))
-            except OverflowError as exc:
-                raise ValueError(
-                    "judge cost_usd must be finite and non-negative") from exc
+        for key in ("cost_usd", "observed_subtotal_usd"):
+            value = getattr(self, key)
+            if value is not None:
+                telemetry.finite_nonnegative(value, f"judge {key}")
+                object.__setattr__(self, key, float(value))
+        if self.cost_usd is not None and self.observed_subtotal_usd is not None:
+            raise ValueError("judge full cost and observed subtotal cannot coexist")
+        if self.cost_usd is not None and self.invocation_state in {
+                InvocationState.TIMED_OUT, InvocationState.SPAWN_FAILED}:
+            raise ValueError("judge full cost requires a naturally exited process")
+        if self.observed_subtotal_usd is not None and (
+                self.invocation_state is not InvocationState.TIMED_OUT or self.returncode != 124):
+            raise ValueError("judge observed subtotal requires an actual timeout with code 124")
         if self.usage is not None:
             if not isinstance(self.usage, Mapping):
                 raise TypeError("judge usage must be a mapping or None")
