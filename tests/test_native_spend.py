@@ -1,6 +1,7 @@
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -61,6 +62,41 @@ sys.exit({returncode})
             self.assertEqual([item["state"] for item in ledger["calls"]],
                              ["settled", "not_started"])
             self.assertIn("spend-ceiling.json", stdout)
+
+    def test_unavailable_directory_sync_does_not_block_admission(self):
+        for unavailable in ("open", "fsync"):
+            with self.subTest(unavailable=unavailable), tempfile.TemporaryDirectory() as td:
+                _, tasks, runs, marker, stub, _, _ = self.setup_batch(Path(td))
+                original_open, original_fsync = os.open, os.fsync
+
+                def open_file(path, flags, *args, mode=unavailable, real_open=original_open,
+                              spend_root=runs / "spend", **kwargs):
+                    if mode == "open" and isinstance(path, Path) and path.parent == spend_root:
+                        raise PermissionError("directory descriptors unavailable")
+                    return real_open(path, flags, *args, **kwargs)
+
+                def sync_file(descriptor, mode=unavailable, real_fsync=original_fsync):
+                    if mode == "fsync" and stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                        raise OSError("directory fsync unavailable")
+                    return real_fsync(descriptor)
+
+                with mock.patch("spend_runtime.os.open", side_effect=open_file), \
+                        mock.patch("spend_runtime.os.fsync", side_effect=sync_file):
+                    code, _, stderr = self.invoke(tasks, runs, stub, "--max-cost-usd", "0.5")
+                self.assertEqual(code, 2, stderr)
+                self.assertEqual(marker.read_text(), "started\n")
+                self.assertEqual(self.ledgers(runs)[0]["spent_usd"], "0.6")
+
+    def test_file_sync_and_replace_failure_never_start_a_child(self):
+        for operation in ("fsync", "replace"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as td:
+                _, tasks, runs, marker, stub, _, _ = self.setup_batch(Path(td))
+                code, _, stderr = self.invoke(tasks, runs, stub, "--max-cost-usd", "0")
+                self.assertEqual(code, 2, stderr)
+                with mock.patch(f"spend_runtime.os.{operation}", side_effect=OSError("file publication failed")):
+                    with self.assertRaisesRegex(OSError, "file publication failed"):
+                        self.invoke(tasks, runs, stub, "--max-cost-usd", "0.5")
+                self.assertFalse(marker.exists())
 
     def test_zero_starts_no_child_and_preserves_the_plan(self):
         with tempfile.TemporaryDirectory() as td:

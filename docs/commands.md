@@ -169,7 +169,7 @@ Every invocation also appends `--setting-sources project --strict-mcp-config --s
 
 A backend that declares missing dollars requires an assumption before a paid start. A zero ceiling starts no calls. An unexpected missing price closes later admission unless an assumption applies. Charges distinguish observed dollars, labeled assumptions, unknown prices, and proven nonbillable calls. Assumptions cannot be below an observed subtotal.
 
-Ledgers live at `runs/spend/<invocation-id>/spend-ceiling.json`. Admission is durable before dispatch. Unresolved calls remain partial evidence after interruption. A second invocation creates a new ledger and a fresh ceiling. `benchmark` and `cost-summary` include each ledger in `spend_invocations`, separate from artifact-derived grades and model cost totals. The immutable answer design remains unchanged.
+Ledgers live at `runs/spend/<invocation-id>/spend-ceiling.json`. Before dispatch, the harness flushes and syncs the ledger file, then atomically replaces the snapshot. It also syncs the directory where the platform supports it. Unresolved calls remain partial evidence after interruption. A second invocation creates a new ledger and a fresh ceiling. `benchmark` and `cost-summary` include each ledger in `spend_invocations`, separate from artifact-derived grades and model cost totals. The immutable answer design remains unchanged.
 
 A capped batch containing a recovery row rejects before any provider call or runs-root write, including ordinary rows before that recovery row. Uncapped recovery retains its existing behavior. Other execution commands retain their current policies. See [the offline native spend walkthrough](limit-native-spend.md).
 

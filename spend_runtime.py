@@ -80,9 +80,14 @@ class SpendAdmission:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, self.path)
-        descriptor = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            descriptor = os.open(self.path.parent, os.O_RDONLY)
+        except OSError:
+            return
         try:
             os.fsync(descriptor)
+        except OSError:
+            pass
         finally:
             os.close(descriptor)
 
