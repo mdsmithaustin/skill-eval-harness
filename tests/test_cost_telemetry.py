@@ -768,5 +768,146 @@ class SuiteBudgetGateTests(unittest.TestCase):
         self.assertEqual(sb.suite_cost_estimate(scope)["rows"], 40)
 
 
+class JudgePriceTests(unittest.TestCase):
+    def floor(self, amount=0.06, model="a"):
+        return {"judge_task_id": "c::with_skill::run-1::j", "judge_model": model,
+                "judge_input_sha256": "same-input", "passed": False,
+                "returncode": 124, "invocation_state": "timed_out", "timed_out": True,
+                "judge_observation_complete": False, "availability": "partial",
+                "cost_usd": None, "cost_normalized": {"source": "missing"},
+                "cost_availability": "partial", "observed_subtotal_usd": amount,
+                "cost_reason": "process_timeout"}
+
+    def whole(self, amount=0.03, model="a", currency="USD"):
+        row = self.floor(model=model)
+        for key in ("observed_subtotal_usd", "cost_availability", "cost_reason"):
+            row.pop(key)
+        row.update(returncode=0, invocation_state="complete", timed_out=False,
+                   judge_observation_complete=True, availability="complete", passed=True,
+                   cost_usd=amount if currency == "USD" else None,
+                   cost_normalized={"source": "provider_reported", "currency": currency,
+                                    "total_cost": amount})
+        return row
+
+    def assert_partial(self, row, amount, observed, unavailable):
+        self.assertIsNone(row["cost_usd"])
+        self.assertEqual(row["cost_normalized"], {"source": "missing"})
+        self.assertNotIn("observed_subtotal_usd", row)
+        self.assertEqual(row["cost_aggregate"]["USD"], {
+            "availability": "partial", "known_subtotal": amount,
+            "observed_count": observed, "unavailable_count": unavailable,
+            "not_applicable_count": 0, "reason_counts": {"process_timeout": unavailable}})
+
+    def test_repeat_panel_and_saved_report_preserve_each_floor(self):
+        for merge in (sb.merge_repeated_judge_rows, sb.merge_cross_judge_rows):
+            with self.subTest(merge=merge.__name__):
+                members = [self.floor(), self.floor(model="b")]
+                row = merge(members)
+                self.assert_partial(row, "0.12", 0, 2)
+                self.assertFalse(row["judge_observation_complete"])
+                for member in members:
+                    self.assertEqual(member["observed_subtotal_usd"], 0.06)
+                    self.assertIsNone(member["cost_usd"])
+                    self.assertEqual(member["returncode"], 124)
+                    self.assertEqual(member["invocation_state"], "timed_out")
+                with tempfile.TemporaryDirectory() as td:
+                    path = Path(td) / "judge.jsonl"
+                    path.write_text(json.dumps(row) + "\n")
+                    loaded = sb.load_judge_results(str(path))
+                report = sb.judge_cost_block(loaded)
+                self.assertEqual(report["billed_calls"], 2)
+                self.assertEqual(report["verdicts_with_cost"], 0)
+                self.assertIsNone(report["total_cost_usd"])
+                self.assertEqual(report["known_total_cost_usd"], 0.12)
+                self.assertEqual(report["total_cost_usd_aggregate"], row["cost_aggregate"]["USD"])
+
+    def test_mixed_complete_price_and_floor_are_partial(self):
+        row = sb.merge_repeated_judge_rows([self.whole(), self.floor()])
+        self.assert_partial(row, "0.09", 1, 1)
+        report = sb.judge_cost_block({"j": row})
+        self.assertEqual(report["verdicts_with_cost"], 1)
+        self.assertEqual(report["known_total_cost_usd"], 0.09)
+        self.assertIsNone(report["total_cost_usd"])
+
+    def test_zero_floor_is_evidence_and_missing_floor_is_not_zero(self):
+        row = sb.merge_repeated_judge_rows([self.floor(0), self.floor(0)])
+        self.assert_partial(row, "0.0", 0, 2)
+        absent = self.floor()
+        absent.pop("observed_subtotal_usd")
+        absent["cost_availability"] = "unavailable"
+        report = sb.judge_cost_block({"j": absent})
+        self.assertEqual(report["total_cost_usd_availability"], "unavailable")
+        self.assertNotIn("known_total_cost_usd", report)
+
+    def test_nested_consensus_counts_leaves_once(self):
+        repeats = [sb.merge_repeated_judge_rows([self.floor(model=model), self.floor(model=model)])
+                   for model in ("a", "b")]
+        panel = sb.merge_cross_judge_rows(repeats)
+        self.assertNotIn("judge_runs", panel)
+        self.assert_partial(panel, "0.24", 0, 4)
+        report = sb.judge_cost_block({"j": panel})
+        self.assertEqual(report["billed_calls"], 4)
+        self.assertEqual(report["known_total_cost_usd"], 0.24)
+        outer = sb.merge_repeated_judge_rows([panel, panel])
+        self.assertNotIn("judge_panel", outer)
+        self.assertEqual(sb.judge_cost_block({"j": outer})["billed_calls"], 8)
+
+    def test_saved_price_channels_cannot_contradict_the_floor(self):
+        v3 = sb.telemetry_domain.Measurement.available(
+            sb.telemetry_domain.Money.from_raw(0.06), provenance="provider_reported").to_dict()
+        invalid = (
+            {"cost_usd": 0.06}, {"cost_usd": 0},
+            {"cost_normalized": {"source": "provider_reported", "total_cost": 0.06}},
+            {"telemetry": {"schema_version": 3, "measurements": {"cost": v3}}},
+            {"invocation_state": "process_failed"}, {"returncode": 0},
+            {"timed_out": False}, {"observed_subtotal_usd": True},
+            {"observed_subtotal_usd": 10 ** 400}, {"cost_availability": "complete"},
+        )
+        for override in invalid:
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as td:
+                path = Path(td) / "judge.jsonl"
+                path.write_text(json.dumps({**self.floor(), **override}) + "\n")
+                with self.assertRaisesRegex(SystemExit, "judge.*cost|judge.*price|judge.*subtotal"):
+                    sb.load_judge_results(str(path))
+
+    def test_saved_parents_reject_stale_or_competing_price_projections(self):
+        members = [self.floor(), self.floor(model="b")]
+        parent = {"judge_task_id": members[0]["judge_task_id"], "passed": False,
+                  "judge_runs": members}
+        invalid = (
+            {"cost_usd": 0.12}, {"observed_subtotal_usd": 0.06},
+            {"cost_aggregate": {"USD": {"availability": "complete", "value": "0.12"}}},
+            {"judge_panel": members},
+        )
+        for override in invalid:
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as td:
+                path = Path(td) / "judge.jsonl"
+                path.write_text(json.dumps({**parent, **override}) + "\n")
+                with self.assertRaisesRegex(SystemExit, "judge.*cost|judge.*price|judge.*membership"):
+                    sb.load_judge_results(str(path))
+        report = sb.judge_cost_block({"j": parent})
+        self.assertEqual(report["known_total_cost_usd"], 0.12)
+
+    def test_incompatible_bases_keep_only_eligible_floor_and_validated_counts(self):
+        a, b = self.whole(model="a"), self.whole(model="b")
+        b["billing_scope"] = "conversation"
+        row = sb.merge_cross_judge_rows([a, b, self.floor(model="c")])
+        bucket = row["cost_aggregate"]["USD"]
+        self.assertEqual(bucket["availability"], "partial")
+        self.assertEqual(bucket["known_subtotal"], "0.06")
+        self.assertEqual(bucket["observed_count"], 2)
+        self.assertEqual(bucket["unavailable_count"], 1)
+        self.assertEqual(bucket["reason_counts"]["basis_mismatch"], 2)
+        self.assertIsNone(row["cost_usd"])
+
+    def test_foreign_currency_never_becomes_complete_usd(self):
+        row = sb.merge_cross_judge_rows([self.whole(currency="EUR"), self.floor(model="b")])
+        self.assertIsNone(row["cost_usd"])
+        report = sb.judge_cost_block({"j": row})
+        self.assertEqual(report["total_cost_usd_availability"], "partial")
+        self.assertEqual(report["known_total_cost_usd"], 0.06)
+        self.assertEqual(report["total_cost_usd_aggregate"]["reason_counts"]["currency_mismatch"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

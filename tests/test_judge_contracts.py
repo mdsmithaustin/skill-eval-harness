@@ -3,13 +3,64 @@ from __future__ import annotations
 
 import math
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import judge_contracts as jc
 from invocation_contracts import InvocationState
 
 
 class JudgeInvocationTests(unittest.TestCase):
+    def test_timeout_floor_is_keyword_only_and_preserves_actual_lifecycle(self):
+        invocation = jc.JudgeInvocation(
+            "", "", 124, InvocationState.TIMED_OUT,
+            observed_subtotal_usd=0.06)
+        self.assertEqual(invocation.observed_subtotal_usd, 0.06)
+        self.assertIsNone(invocation.cost_usd)
+        self.assertEqual(invocation.returncode, 124)
+        self.assertFalse(invocation.succeeded)
+
+    def test_price_requires_a_compatible_actual_process(self):
+        for state, code, overrides in (
+            (InvocationState.TIMED_OUT, 124, {"cost_usd": 0.06}),
+            (InvocationState.SPAWN_FAILED, 127, {"cost_usd": 0.06}),
+            (InvocationState.COMPLETE, 0, {"observed_subtotal_usd": 0.06}),
+            (InvocationState.PROCESS_FAILED, 124, {"observed_subtotal_usd": 0.06}),
+            (InvocationState.TIMED_OUT, 124, {"cost_usd": 0, "observed_subtotal_usd": 0}),
+        ):
+            with self.subTest(state=state, overrides=overrides):
+                with self.assertRaises(ValueError):
+                    jc.JudgeInvocation("", "", code, state, **overrides)
+        for state, code, error in (
+            (InvocationState.PROCESS_FAILED, 7, None),
+            (InvocationState.PROVIDER_FAILED, 0, "provider failed"),
+        ):
+            invocation = jc.JudgeInvocation(
+                "", "", code, state, provider_error=error, cost_usd=0.06)
+            self.assertEqual(invocation.cost_usd, 0.06)
+
+    def test_timeout_floor_rejects_invalid_and_overflowing_amounts(self):
+        for amount in (True, -0.01, math.inf, math.nan, 10 ** 400):
+            with self.subTest(amount=amount), self.assertRaises(ValueError):
+                jc.JudgeInvocation("", "", 124, InvocationState.TIMED_OUT,
+                                   observed_subtotal_usd=amount)
+        invocation = jc.JudgeInvocation("", "", 124, InvocationState.TIMED_OUT,
+                                        observed_subtotal_usd=0)
+        self.assertEqual(invocation.observed_subtotal_usd, 0)
+
+    def test_metadata_cannot_construct_or_reconstruct_price_fields(self):
+        invocation = jc.JudgeInvocation("{}", "", 0, InvocationState.COMPLETE)
+        for key in ("cost_usd", "cost_normalized", "cost_availability",
+                    "observed_subtotal_usd", "cost_reason", "cost_aggregate", "telemetry"):
+            for constructor in (
+                lambda metadata: jc.JudgeInvocation("{}", "", 0, InvocationState.COMPLETE,
+                                                      metadata=metadata),
+                lambda metadata: replace(invocation, metadata=metadata),
+            ):
+                with self.subTest(key=key), self.assertRaisesRegex(ValueError, "reserved"):
+                    constructor({key: 0.06})
+        nested = replace(invocation, metadata={"diagnostic": {"observed_subtotal_usd": 0.06}})
+        self.assertEqual(nested.metadata["diagnostic"]["observed_subtotal_usd"], 0.06)
+
     def test_valid_invocation_is_frozen_recursively(self):
         invocation = jc.JudgeInvocation(
             stdout='{"passed":true}',

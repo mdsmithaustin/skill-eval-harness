@@ -13,6 +13,24 @@ import skill_benchmark as sb
 
 
 class CapturedPriceTests(unittest.TestCase):
+    def test_shared_claude_timeout_names_the_floor_and_judge_retains_it(self):
+        raw = b'{"type":"result","result":"candidate","total_cost_usd":0.06}'
+        with mock.patch("skill_benchmark.subprocess.run", side_effect=
+                        subprocess.TimeoutExpired("claude", 1, output=raw)):
+            result = sb.claude_cli_invoke("prompt", isolation=sb.ContextIsolation.SEALED,
+                                          timeout=1)
+        self.assertIsNone(result["cost_usd"])
+        self.assertEqual(result["observed_subtotal_usd"], 0.06)
+        self.assertEqual(result["returncode"], 124)
+        self.assertTrue(result["timed_out"])
+        with mock.patch.object(sb, "claude_cli_invoke", return_value=result):
+            invocation = sb.claude_judge_invoke(
+                "prompt", judge_model="fixture", claude_bin="claude",
+                assertion_schema={"type": "object"}, extra_args=None, explore_hint=None)
+        self.assertIsNone(invocation.cost_usd)
+        self.assertEqual(invocation.observed_subtotal_usd, 0.06)
+        self.assertEqual(invocation.invocation_state, sb.InvocationState.TIMED_OUT)
+
     def shell_timeout(self, stdout, *, requires_delta=False):
         backend = sb.shell_agent_backend("agent", timeout=1)
         with mock.patch("skill_benchmark.subprocess.run", side_effect=
