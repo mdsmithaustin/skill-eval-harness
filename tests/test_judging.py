@@ -74,6 +74,77 @@ class JudgeObservationTests(unittest.TestCase):
             path.write_text(json.dumps(row), encoding="utf-8")
             return sb.load_judge_results(str(path))["task"]
 
+    def groups(self):
+        repeats = sb.merge_repeated_judge_rows([self.leaf(), self.leaf(repeat=2)])
+        panel = sb.merge_cross_judge_rows([self.leaf(), self.leaf(model="b")])
+        nested = sb.merge_cross_judge_rows([repeats, sb.merge_repeated_judge_rows([
+            self.leaf(model="b"), self.leaf(model="b", repeat=2)])])
+        return repeats, panel, nested
+
+    def legacy(self, row):
+        out = copy.deepcopy(row)
+        out.pop("judge_observation_kind", None)
+        out.pop("judge_aggregate_summary", None)
+        for key in ("judge_runs", "judge_panel"):
+            if key in out:
+                out[key] = [self.legacy(child) for child in out[key]]
+        return out
+
+    def test_saved_historical_aggregate_status_defers_with_stable_literal_causes(self):
+        cases = (("absent", None, "judge aggregate summary returncode is absent"),
+                 ("null", None, "judge aggregate summary returncode is null"),
+                 ("integer", 1, "judge aggregate summary returncode is nonzero (1)"),
+                 ("integer", -1, "judge aggregate summary returncode is nonzero (-1)"),
+                 ("malformed-scalar", False, "judge aggregate summary returncode is noninteger (boolean)"),
+                 ("malformed-scalar", True, "judge aggregate summary returncode is noninteger (boolean)"),
+                 ("malformed-scalar", 0.0, "judge aggregate summary returncode is noninteger (number)"),
+                 ("malformed-scalar", 0.5, "judge aggregate summary returncode is noninteger (number)"),
+                 ("malformed-scalar", 1.0, "judge aggregate summary returncode is noninteger (number)"),
+                 ("malformed-scalar", "0", "judge aggregate summary returncode is noninteger (string)"))
+        for group in self.groups():
+            key = "judge_runs" if "judge_runs" in group else "judge_panel"
+            for kind, value, reason in cases:
+                with self.subTest(population=key, kind=kind, value=value):
+                    raw = self.legacy(group)
+                    if kind == "absent":
+                        del raw["returncode"]
+                    else:
+                        raw["returncode"] = value
+                    loaded = self.load(raw)
+                    self.assertEqual(sb.judge_observation_incomplete_reason(loaded), reason)
+                    self.assertEqual((loaded["passed"], loaded["judge_observation_complete"], loaded["returncode"]),
+                                     (False, False, 1))
+                    self.assertEqual(len(loaded[key]), 2)
+                    self.assertNotIn("score", loaded)
+                    self.assertNotIn("agreement", loaded)
+                    status = {"kind": kind}
+                    if kind in {"integer", "malformed-scalar"}:
+                        status["value"] = value
+                    self.assertEqual(loaded["judge_aggregate_summary"],
+                                     {"version": 1, "kind": "saved", "status": status})
+                    frozen = json.dumps(loaded, sort_keys=True)
+                    for _ in range(5):
+                        loaded = self.load(loaded)
+                        self.assertEqual(json.dumps(loaded, sort_keys=True), frozen)
+                        self.assertEqual(sb.judge_observation_incomplete_reason(loaded), reason)
+                        if "value" in status:
+                            self.assertIs(type(loaded["judge_aggregate_summary"]["status"]["value"]), type(value))
+
+    def test_saved_fresh_group_status_requires_actual_integer_for_complete_and_missing(self):
+        for group in self.groups():
+            for missing, values in ((False, (False, 0.0)), (True, (True, 1.0))):
+                raw = copy.deepcopy(group)
+                raw.pop("judge_aggregate_summary", None)
+                if missing:
+                    raw.update(passed=False, judge_observation_kind="missing", judge_observation_complete=False,
+                               availability="partial", returncode=1)
+                    raw.pop("agreement")
+                self.assertEqual(self.load(raw)["returncode"], 1 if missing else 0)
+                for value in values:
+                    with self.subTest(missing=missing, value=value, population=list(group)):
+                        assert_dies(self, lambda raw=raw, value=value: self.load({**raw, "returncode": value}),
+                                    "judge aggregate returncode must be an integer")
+
     def test_incomplete_mixed_population_retains_all_kinds_in_both_orders(self):
         for panel in (False, True):
             for reverse in (False, True):
