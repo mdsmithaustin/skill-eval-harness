@@ -490,15 +490,24 @@ complete-price estimates or ratios.
 
 ### Repeated judges and panels
 
-`--judge-runs N` judges each task N times with one judge; `--judge-panel MODEL` (repeat it for two or more models) judges each task once per model. Both fold the member verdicts with one rule, `judge_verdict.resolve_consensus`: a strict majority passes, `--quorum K` (panels only; `judge` refuses it without a panel of two or more judges) passes on K passing members instead, and an exact tie without quorum is decided by the median score when a score and an explicit numeric threshold are available. The tie passes when the median is `>= threshold` and resolves as failure below that threshold. A tie lacking either fails with `unresolved: true`. Each merged row carries an `agreement` block, `{concur, n, concur_fraction, unanimous, unresolved, quorum}`, so a judge that disagrees with itself on identical input shows up per task. `quorum` records the configured minimum number of passing members, or `null` for majority consensus; `concur` records the observed passing-member count. Calibration excludes older panel rows without a recorded quorum because their decision rule cannot be established. Repeated-judge rows can establish majority consensus from their recorded members without that field. A verdict field set to `null` reads as absent unless the verdict schema requires it. Grading keeps a merged row's own pass, also under `atLeast` and `score_scale`, rather than re-deciding it from the median score; the member verdicts stay under `judge_runs` (repeats) or `judge_panel` (panel).
+`--judge-runs N` judges each task N times with one judge; `--judge-panel MODEL` (repeat it for two or more models) judges each task once per model. Both fold the member verdicts with one rule, `judge_verdict.resolve_consensus`: a strict majority passes, `--quorum K` (panels only; `judge` refuses it without a panel of two or more judges) passes on K passing members instead, and an exact tie without quorum is decided by the median score when a score and an explicit numeric threshold are available. The tie passes when the median is `>= threshold` and resolves as failure below that threshold. A tie lacking either fails with `unresolved: true`. Each complete merged row carries an `agreement` block, `{concur, n, concur_fraction, unanimous, unresolved, quorum}`, so a judge that disagrees with itself on identical input shows up per task. `quorum` records the configured minimum number of passing members, or `null` for majority consensus; `concur` records the observed passing-member count. Calibration excludes older panel rows without a recorded quorum because their decision rule cannot be established. Repeated-judge rows can establish majority consensus from their recorded members without that field. A verdict field set to `null` reads as absent unless the verdict schema requires it. Grading keeps a merged row's own pass, also under `atLeast` and `score_scale`, rather than re-deciding it from the median score; the member verdicts stay under `judge_runs` (repeats) or `judge_panel` (panel).
 
 `judge --max-cost-usd` admits only calls whose evidence guards pass. The complete ready plan is
 fixed before the first native or shell launch. `--assumed-cost-per-run-usd` labels ledger charges
 for unpriced calls. Ready shell, Codex, Gemini, and Vibe calls require an assumption at a positive
 ceiling. A zero ceiling and all-guarded work need none. Refused rows keep every requested repeat
 and panel member, effective input hashes, and a `spend_refusal_reason`, without a process return
-code. Any refusal or partial unpriced ledger exits 2. Settlement preserves observed dollars
+code. An incomplete observation or partial unpriced ledger exits 2. Settlement preserves observed dollars
 before verdict parsing or transcript errors. See [the judge ceiling example](limit-native-spend.md#judge-calls).
+
+An incomplete repeat or panel retains its full population without an aggregate score or agreement.
+Missing observations serialize the exact false `consensus` shell with `judge_observation_kind:
+missing`; this shell cannot vote or establish a behavioral failure. Partial paid observations keep
+their canonical verdict. Saved readers validate every child, including below an incomplete parent,
+and replay fresh consensus against its recorded threshold and quorum. Historical rows retain
+unstored labels and policy as unknown. Complete saved per-step groups validate the criterion names,
+minimum, and trajectory binding of every leaf, then keep the parent's consensus pass and median.
+See [the observation and count contracts](abstractions.md#judge-plumbing) for count coverage.
 
 
 ## Audit manifest quality

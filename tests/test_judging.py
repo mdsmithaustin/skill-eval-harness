@@ -6,6 +6,7 @@ test_cbc) and test_skill_benchmark, which accreted by merge rather than by
 subject; docstrings citing finding/roadmap ids are preserved.
 """
 import contextlib
+import copy
 import json
 import os
 import stat
@@ -17,9 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import (
-    demo_manifest as base_manifest,
-)
-from helpers import (
+    assert_dies,
     file_judge_cmd,
     judge_result,
     judge_task,
@@ -32,6 +31,9 @@ from helpers import (
     write_run,
 )
 from helpers import (
+    demo_manifest as base_manifest,
+)
+from helpers import (
     write_demo_manifest as write_manifest,
 )
 
@@ -39,8 +41,176 @@ import judge_contracts as jc
 import judge_verdict as jv
 import skill_benchmark as sb
 from manifest_contracts import RunNumber
+from spend_contracts import JudgeCall
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class JudgeObservationTests(unittest.TestCase):
+    def leaf(self, kind="boolean", *, model="a", repeat=1, missing=False):
+        call = JudgeCall("task", "sha256:" + "a" * 64, "claude", model, repeat)
+        row = {"judge_task_id": "task", "judge_model": model, "judge_backend": "claude",
+               "judge_repeat": repeat, "judge_requested_model": model, "spend_call_id": call.call_id,
+               "judge_input_sha256": call.judge_input_sha256, "judge_prompt_sha256": "b" * 64,
+               "judge_evidence_mode": "text-only", "judge_observation_kind": "complete",
+               "judge_observation_complete": True, "availability": "complete",
+               "judge_execution_kind": "process", "invocation_state": "complete", "returncode": 0,
+               "timed_out": False, "verdict_kind": kind, "passed": True,
+               "cost_usd": 0.03, "cost_normalized": sb.normalize_cost(0.03)}
+        if kind == "scored":
+            row.update(score=0.9, threshold=0.5)
+        if missing:
+            for name in ("score", "threshold", "returncode", "timed_out"):
+                row.pop(name, None)
+            row.update(verdict_kind="consensus", passed=False, judge_observation_kind="missing",
+                       judge_observation_complete=False, availability="partial",
+                       judge_execution_kind="not_started", invocation_state="not_started",
+                       cost_usd=None, cost_normalized={"source": "not_applicable"})
+        return row
+
+    def load(self, row):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "result.json"
+            path.write_text(json.dumps(row), encoding="utf-8")
+            return sb.load_judge_results(str(path))["task"]
+
+    def test_incomplete_mixed_population_retains_all_kinds_in_both_orders(self):
+        for panel in (False, True):
+            for reverse in (False, True):
+                rows = [self.leaf(), self.leaf("scored", model="b" if panel else "a", repeat=2),
+                        self.leaf(model="c" if panel else "a", repeat=3, missing=True)]
+                if reverse:
+                    rows.reverse()
+                merge = sb.merge_cross_judge_rows if panel else sb.merge_repeated_judge_rows
+                out = merge(rows)
+                members = out["judge_panel" if panel else "judge_runs"]
+                self.assertEqual(len(members), 3)
+                self.assertEqual([row["verdict_kind"] for row in members], [row["verdict_kind"] for row in rows])
+                self.assertEqual(out["judge_observation_kind"], "missing")
+                self.assertFalse(out["passed"])
+                self.assertNotIn("score", out)
+                self.assertNotIn("agreement", out)
+                self.assertTrue(any("incompatible" in item["reason"] for item in out["incomplete_judge_members"]))
+                self.assertEqual(self.load(out), out)
+
+    def test_complete_mixed_kinds_reject_at_both_fold_levels(self):
+        for panel in (False, True):
+            rows = [self.leaf(), self.leaf("scored", model="b" if panel else "a", repeat=2)]
+            merge = sb.merge_cross_judge_rows if panel else sb.merge_repeated_judge_rows
+            with self.assertRaisesRegex(ValueError, "verdict kind"):
+                merge(rows)
+
+    def test_complete_subgroup_beside_missing_leaf_retains_the_full_panel(self):
+        complete = sb.merge_repeated_judge_rows([self.leaf("scored"), self.leaf("scored", repeat=2)])
+        out = sb.merge_cross_judge_rows([complete, self.leaf(model="b", missing=True)])
+        self.assertEqual([member["judge_observation_kind"] for member in out["judge_panel"]], ["complete", "missing"])
+        self.assertEqual(len(out["judge_panel"][0]["judge_runs"]), 2)
+        self.assertNotIn("score", out)
+        self.assertEqual(self.load(out), out)
+        complete["cost_usd"] = 9
+        with self.assertRaisesRegex(ValueError, "cost channels contradict"):
+            sb.merge_cross_judge_rows([complete, self.leaf(model="b", missing=True)])
+
+    def test_partial_paid_polarity_and_price_survive_load_and_fold(self):
+        paid = self.leaf("scored")
+        paid.update(judge_observation_kind="partial", judge_observation_complete=False, availability="partial",
+                    invocation_state="timed_out", returncode=124, timed_out=True, cost_usd=None,
+                    cost_normalized={"source": "missing"}, cost_availability="partial",
+                    observed_subtotal_usd=0.03, cost_reason="process_timeout")
+        loaded = self.load(paid)
+        self.assertEqual((loaded["passed"], loaded["score"], loaded["threshold"]), (True, 0.9, 0.5))
+        merged = sb.merge_repeated_judge_rows([loaded, self.leaf(repeat=2, missing=True)])
+        self.assertEqual(merged["judge_runs"][0]["score"], 0.9)
+        self.assertEqual(merged["cost_aggregate"]["USD"]["known_subtotal"], "0.03")
+        self.assertNotIn("agreement", merged)
+
+    def test_invalid_children_cannot_hide_below_missing_parent(self):
+        out = sb.merge_repeated_judge_rows([self.leaf("scored"), self.leaf(repeat=2, missing=True)])
+        out["judge_runs"][0]["passed"] = False
+        assert_dies(self, lambda: self.load(out), "passed contradicts score and threshold")
+
+    def test_missing_shell_and_no_call_facts_are_exact(self):
+        for mutation, reason in (({"score": 0}, "exact consensus false shell"),
+                                 ({"passed": True}, "exact consensus false shell"),
+                                 ({"returncode": 0}, "cannot carry process code"),
+                                 ({"judge_served_model": "served"}, "cannot carry process code"),
+                                 ({"availability": "complete"}, "contradicts completeness")):
+            with self.subTest(mutation=mutation):
+                assert_dies(self, lambda mutation=mutation: self.load({**self.leaf(missing=True), **mutation}), reason)
+
+    def test_fresh_requested_identity_cannot_be_relabelled(self):
+        for name, value in (("judge_requested_model", "other"), ("judge_repeat", 2),
+                            ("judge_backend", "codex"), ("judge_input_sha256", "sha256:" + "c" * 64)):
+            with self.subTest(name=name):
+                assert_dies(self, lambda name=name, value=value: self.load({**self.leaf(), name: value}), "call identity contradicts")
+
+    def test_fresh_parent_population_and_policy_are_verified(self):
+        out = sb.merge_repeated_judge_rows([self.leaf("scored"), self.leaf("scored", repeat=2)])
+        self.assertEqual(self.load(out), out)
+        self.assertNotIn("spend_call_id", out)
+        self.assertNotIn("invocation_state", out)
+        self.assertNotIn("judge_repeat", out)
+        for name, value, reason in (("passed", False, "consensus contradicts"),
+                                    ("score", 0.1, "consensus contradicts"),
+                                    ("judge_expected_repeats", 3, "expected count"),
+                                    ("invocation_state", "complete", "leaf execution facts")):
+            with self.subTest(name=name):
+                assert_dies(self, lambda name=name, value=value: self.load({**out, name: value}), reason)
+        for name in ("judge_expected_repeats", "judge_consensus_policy"):
+            missing = dict(out)
+            del missing[name]
+            assert_dies(self, lambda missing=missing: self.load(missing), "requires")
+        forged = copy.deepcopy(out)
+        forged["agreement"]["concur"] = 0
+        assert_dies(self, lambda: self.load(forged), "consensus contradicts")
+
+    def test_removed_duplicate_and_wrong_panel_members_reject(self):
+        out = sb.merge_cross_judge_rows([self.leaf(), self.leaf(model="b")])
+        removed = copy.deepcopy(out)
+        removed["judge_panel"].pop()
+        for name in ("cost_usd", "cost_normalized", "cost_aggregate"):
+            removed.pop(name, None)
+        assert_dies(self, lambda: self.load(removed), "models contradict")
+        duplicate = copy.deepcopy(out)
+        duplicate["judge_panel"][1] = duplicate["judge_panel"][0]
+        assert_dies(self, lambda: self.load(duplicate), "models must be non-empty and unique")
+
+    def test_original_parent_price_is_checked_before_projection(self):
+        out = sb.merge_repeated_judge_rows([self.leaf(), self.leaf(repeat=2, missing=True)])
+        out["cost_usd"] = 99
+        assert_dies(self, lambda: self.load(out), "judge cost channels contradict one another")
+
+    def test_no_call_price_cannot_be_forged(self):
+        row = self.leaf(missing=True)
+        row.update(cost_usd=0, cost_normalized=sb.normalize_cost(0))
+        assert_dies(self, lambda: self.load(row), "no-call observation cannot carry")
+
+    def test_fresh_process_state_must_match_the_actual_code(self):
+        row = self.leaf()
+        row.update(judge_observation_kind="partial", judge_observation_complete=False, availability="partial",
+                   invocation_state="process_failed")
+        assert_dies(self, lambda: self.load(row), "process-failed invocation requires nonzero returncode")
+
+    def test_historical_unknown_calls_stay_unverified_and_unlabeled(self):
+        rows = [{"judge_task_id": "task", "judge_model": model, "passed": True, "score": score,
+                 "threshold": 0.5, "returncode": 0, "availability": "complete",
+                 "judge_observation_complete": True, "judge_evidence_mode": "text-only",
+                 "judge_input_sha256": "sha256:" + "a" * 64, "judge_prompt_sha256": "b" * 64}
+                for model, score in (("a", 0.9), ("b", 0.7))]
+        out = sb.merge_cross_judge_rows(rows)
+        loaded = self.load(out)
+        self.assertTrue(all("verdict_kind" not in child for child in loaded["judge_panel"]))
+        self.assertEqual(sb.judge_decision(loaded), ("consensus_member_vote", None))
+        counts = sb.judge_cost_block({"task": loaded})
+        self.assertEqual((counts["requested_calls"], counts["billed_calls"], counts["unverified_calls"]), (2, 0, 2))
+        self.assertEqual((counts["counts_availability"], counts["requested_calls_basis"]), ("partial", "retained_leaves"))
+        self.assertNotIn("judge_expected_repeats", loaded)
+        self.assertEqual(self.load(loaded), loaded)
+
+    def test_singleton_returns_same_valid_object(self):
+        row = self.leaf()
+        self.assertIs(sb.merge_repeated_judge_rows([row]), row)
+        self.assertIs(sb.merge_cross_judge_rows([row]), row)
 
 
 class JudgeConfigSlotTests(unittest.TestCase):
@@ -119,7 +289,7 @@ class JudgePresetTests(unittest.TestCase):
             jid = tasks[0]["judge_task_id"]
             _, _, prompt_sha256, _ = sb.judge_input_material(
                 tasks[0], "claims", run_base=base)
-            verdict = {"passed": True, "score": 5, "rationale": "grounded",
+            verdict = {"passed": True, "score": 5, "threshold": 4, "rationale": "grounded",
                        "returncode": 0, "judge_observation_complete": True,
                        "availability": "complete",
                        "judge_input_sha256": tasks[0]["judge_input_sha256"],
@@ -847,9 +1017,10 @@ class PerStepJudgeTests(unittest.TestCase):
                 {"name": "vibes", "met": True}, {"name": "step-2", "met": True}]}), encoding="utf-8")
             row = sb.run_one_judge_task(self._task(run), judge_cmd=f"cat {vf}")
         self.assertFalse(row["passed"])   # a verdict about invented steps is not evidence
-        self.assertEqual(row["verdict_kind"], "dynamic")
+        self.assertEqual(row["verdict_kind"], "consensus")
+        self.assertEqual(row["judge_observation_kind"], "missing")
 
-    def test_malformed_repeat_keeps_dynamic_shape_and_merges(self):
+    def test_malformed_repeat_retains_missing_and_dynamic_observations(self):
         with tempfile.TemporaryDirectory() as td:
             run = self._run_dir(td)
             bad = Path(td) / "bad.json"
@@ -860,10 +1031,10 @@ class PerStepJudgeTests(unittest.TestCase):
                 encoding="utf-8")
             rows = [
                 sb.run_one_judge_task(self._task(run), judge_cmd=f"cat {bad}"),
-                sb.run_one_judge_task(self._task(run), judge_cmd=f"cat {good}"),
+                sb.run_one_judge_task(self._task(run), judge_cmd=f"cat {good}", repeat_index=2),
             ]
             merged = sb.merge_repeated_judge_rows(rows)
-        self.assertEqual({row["verdict_kind"] for row in rows}, {"dynamic"})
+        self.assertEqual([row["judge_observation_kind"] for row in rows], ["missing", "complete"])
         self.assertFalse(merged["passed"])
         self.assertFalse(merged["judge_observation_complete"])
         self.assertTrue(merged["incomplete_judge_members"])
@@ -1028,6 +1199,9 @@ class CrossJudgeConsensusTests(unittest.TestCase):
         consensus["judge_prompt_sha256"] = sb.judge_input_material(
             pending[0], "x")[2]
         consensus["judge_evidence_mode"] = "text-only"
+        for member in consensus["judge_panel"]:
+            for key in ("judge_input_sha256", "judge_prompt_sha256", "judge_evidence_mode"):
+                member[key] = consensus[key]
         result, _ = sb.grade_case_variant(case, "with_skill", "x", Path("o.md"), {}, judge_results={jid: consensus})
         self.assertEqual(len(result["qualitative_assertions"]), 1)                 # exactly one merged verdict per jid
         self.assertEqual((result["qualitative_total"], result["qualitative_passed"]), (1, 1))
@@ -1326,7 +1500,7 @@ class ToolUsingJudgeTests(unittest.TestCase):
             self.assertNotIn(oracle, probe["seen"])                        # ...but NEVER the answer key
         # The judge runs WITH the sanitized copy as cwd — not the repo root, which holds
         # the live oracle. Read/Grep with no path would otherwise range over the repo.
-        self.assertIn("judge-explore-", probe["cwd"])
+        self.assertIn("judge-call-", probe["cwd"])
         self.assertNotEqual(probe["cwd"], os.getcwd())
         # The scratch copy was made in the temp dir, and cleaned up afterwards.
         self.assertTrue(Path(probe["cwd"]).resolve().is_relative_to(private), probe["cwd"])
@@ -1542,7 +1716,7 @@ class NullOptionalVerdictFieldTests(unittest.TestCase):
     nullable ones, so a judge answers `"score": null` for "no score". A null
     optional field means absent; a null required field is still incomplete."""
 
-    def judge(self, assertion: dict, answer: dict) -> dict:
+    def judge(self, assertion: dict, answer: dict, *, expected_exit=0) -> dict:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             manifest = write_manifest(root, base_manifest(cases=[{
@@ -1558,7 +1732,7 @@ class NullOptionalVerdictFieldTests(unittest.TestCase):
             out = root / "v.jsonl"
             code, _, stderr = run_cli("judge", manifest, "--runs", runs, "--variant", "with_skill",
                                       "--judge-cmd", f"{sys.executable} {stub}", "--out", out)
-            self.assertEqual(code, 0, stderr)
+            self.assertEqual(code, expected_exit, stderr)
             return json.loads(out.read_text(encoding="utf-8").splitlines()[0])
 
     def test_null_optional_fields_read_as_absent(self):
@@ -1574,7 +1748,7 @@ class NullOptionalVerdictFieldTests(unittest.TestCase):
                                  ("complete", passed, None))
 
     def test_a_null_required_field_is_still_incomplete(self):
-        row = self.judge({"atLeast": 0.8}, {"passed": True, "score": None})
+        row = self.judge({"atLeast": 0.8}, {"passed": True, "score": None}, expected_exit=2)
         self.assertEqual((row["availability"], row["passed"]), ("partial", False))
 
 
@@ -2088,9 +2262,9 @@ class JudgeCalibrationTests(unittest.TestCase):
                                  *forged["judge_panel"][1:]]   # member's passed no longer matches its score
         row = sb.validated_result_row(forged)
         self.assertEqual(sb.judge_decision(row), ("majority_consensus", 0.5))
-        cal = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})["calibration"]
-        self.assertEqual(cal["excluded_judge_ids"], {
-            "t": "recorded decision contradicts its members; verdict may be forged or from a foreign file"})
+        report = sb.judge_alignment_report({"t": {"passed": True}}, {"t": row})
+        self.assertIn("passed contradicts score", report["incomplete_judge_ids"]["t"])
+        self.assertEqual(report["n"], 0)
 
     def test_majority_consensus_score_mismatch_with_members_is_excluded(self):
         # passed still agrees with the members' majority, but the top-level
@@ -2156,13 +2330,9 @@ class JudgeCalibrationTests(unittest.TestCase):
         malformed = self._panel("m", [0.9, 0.6, 0.1])
         del malformed["judge_panel"][0]["threshold"]
         human = {"n": {"passed": False}, "m": {"passed": True}}
-        cal = sb.judge_alignment_report(
-            human, {"n": nested, "m": malformed})["calibration"]
-        self.assertEqual(cal["availability"], "not_applicable")
-        self.assertEqual(cal["reason"], (
-            "no matched verdict passes on score >= threshold: a consensus passes on a member "
-            "vote that equals median score >= threshold only over scored members sharing one "
-            "threshold"))
+        report = sb.judge_alignment_report(human, {"n": nested, "m": malformed})
+        self.assertIn("stored scored verdict requires threshold", report["incomplete_judge_ids"]["m"])
+        self.assertEqual(report["calibration"]["availability"], "not_applicable")
 
     def test_even_repeat_tie_is_calibrated_using_upstream_median_rule(self):
         for scores, passed in (((0.4, 0.9), True), ((0.1, 0.6), False)):

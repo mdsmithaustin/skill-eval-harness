@@ -362,7 +362,7 @@ A plain judge that scores on its own scale declares it as `score_scale: [low, hi
 Judge results are keyed by `judge_task_id`:
 
 ```json
-{"judge_task_id":"case::with_skill::run-1::qualitative-review","passed":true,"score":4,"evidence":"Specific evidence from output"}
+{"judge_task_id":"case::with_skill::run-1::qualitative-review","verdict_kind":"scored","passed":true,"score":4,"threshold":4,"evidence":"Specific evidence from output"}
 ```
 
 ## Run output contract
@@ -650,7 +650,7 @@ skill-eval-harness/
 ├── runner_contracts.py         # closed answer-runner outcome union
 ├── spend_contracts.py          # immutable answer, subagent, and judge call plans and spend receipts
 ├── spend_runtime.py            # serial admission and invocation ledger publication
-├── judge_verdict.py            # strict imported/stored judge verdict variants
+├── judge_verdict.py            # strict verdicts and complete/partial/missing observation trees
 ├── jetty_contracts.py          # closed Jetty lifecycle and observation contract
 ├── trace_contracts.py          # normalized event-log and event lifecycle contracts
 ├── trigger_contracts.py        # autonomous-trigger invocation/detection/observation contract

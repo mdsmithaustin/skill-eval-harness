@@ -104,7 +104,21 @@ A positive ceiling on ready shell, Codex, Gemini, or Vibe work requires an assum
 any launch or output-file write. Claude uses reported dollars when available. Missing whole-call
 dollars close later admission without an assumption, including a timeout with a safe subtotal.
 An assumption cannot lower that subtotal. Assumptions never fill verdict price telemetry.
-The command exits 2 for refusals or partial unpriced accounting.
+The command exits 2 for an incomplete observation or partial unpriced accounting.
+
+Missing results use `judge_observation_kind: missing`, incomplete availability, and a compatibility
+`consensus` false shell without a score. A paid scored result keeps its score even beside a refusal.
+An incomplete group carries all members and no aggregate score or agreement. Saved per-step
+consensus validates every leaf's exact steps, minimum, and trajectory binding before using the
+parent's decision and median.
+
+`cost-summary.judge.requested_calls` partitions into `billed_calls`, `not_started_calls`,
+`nonbillable_calls`, and `unverified_calls`. Billed counts affirmative launches, including unknown
+and zero dollars. Guards and spawn failures are nonbillable. Historical rows without launch facts
+are unverified. `requested_calls_basis` is `requested_slots` for fresh calls and `retained_leaves`
+when the historical requested population is unknown; that uncertainty makes `counts_availability`
+partial. The demo has four requested slots, one launch, and three refusals. Its assumed charge
+stays in the ledger, while verdict price telemetry remains unavailable.
 
 The judge retains the effective prompt and consumed evidence before its first call. Declared
 text-only input checks remain separate from trajectory and exploration bindings. Exploration

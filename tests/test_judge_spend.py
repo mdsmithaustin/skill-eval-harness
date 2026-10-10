@@ -140,6 +140,43 @@ print({json.dumps(payload)!r} if '--output-format' in sys.argv else {answer!r})
                 self.assertEqual(first['cost_usd'], cost)
                 self.assertNotIn('assumed_cost_per_run_usd', first)
 
+    def test_saved_per_step_consensus_checks_each_leaf_and_preserves_parent_decision(self):
+        events = {'events': [trace_event('command', name='Bash', input_summary='echo one'),
+                             trace_event('command', name='Bash', input_summary='echo two')]}
+        for panel in (False, True):
+            with self.subTest(panel=panel), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                setup = self.batch(root, assertion={'per_step': True}, events=events,
+                    verdict={'criteria': [{'name': 'step-1', 'met': True}, {'name': 'step-2', 'met': True}]})
+                flags = ('--judge-runs', '2')
+                if panel:
+                    flags += ('--judge-panel', 'judge-a', '--judge-panel', 'judge-b', '--quorum', '1')
+                    negative = {'type': 'result', 'total_cost_usd': 0.6,
+                                'result': json.dumps({'criteria': [{'name': 'step-1', 'met': False},
+                                                                  {'name': 'step-2', 'met': False}]})}
+                    setup[2].write_text(setup[2].read_text().replace("print('deterministic judge stderr', file=sys.stderr)",
+                        f"if '--model' in sys.argv and sys.argv[sys.argv.index('--model') + 1] == 'judge-b':\n"
+                        f"    print({json.dumps(negative)!r})\n    raise SystemExit(0)\n"
+                        "print('deterministic judge stderr', file=sys.stderr)"))
+                code, rows, _, stderr = self.execute(root, setup, flags=flags)
+                self.assertEqual(code, 0, stderr)
+                self.assertNotIn('criteria', rows[0])
+                report = root / 'benchmark.json'
+
+                def benchmark(setup=setup, root=root, report=report):
+                    code, _, stderr = run_cli('benchmark', setup[0], '--runs', setup[1],
+                        '--variant', 'with_skill', '--judge-results', root / 'results.jsonl', '--out', report)
+                    self.assertEqual(code, 0, stderr)
+                    return json.loads(report.read_text())['results'][0]
+
+                graded = benchmark()
+                self.assertEqual((graded['deferred_judge_tasks'], graded['qualitative_passed']), (0, 1))
+                self.assertEqual(graded['qualitative_assertions'][0]['score'], 0.5 if panel else 1.0)
+                leaf = rows[0].get('judge_panel', [rows[0]])[0]['judge_runs'][0]
+                leaf['minimum_criteria'] = 1
+                (root / 'results.jsonl').write_text(json.dumps(rows[0]) + '\n')
+                self.assertEqual(benchmark()['deferred_judge_tasks'], 1)
+
     def test_known_missing_shell_and_native_routes_reject_before_writes(self):
         for route in ('shell', 'codex', 'gemini', 'vibe'):
             with self.subTest(route=route), tempfile.TemporaryDirectory() as td:
@@ -206,7 +243,9 @@ print({json.dumps(payload)!r} if '--output-format' in sys.argv else {answer!r})
                     panel = rows[0]['judge_panel']
                     leaves = [leaf for member in panel for leaf in member.get('judge_runs', [member])]
                     self.assertEqual(len(leaves), 2 * repeats)
-                    self.assertEqual({leaf['verdict_kind'] for leaf in leaves}, {kind})
+                    self.assertEqual(leaves[0]['verdict_kind'], kind)
+                    self.assertEqual([leaf['judge_observation_kind'] for leaf in leaves[1:]],
+                                     ['missing'] * (2 * repeats - 1))
                     for leaf in leaves[1:]:
                         self.assertEqual(leaf['invocation_state'], 'not_started')
                         self.assertNotIn('returncode', leaf)
@@ -246,7 +285,7 @@ print({json.dumps(payload)!r} if '--output-format' in sys.argv else {answer!r})
                             flags += ('--judge-trajectory',)
                         with mock.patch.object(sb, 'collect_judge_tasks', return_value=[task]):
                             code, rows, _, stderr = self.execute(root, setup, route=route, flags=flags)
-                        self.assertEqual(code, 0, stderr)
+                        self.assertEqual(code, 0 if complete else 2, stderr)
                         self.assertIn(expected, rows[0]['judge_runs'][0]['evidence'])
                         self.assertEqual(rows[0]['judge_observation_complete'], complete)
                         self.assertEqual(len(rows[0]['judge_runs']), 2)
@@ -545,14 +584,14 @@ class JudgeSpendIdentityTests(unittest.TestCase):
                 child.write_text('#!/bin/sh\nexit 197\n')
                 child.chmod(0o755)
                 blocked = subprocess.run([name, '--version'], env=env, timeout=5,
-                                         capture_output=True)
+                                         capture_output=True, check=False)
                 self.assertEqual(blocked.returncode, 197, name)
             tasks, runs, out = root / 'tasks.jsonl', root / 'runs', root / 'judge.jsonl'
 
             def cli(*argv):
                 return subprocess.run([sys.executable, str(source / 'skill_benchmark.py'),
                                        *map(str, argv)], env=env, timeout=30,
-                                      text=True, capture_output=True)
+                                      text=True, capture_output=True, check=False)
 
             prepared = cli('prepare', demo / 'evals' / 'shared-benchmark.json',
                            '--split', 'tune', '--out', tasks)
@@ -567,7 +606,7 @@ class JudgeSpendIdentityTests(unittest.TestCase):
                          '--assumed-cost-per-run-usd', '.03', '--out', out)
             self.assertEqual(judged.returncode, 2, judged.stderr)
             rows = [json.loads(line) for line in out.read_text().splitlines()]
-            self.assertEqual(len(rows), 1)
+            self.assertEqual(len(rows), 2)
             members = rows[0]['judge_runs']
             self.assertEqual(len(members), 2)
             self.assertEqual(members[0]['verdict_kind'], 'scored')
@@ -581,5 +620,15 @@ class JudgeSpendIdentityTests(unittest.TestCase):
             judge_ledger = next(ledger for ledger in ledgers
                                 if ledger['calls'][0]['call']['kind'] == 'judge')
             self.assertEqual([call['state'] for call in judge_ledger['calls']],
-                             ['settled', 'not_started'])
+                             ['settled', 'not_started', 'not_started', 'not_started'])
             self.assertIsNone(members[0]['cost_usd'])
+            self.assertEqual(judge_ledger['spent_usd'], '0.03')
+            benchmark = cli('benchmark', demo / 'evals' / 'shared-benchmark.json',
+                            '--runs', runs, '--judge-results', out, '--out', root / 'benchmark.json')
+            self.assertEqual(benchmark.returncode, 0, benchmark.stderr)
+            summary = cli('cost-summary', '--manifest', demo / 'evals' / 'shared-benchmark.json',
+                          '--runs', runs, '--judge-results', out, '--out', root / 'cost-summary.json')
+            self.assertEqual(summary.returncode, 0, summary.stderr)
+            counts = json.loads((root / 'cost-summary.json').read_text())['judge']
+            self.assertEqual([counts[name] for name in ('requested_calls', 'billed_calls', 'not_started_calls',
+                                                       'nonbillable_calls', 'unverified_calls')], [4, 1, 3, 0, 0])

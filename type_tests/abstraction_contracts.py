@@ -51,6 +51,14 @@ from judge_verdict import (
     DynamicVerdict,
     JudgeVerdict,
     ScoredVerdict,
+    _CompleteJudgeObservation,
+    _JudgeLeaf,
+    _JudgeObservation,
+    _JudgePanel,
+    _JudgePopulation,
+    _JudgeRepeats,
+    _MissingJudgeObservation,
+    _PartialJudgeObservation,
 )
 from manifest_contracts import (
     CaseId,
@@ -75,6 +83,7 @@ from runner_contracts import (
     SpawnFailed,
     TimedOut,
 )
+from spend_contracts import JudgeCall
 from trace_contracts import (
     EventLogObservation,
     InvalidEventLog,
@@ -147,6 +156,29 @@ def judge_verdict_is_exhaustive(verdict: JudgeVerdict) -> None:
         _consensus_passed: bool = verdict.passed
     else:
         _assert_never(verdict)
+
+
+def judge_observation_is_exhaustive(observation: _JudgeObservation) -> None:
+    if isinstance(observation, _CompleteJudgeObservation):
+        assert_type(observation.verdict, JudgeVerdict)
+        assert_type(observation.population, _JudgePopulation)
+    elif isinstance(observation, _PartialJudgeObservation):
+        assert_type(observation.verdict, JudgeVerdict)
+        assert_type(observation.population, _JudgeLeaf)
+    elif isinstance(observation, _MissingJudgeObservation):
+        assert_type(observation.reasons, tuple[str, ...])
+        assert_type(observation.population, _JudgePopulation)
+    else:
+        _assert_never(observation)
+
+
+def judge_population_is_exhaustive(population: _JudgePopulation) -> None:
+    if isinstance(population, _JudgeLeaf):
+        assert_type(population.call, JudgeCall | None)
+    elif isinstance(population, (_JudgeRepeats, _JudgePanel)):
+        assert_type(population.members, tuple[_JudgeObservation, ...])
+    else:
+        _assert_never(population)
 
 
 def prepared_task_identity_is_precise(task: PreparedTask) -> None:

@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
+
+from invocation_contracts import InvocationState, validate_invocation_lifecycle
+from json_contracts import freeze_json_mapping, thaw_json_value
+from spend_contracts import JudgeCall
 
 
 class VerdictKind(str, Enum):
@@ -313,3 +318,456 @@ def validated_result_row(raw: Mapping[str, Any], *,
     nonsemantic = {key: value for key, value in raw.items()
                    if key not in _SEMANTIC_FIELDS and key != "verdict_kind"}
     return {**nonsemantic, **verdict_fields(verdict)}
+
+
+@dataclass(frozen=True)
+class _JudgeAttempt:
+    kind: Literal["process", "not_started", "guard", "historical"]
+    facts: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "facts", freeze_json_mapping(self.facts, "judge execution"))
+        code = self.facts.get("returncode")
+        state = self.facts.get("invocation_state")
+        if code is not None and (isinstance(code, bool) or not isinstance(code, int)):
+            raise ValueError("judge returncode must be an integer")
+        if self.kind == "not_started":
+            if (state != "not_started" or code is not None or self.facts.get("judge_served_model") is not None
+                    or self.facts.get("timed_out") is not None or self.facts.get("provider_error") is not None):
+                raise ValueError("not_started judge cannot carry process code or served model")
+        elif self.kind == "guard":
+            if (state is not None or self.facts.get("judge_served_model") is not None or code not in (None, 0)
+                    or self.facts.get("timed_out") is not None or self.facts.get("provider_error") is not None):
+                raise ValueError("guarded judge cannot carry process facts")
+        elif self.kind == "process":
+            validate_invocation_lifecycle(InvocationState(state), code, self.facts.get("provider_error"))
+            if self.facts.get("timed_out", state == "timed_out") != (state == "timed_out"):
+                raise ValueError("judge timed_out contradicts invocation state")
+
+
+@dataclass(frozen=True)
+class _JudgeLeaf:
+    attempt: _JudgeAttempt
+    call: JudgeCall | None = None
+
+
+@dataclass(frozen=True)
+class _JudgeRepeats:
+    members: tuple[_JudgeObservation, ...]
+    expected_count: int | None = None
+    policy: _JudgeConsensusPolicy | None = None
+
+
+@dataclass(frozen=True)
+class _JudgePanel:
+    members: tuple[_JudgeObservation, ...]
+    requested_models: tuple[str, ...]
+    policy: _JudgeConsensusPolicy | None = None
+    models_recorded: bool = True
+
+
+@dataclass(frozen=True)
+class _JudgeConsensusPolicy:
+    threshold: float | None = None
+    quorum: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.threshold is not None:
+            _number(self.threshold, "consensus threshold")
+        if self.quorum is not None and (isinstance(self.quorum, bool)
+                or not isinstance(self.quorum, int) or self.quorum < 1):
+            raise ValueError("consensus quorum must be a positive integer")
+
+
+_JudgePopulation: TypeAlias = _JudgeLeaf | _JudgeRepeats | _JudgePanel
+
+
+@dataclass(frozen=True)
+class _CompleteJudgeObservation:
+    fields: Mapping[str, Any]
+    population: _JudgePopulation
+    verdict: JudgeVerdict
+    explicit_kind: VerdictKind | None
+    fresh: bool = True
+    agreement: Consensus | Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fields", freeze_json_mapping(self.fields, "judge metadata"))
+        _check_observation_fields(self.fields)
+        if self.agreement is not None and not isinstance(self.agreement, Consensus):
+            object.__setattr__(self, "agreement", freeze_json_mapping(self.agreement, "judge agreement"))
+        if isinstance(self.population, _JudgeLeaf):
+            if self.fresh and self.population.call is None:
+                raise ValueError("fresh judge leaf requires a requested call identity")
+            reason = _judge_leaf_incomplete_reason(self.fields, self.population.attempt)
+            if reason is not None:
+                raise ValueError(reason)
+            if self.population.attempt.kind == "guard" and (
+                    self.fields.get("judge_guard_reason") != "empty_steps"
+                    or not isinstance(self.verdict, BooleanVerdict) or self.verdict.passed):
+                raise ValueError("only an empty-step local false verdict can be complete without a call")
+        elif not all(isinstance(member, _CompleteJudgeObservation) for member in self.population.members):
+            raise ValueError("complete judge group requires complete children")
+
+
+@dataclass(frozen=True)
+class _PartialJudgeObservation:
+    fields: Mapping[str, Any]
+    population: _JudgeLeaf
+    verdict: JudgeVerdict
+    explicit_kind: VerdictKind | None
+    reasons: tuple[str, ...]
+    fresh: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fields", freeze_json_mapping(self.fields, "judge metadata"))
+        _check_observation_fields(self.fields)
+        if not self.reasons:
+            raise ValueError("partial judge observation requires a reason")
+
+
+@dataclass(frozen=True)
+class _MissingJudgeObservation:
+    fields: Mapping[str, Any]
+    population: _JudgePopulation
+    reasons: tuple[str, ...]
+    fresh: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fields", freeze_json_mapping(self.fields, "judge metadata"))
+        _check_observation_fields(self.fields)
+        if not self.reasons:
+            raise ValueError("missing judge observation requires a reason")
+
+
+_JudgeObservation: TypeAlias = _CompleteJudgeObservation | _PartialJudgeObservation | _MissingJudgeObservation
+_ATTEMPT_FIELDS = frozenset({"returncode", "invocation_state", "timed_out", "provider_error", "judge_served_model"})
+_RESULT_FIELDS = _SEMANTIC_FIELDS | frozenset({
+    "verdict_kind", "judge_observation_kind", "judge_observation_complete", "availability",
+    "judge_runs", "judge_panel", "agreement", "judge_expected_repeats", "judge_models",
+    "judge_consensus_policy", "judge_execution_kind",
+}) | _ATTEMPT_FIELDS
+_BINDING_FIELDS = (
+    "judge_task_id", "id", "case_id", "variant", "run_number", "judge_backend",
+    "judge_input_sha256", "judge_prompt_sha256", "judge_evidence_mode",
+    "judge_context_sha256", "trajectory_steps_sha256",
+)
+
+
+def _check_observation_fields(fields: Mapping[str, Any]) -> None:
+    reserved = set(fields) & _RESULT_FIELDS
+    if reserved:
+        raise ValueError(f"judge metadata cannot override reserved fields: {sorted(reserved)}")
+
+
+def _judge_leaf_incomplete_reason(fields: Mapping[str, Any], attempt: _JudgeAttempt) -> str | None:
+    if fields.get("judge_evidence_mode") not in {"text-only", "trajectory", "explore", "trajectory+explore"}:
+        return "judge evidence mode is missing or invalid"
+    if not isinstance(fields.get("judge_input_sha256"), str) or re.fullmatch(
+            r"sha256:[0-9a-f]{64}", fields["judge_input_sha256"]) is None:
+        return "judge input fingerprint is missing or invalid"
+    if not isinstance(fields.get("judge_prompt_sha256"), str) or re.fullmatch(
+            r"[0-9a-f]{64}", fields["judge_prompt_sha256"]) is None:
+        return "judge prompt fingerprint is missing or invalid"
+    if fields.get("judge_evidence_mode") in {"explore", "trajectory+explore"} and (
+            not isinstance(fields.get("judge_context_sha256"), str) or re.fullmatch(
+                r"sha256:[0-9a-f]{64}", fields["judge_context_sha256"]) is None):
+        return "judge explore context fingerprint is missing"
+    if attempt.facts.get("returncode") != 0 or attempt.kind == "not_started":
+        return "judge call did not exit successfully"
+    if attempt.kind == "process" and attempt.facts.get("invocation_state") != "complete":
+        return "judge process is not complete"
+    if fields.get("schema_errors") or fields.get("verdict_validation_error"):
+        return "judge verdict failed validation"
+    return None
+
+
+def _judge_leaf_observation(verdict: JudgeVerdict | None, raw: Mapping[str, Any], *,
+                            attempt_kind: Literal["process", "not_started", "guard", "historical"],
+                            complete: bool, reasons: tuple[str, ...] = (),
+                            fresh: bool = True, explicit_kind: VerdictKind | None = None) -> _JudgeObservation:
+    fields = freeze_json_mapping({key: value for key, value in raw.items()
+                                  if key not in _RESULT_FIELDS}, "judge metadata")
+    attempt = _JudgeAttempt(attempt_kind, freeze_json_mapping(
+        {key: value for key, value in raw.items() if key in _ATTEMPT_FIELDS}, "judge execution"))
+    call = None
+    if fresh:
+        if not {"judge_task_id", "judge_input_sha256", "judge_backend", "judge_requested_model", "judge_repeat"} <= raw.keys():
+            raise ValueError("fresh judge requires complete requested slot identity")
+        call = JudgeCall(raw["judge_task_id"], raw["judge_input_sha256"],
+                         raw["judge_backend"], raw["judge_requested_model"], raw["judge_repeat"])
+        if raw.get("spend_call_id") != call.call_id:
+            raise ValueError("judge spend call identity contradicts requested slot")
+    population = _JudgeLeaf(attempt, call)
+    if verdict is None:
+        return _MissingJudgeObservation(fields, population, reasons or ("judge observation is missing",), fresh)
+    if complete:
+        return _CompleteJudgeObservation(fields, population, verdict,
+                                         verdict.kind if fresh else explicit_kind, fresh)
+    return _PartialJudgeObservation(fields, population, verdict,
+                                    verdict.kind if fresh else explicit_kind,
+                                    reasons or ("judge observation is not explicitly complete",), fresh)
+
+
+def _judge_observation_reason(observation: _JudgeObservation) -> str | None:
+    if isinstance(observation, _CompleteJudgeObservation):
+        return None
+    return observation.reasons[0]
+
+
+def _judge_model(observation: _JudgeObservation) -> Any:
+    return observation.fields.get("judge_requested_model", observation.fields.get("judge_model"))
+
+
+def _judge_group_errors(members: tuple[_JudgeObservation, ...], *, panel: bool) -> list[dict[str, Any]]:
+    if not members:
+        raise ValueError("judge group requires at least one member")
+    ids = {member.fields.get("judge_task_id", member.fields.get("id")) for member in members}
+    if len(ids) != 1 or None in ids:
+        raise ValueError("judge panel rows must share one task id" if panel else
+                         "judge repeats must share one task id and verdict kind")
+    if panel:
+        models = [_judge_model(member) for member in members]
+        if any(not isinstance(model, str) or not model for model in models) or len(set(models)) != len(models):
+            raise ValueError("judge panel models must be non-empty and unique")
+    else:
+        models = {member.fields.get("judge_requested_model") for member in members
+                  if "judge_requested_model" in member.fields}
+        if len(models) > 1:
+            raise ValueError("judge repeats must share one requested model")
+        repeats = [member.fields.get("judge_repeat") for member in members]
+        if any(value is not None for value in repeats) and (
+                any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in repeats)
+                or len(set(repeats)) != len(repeats)):
+            raise ValueError("judge repeat identities must be positive and unique")
+    for key in _BINDING_FIELDS:
+        if key in {"judge_task_id", "id", "judge_input_sha256"}:
+            continue
+        values = [member.fields.get(key) for member in members]
+        if any(member.fresh for member in members) and any(value != values[0] for value in values):
+            raise ValueError(f"judge members must share one {key}")
+    errors = [{"member": index, "reason": reason} for index, member in enumerate(members, 1)
+              if (reason := _judge_observation_reason(member)) is not None]
+    fingerprints = [member.fields.get("judge_input_sha256") for member in members]
+    if any(not isinstance(value, str) for value in fingerprints) or len(set(fingerprints)) != 1:
+        errors.append({"member": "aggregate", "reason": "judge members must share one explicit judge_input_sha256"})
+    kinds = {member.explicit_kind for member in members
+             if isinstance(member, (_CompleteJudgeObservation, _PartialJudgeObservation))
+             and member.explicit_kind is not None}
+    if len(kinds) > 1:
+        if not errors:
+            raise ValueError("judge panel rows must share one verdict kind" if panel else
+                             "judge repeats must share one task id and verdict kind")
+        errors.extend({"member": index, "reason": "judge member has incompatible explicit verdict kind"}
+                      for index, member in enumerate(members, 1)
+                      if isinstance(member, (_CompleteJudgeObservation, _PartialJudgeObservation))
+                      and member.explicit_kind is not None)
+    return errors
+
+
+def _fold_judge_observations(members: tuple[_JudgeObservation, ...], *, panel: bool = False,
+                             quorum: int | None = None) -> _JudgeObservation:
+    errors = _judge_group_errors(members, panel=panel)
+    if len(members) == 1:
+        return members[0]
+    fresh = all(member.fresh for member in members)
+    fields: dict[str, Any] = {key: members[0].fields[key] for key in _BINDING_FIELDS
+                              if key in members[0].fields
+                              and all(member.fields.get(key) == members[0].fields[key] for member in members)}
+    if panel:
+        fields["judge_model"] = "consensus"
+    elif fresh:
+        fields["judge_model"] = _judge_model(members[0]) or fields.get("judge_backend")
+    elif all(member.fields.get("judge_model") == members[0].fields.get("judge_model") for member in members):
+        fields["judge_model"] = members[0].fields.get("judge_model")
+    if not panel and fresh:
+        fields["judge_requested_model"] = _judge_model(members[0])
+    threshold = None
+    first = members[0]
+    if isinstance(first, (_CompleteJudgeObservation, _PartialJudgeObservation)) and isinstance(
+            first.verdict, (ScoredVerdict, DimensionVerdict)):
+        threshold = first.verdict.threshold
+    policy = _JudgeConsensusPolicy(threshold, quorum)
+    population = (_JudgePanel(members, tuple(_judge_model(member) for member in members), policy if fresh else None)
+                  if panel else _JudgeRepeats(members, len(members) if fresh else None, policy if fresh else None))
+    if errors:
+        fields["incomplete_judge_members"] = errors
+        fields["evidence"] = "judge aggregate incomplete: " + "; ".join(str(error["reason"]) for error in errors[:5])
+        return _MissingJudgeObservation(freeze_json_mapping(fields, "judge group"), population,
+                                        tuple(str(error["reason"]) for error in errors), fresh)
+    complete_members = tuple(member for member in members if isinstance(member, _CompleteJudgeObservation))
+    consensus = _resolve_judge_observations(complete_members, policy)
+    fields["evidence"] = " | ".join(str(member.fields.get("evidence", "")) for member in members
+                                    if member.fields.get("evidence"))[:4000]
+    return _CompleteJudgeObservation(freeze_json_mapping(fields, "judge group"), population,
+                                     consensus.verdict(), VerdictKind.CONSENSUS, fresh, consensus)
+
+
+def _resolve_judge_observations(members: tuple[_CompleteJudgeObservation, ...],
+                                policy: _JudgeConsensusPolicy) -> Consensus:
+    return resolve_consensus([member.verdict.passed for member in members],
+                             [member.verdict.score for member in members
+                              if not isinstance(member.verdict, BooleanVerdict) and member.verdict.score is not None],
+                             threshold=policy.threshold, quorum=policy.quorum)
+
+
+def _judge_observation_fields(observation: _JudgeObservation) -> dict[str, Any]:
+    out = thaw_json_value(observation.fields, "judge metadata")
+    if isinstance(observation, _MissingJudgeObservation):
+        out.update(verdict_fields(ConsensusVerdict(False)))
+        kind, complete = "missing", False
+    else:
+        out.update(verdict_fields(observation.verdict))
+        if not observation.fresh and observation.explicit_kind is None:
+            out.pop("verdict_kind", None)
+        kind, complete = ("complete", True) if isinstance(observation, _CompleteJudgeObservation) else ("partial", False)
+    out.update(judge_observation_complete=complete, availability="complete" if complete else "partial")
+    if observation.fresh:
+        out["judge_observation_kind"] = kind
+    population = observation.population
+    if isinstance(population, _JudgeLeaf):
+        out.update(thaw_json_value(population.attempt.facts, "judge execution"))
+        if observation.fresh:
+            out["judge_execution_kind"] = population.attempt.kind
+    else:
+        key = "judge_panel" if isinstance(population, _JudgePanel) else "judge_runs"
+        out[key] = [_judge_observation_fields(member) for member in population.members]
+        out["returncode"] = 0 if complete else 1
+        if isinstance(population, _JudgePanel):
+            if population.models_recorded:
+                out["judge_models"] = list(population.requested_models)
+        elif population.expected_count is not None:
+            out["judge_expected_repeats"] = population.expected_count
+        if population.policy is not None:
+            out["judge_consensus_policy"] = {"threshold": population.policy.threshold, "quorum": population.policy.quorum}
+        if isinstance(observation, _CompleteJudgeObservation) and observation.agreement is not None:
+            out["agreement"] = (observation.agreement.agreement() if isinstance(observation.agreement, Consensus)
+                                else thaw_json_value(observation.agreement, "judge agreement"))
+    return out
+
+
+def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
+    if not isinstance(raw, Mapping):
+        raise TypeError("judge result row must be an object")
+    marker = raw.get("judge_observation_kind")
+    if marker is not None and marker not in {"complete", "partial", "missing"}:
+        raise ValueError("unknown judge_observation_kind")
+    fresh = marker is not None
+    explicit = VerdictKind(raw["verdict_kind"]) if raw.get("verdict_kind") is not None else None
+    verdict = verdict_from_dict(raw)
+    if marker == "missing" and ({key: raw[key] for key in _SEMANTIC_FIELDS | {"verdict_kind"} if key in raw}
+                                != verdict_fields(ConsensusVerdict(False))):
+        raise ValueError("missing judge observation requires exact consensus false shell")
+    if fresh and (raw.get("judge_observation_complete") is not (marker == "complete")
+                  or raw.get("availability") != ("complete" if marker == "complete" else "partial")):
+        raise ValueError("judge observation marker contradicts completeness")
+    memberships = [key for key in ("judge_runs", "judge_panel") if key in raw]
+    if len(memberships) > 1:
+        raise ValueError("judge row cannot contain both membership paths")
+    if not memberships:
+        kind = raw.get("judge_execution_kind")
+        if kind is None:
+            kind = "not_started" if raw.get("invocation_state") == "not_started" else "historical"
+        if kind not in {"process", "not_started", "guard", "historical"}:
+            raise ValueError("unknown judge execution kind")
+        if fresh:
+            repeat = raw.get("judge_repeat")
+            if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
+                raise ValueError("judge repeat identity must be positive")
+            if "judge_requested_model" not in raw:
+                raise ValueError("fresh judge requires requested model identity")
+            requested = raw["judge_requested_model"]
+            if requested is not None and (not isinstance(requested, str) or not requested):
+                raise ValueError("judge requested model must be non-empty or null")
+            if kind == "historical":
+                raise ValueError("fresh judge cannot have historical execution")
+        attempt = _JudgeAttempt(kind, freeze_json_mapping(
+            {key: value for key, value in raw.items() if key in _ATTEMPT_FIELDS}, "judge execution"))
+        fields = {key: value for key, value in raw.items() if key not in _RESULT_FIELDS}
+        reason = None
+        if raw.get("judge_observation_complete") is not True:
+            reason = "judge observation is not explicitly complete"
+        elif raw.get("availability") != "complete":
+            reason = "judge result availability is not explicitly complete"
+        else:
+            reason = _judge_leaf_incomplete_reason(fields, attempt)
+        if marker == "complete" and reason is not None:
+            raise ValueError(reason)
+        return _judge_leaf_observation(None if marker == "missing" else verdict, raw,
+                                       attempt_kind=kind, complete=reason is None,
+                                       reasons=(reason,) if reason else (), fresh=fresh, explicit_kind=explicit)
+    if marker == "partial":
+        raise ValueError("partial judge observation must be a leaf")
+    key = memberships[0]
+    children = raw[key]
+    if not isinstance(children, list) or not children:
+        raise ValueError("judge members must be a non-empty list")
+    members = tuple(_judge_observation_from_row(child) for child in children)
+    errors = _judge_group_errors(members, panel=key == "judge_panel")
+    expected = raw.get("judge_expected_repeats")
+    if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int)
+                                 or expected != len(members) or expected < 1):
+        raise ValueError("judge repeat population contradicts expected count")
+    if fresh and key == "judge_runs" and {member.fields.get("judge_repeat") for member in members} != set(range(1, len(members) + 1)):
+        raise ValueError("judge repeat identities do not match requested population")
+    if fresh and (not all(member.fresh for member in members)
+                  or (key == "judge_runs" and expected is None)
+                  or (key == "judge_panel" and "judge_models" not in raw)):
+        raise ValueError("fresh judge group requires its full declared population")
+    models = tuple(_judge_model(member) for member in members)
+    if key == "judge_panel" and "judge_models" in raw and raw["judge_models"] != list(models):
+        raise ValueError("judge panel models contradict requested population")
+    for name in _BINDING_FIELDS:
+        if name in raw and any(member.fields.get(name) != raw[name] for member in members):
+            if name != "judge_input_sha256":
+                raise ValueError(f"judge parent {name} contradicts members")
+            errors.append({"member": "aggregate", "reason": "judge parent input fingerprint contradicts members"})
+    if fresh and any(name in raw for name in ("spend_call_id", "judge_repeat", "judge_served_model", "invocation_state", "timed_out", "provider_error", "judge_execution_kind")):
+        raise ValueError("judge aggregate cannot carry leaf execution facts")
+    policy_raw = raw.get("judge_consensus_policy")
+    policy = None
+    if policy_raw is not None:
+        if not isinstance(policy_raw, Mapping) or set(policy_raw) != {"threshold", "quorum"}:
+            raise ValueError("judge consensus policy must record threshold and quorum")
+        policy = _JudgeConsensusPolicy(policy_raw["threshold"], policy_raw["quorum"])
+    if fresh and policy is None:
+        raise ValueError("fresh judge group requires recorded consensus policy")
+    if fresh and raw.get("returncode") != (0 if marker == "complete" else 1):
+        raise ValueError("judge aggregate returncode contradicts completeness")
+    population = (_JudgePanel(members, models, policy, "judge_models" in raw) if key == "judge_panel" else
+                  _JudgeRepeats(members, expected, policy))
+    fields = freeze_json_mapping({name: value for name, value in raw.items() if name not in _RESULT_FIELDS}, "judge group")
+    complete = raw.get("judge_observation_complete") is True and raw.get("availability") == "complete" and not errors
+    if raw.get("judge_observation_complete") is True and errors:
+        raise ValueError("complete judge group requires complete compatible children")
+    if not complete:
+        return _MissingJudgeObservation(fields, population,
+                                        tuple(str(error["reason"]) for error in errors) or ("judge observation is not explicitly complete",), fresh)
+    if not isinstance(verdict, ConsensusVerdict):
+        raise ValueError("judge group requires consensus verdict")
+    agreement: Consensus | Mapping[str, Any] | None = None
+    if policy is not None:
+        agreement = _resolve_judge_observations(tuple(member for member in members
+                                                    if isinstance(member, _CompleteJudgeObservation)), policy)
+        if verdict != agreement.verdict() or raw.get("agreement") != agreement.agreement():
+            raise ValueError("recorded judge consensus contradicts members and policy")
+    elif "agreement" in raw:
+        if not isinstance(raw["agreement"], Mapping):
+            raise ValueError("judge agreement must be an object")
+        agreement = raw["agreement"]
+    return _CompleteJudgeObservation(fields, population, verdict, explicit, fresh, agreement)
+
+
+def _judge_observation_matches_steps(observation: _JudgeObservation, *, fingerprint: str | None,
+                                     names: tuple[str, ...], minimum: int) -> bool:
+    if not isinstance(observation, _CompleteJudgeObservation):
+        return False
+    if isinstance(observation.population, _JudgeLeaf):
+        verdict = observation.verdict
+        return (isinstance(verdict, DynamicVerdict)
+                and tuple(name for name, _ in verdict.criteria) == names
+                and verdict.minimum_criteria == minimum
+                and observation.fields.get("trajectory_steps_sha256") == fingerprint)
+    return all(_judge_observation_matches_steps(member, fingerprint=fingerprint,
+                                               names=names, minimum=minimum)
+               for member in observation.population.members)

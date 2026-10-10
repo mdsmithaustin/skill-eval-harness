@@ -238,10 +238,10 @@ hashed paths are the paths an agent lists. The judge's explore-surface digest fr
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract for ordinary rows. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11809`), Claude (`run_claude:12098`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11823`), Claude (`run_claude:12112`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:15394`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4278` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:15428`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:4290` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -370,7 +370,7 @@ keeps its original `cost` evidence. Incompatible bases and currencies retain the
 reasons without reviving rejected sums or converting money.
 
 `merge_repeated_judge_rows` majority-votes pass/fail and medians scores across repeats. The
-harness picks no model. At the result boundary, `judge_verdict.py` parses one strict variant:
+harness picks no model. At the semantic boundary, `judge_verdict.py` parses one strict variant:
 boolean, scored, dimension-scored, dynamic-rubric, or consensus. Pass is derived from the typed
 payload; duplicate IDs and contradictory score/threshold/pass rows are rejected. The serialized
 row still carries `{judge_task_id, verdict_kind, passed, score, evidence}` — plus
@@ -380,13 +380,37 @@ row still carries `{judge_task_id, verdict_kind, passed, score, evidence}` — p
 exact rendered prompt, candidate output, and evidence. A stale or mismatched result is rejected
 or re-queued even when its `judge_task_id` still matches.
 
+The same module owns the private complete, partial, and missing observation union and its
+leaf, repeat, and panel populations. A partial paid leaf retains its canonical verdict independently
+of process success. A missing observation holds no verdict. Its compatibility projection is exactly
+`verdict_kind: consensus` and `passed: false`, with `judge_observation_kind: missing`, false
+completeness, and partial availability. It supplies no score or agreement. Only the existing local
+empty-step false result can be complete without a model call.
+
+Execution and folding use the typed tree. One recursive stored-result parser validates every
+child before checking availability. Fresh leaves bind a closed `JudgeCall`; groups declare their
+requested population and consensus policy. The reader rejects changed identities, incomplete
+children under a complete parent, and a pass, median, or agreement that does not replay from
+the recorded policy. A missing group retains every valid member, including incompatible explicit
+kinds with indexed diagnostics. Complete mixed kinds still reject. Group projections derive
+shared identity from all members and carry no leaf call ID, repeat, served model, or lifecycle.
+Historical loading preserves absent labels and population declarations.
+
+The existing price leaves also supply disjoint execution counts. `requested_calls` equals
+`billed_calls + not_started_calls + nonbillable_calls + unverified_calls`. Billed means an affirmative
+launch, including a zero or unknown charge. Guards and spawn failures are nonbillable. Explicit
+refusals are not started. Missing historical launch facts are unverified. `requested_calls_basis`
+is `requested_slots` for fresh declared calls and `retained_leaves` for historical rows without a
+known requested population. Historical uncertainty makes `counts_availability` partial even
+when every retained launch is known. Count coverage and dollar coverage remain independent.
+
 Every per-run record shares one key, `manifest_contracts.RunCoordinate` (case, execution variant,
 run number, and a model on a model-fanned run). `judge_task_id` is that coordinate's rendering
 with an assertion label, so a judge task, a human judgement and a result row cannot name the same
 run differently. Repeated runs of one judge and a panel of judge models fold their verdicts with one
 rule, `judge_verdict.resolve_consensus`: a strict majority passes, an explicit `--quorum` overrides
 it, and an exact tie is decided by the median score only against an explicit threshold, else it is
-`unresolved` and does not pass. Both merges report the same `agreement` block, so a judge that
+`unresolved` and does not pass. Complete merges report the same `agreement` block, so a judge that
 disagrees with itself is visible rather than averaged away.
 
 Human verdicts have one shape, `human_judgements.HumanJudgement`: a run coordinate, an optional
@@ -479,7 +503,7 @@ by domain, difficulty, trigger type, and success goal. Case flags mark saturated
 flaky, and with-skill-failed cases, and `effect_estimates.ceiling_or_floor` separates the two
 ways a case stops discriminating: both arms always pass (ceiling) or both always fail (floor, which
 `suggest-cases` never offers for hardening). These flags, the leakage lint
-(`prompt_assertion_leakage_findings:974`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:984`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as

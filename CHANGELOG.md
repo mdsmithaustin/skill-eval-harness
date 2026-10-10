@@ -4,6 +4,8 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Judge observations separate complete verdicts, partial paid evidence, and missing results. Refused optional-score repeats retain all requested members and exit 2 without a kind exception. Saved readers validate every nested child, requested identity, fresh consensus policy, and original price cache. Counts distinguish launches, refusals, nonbillable calls, and unverified historical calls. Complete saved per-step repeats and panels validate each leaf and reuse the parent's consensus decision and median.
+
 - Native process capture preserves empty provider stderr after a natural exit between polling checks. Successful and nonzero exits keep their actual process code without a false polling-timeout message. Genuine task timeouts retain their diagnostics and code 124. The recovery capture-error regression now waits for the fixture's observed checkpoint before injecting the error.
 - `judge` accepts `--max-cost-usd` and `--assumed-cost-per-run-usd` for actual native and shell calls. Evidence guards run before spend policy checks. Refused ready calls retain every requested panel and repeat slot. Paid malformed verdicts and transcript failures keep settled dollars. Prepared prompts and consumed exploration evidence remain fixed through the batch. See [the judge ceiling example](docs/limit-native-spend.md#judge-calls).
 

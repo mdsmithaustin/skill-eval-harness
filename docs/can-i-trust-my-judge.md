@@ -70,6 +70,12 @@ known dollars without counting a floor as a whole price. Saved readers reject co
 timeout prices or parent projections. Regenerate those artifacts before using them in a report.
 See [judge price reporting](commands.md#judge-backends).
 
+Only complete observations enter alignment or calibration. A partial paid leaf can retain a valid
+score and pass while its process evidence is incomplete. A missing repeat or panel retains every
+child and has no usable aggregate decision. Saved readers reject malformed nested verdicts and
+forged fresh consensus. Loading historical rows preserves absent kind labels, so normalization
+cannot turn an unrecorded decision rule into a calibrated score.
+
 ## Probe stability first (`judge-robustness`) — no labels needed
 
 The cheapest check needs nothing but the judge itself: re-judge each task with
