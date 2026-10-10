@@ -4,6 +4,8 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Native answer spend receipts retain an observed provider charge when later workspace capture or cleanup fails. Settlement now persists before capture. Refused calls create no model workspace or baseline. Pricing or settlement exceptions skip capture and stop the command. Returned failure and timeout outcomes still retain workspace evidence.
+
 - Native serial answer commands accept a per-invocation `--max-cost-usd` admission ceiling and an optional `--assumed-cost-per-run-usd`. Durable invocation ledgers retain charges, unresolved calls, and refusals. Capped batches reject recovery before any provider call or runs-root write. See [the native spend walkthrough](docs/limit-native-spend.md).
 
 - Pi trace retry counts come from `agent_end.willRetry` markers in complete streams, including a measured zero when no attempt retries. Truncated streams, malformed retry markers, and providers without a retry protocol leave the count unavailable. The Pi CLI facade continues to use the matrix controller and its independent telemetry completeness checks.

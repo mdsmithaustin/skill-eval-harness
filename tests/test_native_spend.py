@@ -7,17 +7,22 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest import mock
 
 from helpers import claude_stream_records, run_cli, write_with_skill_task
 
+import skill_benchmark as sb
+import workspace_contracts as wc
+
 
 class NativeSpendTests(unittest.TestCase):
-    def setup_batch(self, root, *, cost=0.6, returncode=0, hang=False):
+    def setup_batch(self, root, *, cost=0.6, returncode=0, hang=False, edit=False):
         manifest, tasks, run_dir = write_with_skill_task(root)
         row = json.loads(tasks.read_text())
-        second = dict(row, run_number=2, run_dir=run_dir + "/run-2")
+        row["run_dir"] = str(Path(run_dir) / "run-1")
+        second = dict(row, run_number=2, run_dir=str(Path(run_dir) / "run-2"))
         tasks.write_text("\n".join(json.dumps(item) for item in (row, second)) + "\n")
         marker = root / "launches"
         records = claude_stream_records(cost=0.6)
@@ -33,6 +38,8 @@ sys.stdin.read()
 Path({str(root / "child.pid")!r}).write_text(str(os.getpid()))
 with Path({str(marker)!r}).open("a") as handle:
     handle.write("started\\n")
+if {edit!r}:
+    Path("candidate.txt").write_text("paid edit\\n")
 if {hang!r}:
     time.sleep(60)
 sys.stdout.write({''.join(json.dumps(item) + chr(10) for item in records)!r})
@@ -101,7 +108,9 @@ sys.exit({returncode})
     def test_zero_starts_no_child_and_preserves_the_plan(self):
         with tempfile.TemporaryDirectory() as td:
             manifest, tasks, runs, marker, stub, _, _ = self.setup_batch(Path(td))
-            code, _, stderr = self.invoke(tasks, runs, stub, "--max-cost-usd", "0")
+            with mock.patch.dict(sb.WORKSPACE_BUILDERS, {"claude": mock.Mock(side_effect=AssertionError("workspace built"))}), \
+                    mock.patch.object(wc, "snapshot_workspace", side_effect=AssertionError("baseline created")):
+                code, _, stderr = self.invoke(tasks, runs, stub, "--max-cost-usd", "0")
             self.assertEqual(code, 2, stderr)
             self.assertFalse(marker.exists())
             ledger = self.ledgers(runs)[0]
@@ -198,6 +207,215 @@ sys.exit({returncode})
                 self.assertEqual(ledger["spent_usd"], "0.6")
                 self.assertEqual([item["state"] for item in ledger["calls"]],
                                  ["settled", "planned"])
+
+    def test_cleanup_error_retains_observed_cost(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, tasks, runs, marker, stub, _, _ = self.setup_batch(Path(td))
+            error = OSError("workspace cleanup failed")
+            original_cleanup = tempfile.TemporaryDirectory.cleanup
+            cleaned = []
+
+            def cleanup(directory):
+                original_cleanup(directory)
+                path = Path(directory.name)
+                cleaned.append(path)
+                if path.name.startswith("claude-ws-"):
+                    self.assertEqual(self.ledgers(runs)[0]["spent_usd"], "0.6")
+                    raise error
+
+            with mock.patch.object(tempfile.TemporaryDirectory, "cleanup", cleanup), \
+                    mock.patch("skill_benchmark.write_runner_outcome") as writer:
+                with self.assertRaises(OSError) as raised:
+                    self.invoke(tasks, runs, stub, "--max-cost-usd", "1",
+                                "--assumed-cost-per-run-usd", "0.1")
+            self.assertIs(raised.exception, error)
+            self.assertEqual(marker.read_text(), "started\n")
+            self.assertEqual(writer.call_count, 0)
+            self.assertEqual(len(cleaned), 3)
+            self.assertEqual([path.exists() for path in cleaned], [False, False, False])
+            ledger = self.ledgers(runs)[0]
+            self.assertEqual(ledger["calls"][0]["charge"],
+                             {"basis": "observed", "amount_usd": "0.6",
+                              "provenance": "provider_reported"})
+            self.assertEqual([item["state"] for item in ledger["calls"]],
+                             ["settled", "planned"])
+
+    def test_settlement_publication_error_skips_capture_and_cleans_workspace(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, tasks, runs, marker, stub, _, _ = self.setup_batch(Path(td))
+            error = OSError("settlement publication failed")
+            original_replace = os.replace
+            original_snapshot = wc.snapshot_workspace
+            directories = []
+            settlements = []
+
+            def snapshot(ws, baseline):
+                directories.extend((ws, baseline.parent))
+                return original_snapshot(ws, baseline)
+
+            def replace(source, destination):
+                if Path(destination).name == "spend-ceiling.json":
+                    proposed = json.loads(Path(source).read_text())
+                    if proposed["calls"][0]["state"] == "settled":
+                        settlements.append(proposed["calls"][0]["charge"])
+                        raise error
+                return original_replace(source, destination)
+
+            with mock.patch.object(wc, "snapshot_workspace", side_effect=snapshot), \
+                    mock.patch("spend_runtime.os.replace", side_effect=replace), \
+                    mock.patch.object(wc, "capture_workspace_changes") as capture, \
+                    mock.patch("skill_benchmark.write_runner_outcome") as writer:
+                with self.assertRaises(OSError) as raised:
+                    self.invoke(tasks, runs, stub, "--max-cost-usd", "1")
+            self.assertIs(raised.exception, error)
+            self.assertEqual(marker.read_text(), "started\n")
+            self.assertEqual(settlements, [{"basis": "observed", "amount_usd": "0.6",
+                                            "provenance": "provider_reported"}])
+            self.assertEqual((capture.call_count, writer.call_count), (0, 0))
+            self.assertEqual(len(directories), 2)
+            self.assertEqual([path.exists() for path in directories], [False, False])
+            ledger = self.ledgers(runs)[0]
+            self.assertEqual([item["state"] for item in ledger["calls"]],
+                             ["in_flight", "planned"])
+            self.assertEqual((ledger["spent_usd"], ledger["spent_availability"]), ("0", "partial"))
+
+    def test_provider_interruption_skips_capture_and_cleans_group_and_workspace(self):
+        for capped in (False, True):
+            with self.subTest(capped=capped), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                _, tasks, runs, marker, stub, _, _ = self.setup_batch(root, hang=True)
+                error = KeyboardInterrupt("provider interrupted")
+                original_communicate = subprocess.Popen.communicate
+                original_snapshot = wc.snapshot_workspace
+                directories = []
+                interrupted = []
+
+                def snapshot(ws, baseline, directories=directories, original_snapshot=original_snapshot):
+                    directories.extend((ws, baseline.parent))
+                    return original_snapshot(ws, baseline)
+
+                def communicate(process, *args, interrupted=interrupted, marker=marker,
+                                error=error, original_communicate=original_communicate, **kwargs):
+                    try:
+                        return original_communicate(process, *args, **kwargs)
+                    except subprocess.TimeoutExpired:
+                        if marker.exists() and not interrupted:
+                            interrupted.append(process.pid)
+                            raise error
+                        raise
+
+                flags = ("--max-cost-usd", "1") if capped else ()
+                with mock.patch.object(wc, "snapshot_workspace", side_effect=snapshot), \
+                        mock.patch.object(subprocess.Popen, "communicate", communicate), \
+                        mock.patch.object(wc, "capture_workspace_changes") as capture:
+                    with self.assertRaises(KeyboardInterrupt) as raised:
+                        self.invoke(tasks, runs, stub, *flags)
+                self.assertIs(raised.exception, error)
+                self.assertEqual(marker.read_text(), "started\n")
+                self.assertEqual(interrupted, [int((root / "child.pid").read_text())])
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(interrupted[0], 0)
+                self.assertEqual(capture.call_count, 0)
+                self.assertEqual(len(directories), 2)
+                self.assertEqual([path.exists() for path in directories], [False, False])
+                if capped:
+                    ledger = self.ledgers(runs)[0]
+                    self.assertEqual(ledger["calls"][0]["charge"],
+                                     {"basis": "unpriced", "reason": "invocation_raised",
+                                      "observed_subtotal_usd": None})
+                    self.assertEqual(ledger["calls"][1]["state"], "planned")
+                else:
+                    self.assertFalse((runs / "spend").exists())
+
+    def test_pricing_error_skips_capture_after_provider_return(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, tasks, runs, marker, stub, _, _ = self.setup_batch(Path(td))
+            error = ValueError("pricing failed")
+            original_snapshot = wc.snapshot_workspace
+            directories = []
+
+            def snapshot(ws, baseline):
+                directories.extend((ws, baseline.parent))
+                return original_snapshot(ws, baseline)
+
+            with mock.patch.object(wc, "snapshot_workspace", side_effect=snapshot), \
+                    mock.patch.object(sb, "Priced", side_effect=error), \
+                    mock.patch.object(wc, "capture_workspace_changes") as capture:
+                with self.assertRaises(ValueError) as raised:
+                    self.invoke(tasks, runs, stub, "--max-cost-usd", "1")
+            self.assertIs(raised.exception, error)
+            self.assertEqual(marker.read_text(), "started\n")
+            self.assertEqual(capture.call_count, 0)
+            self.assertEqual(len(directories), 2)
+            self.assertEqual([path.exists() for path in directories], [False, False])
+            self.assertEqual(self.ledgers(runs)[0]["calls"][0]["charge"],
+                             {"basis": "unpriced", "reason": "invocation_raised",
+                              "observed_subtotal_usd": None})
+
+    def test_returned_outcomes_capture_before_deletion_and_write_sidecars_afterward(self):
+        original_build = sb.registered_workspace_builder("claude")
+        for mode in ("completed", "failed", "timeout", "spawn_failed", "capture_failed"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as td:
+                _, tasks, runs, marker, stub, row, _ = self.setup_batch(
+                    Path(td), returncode=7 if mode == "failed" else 0,
+                    hang=mode == "timeout", edit=True)
+                if mode == "spawn_failed":
+                    stub.unlink()
+                original_capture = wc.capture_workspace_changes
+                original_writer = sb.write_runner_outcome
+                captured = []
+                sidecars = []
+                built = []
+
+                def build(pt, ws, built=built):
+                    workspace = original_build(pt, ws)
+                    built.append(workspace.attestation)
+                    return workspace
+
+                def capture(baseline, ws, changes, captured=captured,
+                            original_capture=original_capture, **kwargs):
+                    self.assertTrue(ws.is_dir())
+                    captured.append(ws)
+                    return original_capture(baseline, ws, changes, **kwargs)
+
+                def write(base, outcome, *, sidecars, captured=captured, retained=sidecars,
+                          original_writer=original_writer):
+                    self.assertFalse(captured[-1].exists())
+                    self.assertTrue((sidecars / "workspace-changes.json").is_file())
+                    retained.append(sidecars)
+                    return original_writer(base, outcome, sidecars=sidecars)
+
+                capture_error = (mock.patch.object(wc, "_stage_changes", side_effect=OSError("evidence failed"))
+                                 if mode == "capture_failed" else nullcontext())
+                with mock.patch.object(wc, "capture_workspace_changes", side_effect=capture), \
+                        mock.patch.object(sb, "write_runner_outcome", side_effect=write), \
+                        mock.patch.dict(sb.WORKSPACE_BUILDERS, {"claude": build}), capture_error:
+                    code, _, stderr = self.invoke(tasks, runs, stub, "--max-cost-usd", "0.5", "--timeout", "1")
+                self.assertEqual(code, 0 if mode == "spawn_failed" else 2, stderr)
+                self.assertEqual(marker.read_text() if marker.exists() else "", "" if mode == "spawn_failed" else "started\n")
+                base = runs / row["run_dir"]
+                self.assertTrue(sb.artifact_commit_valid(base))
+                metadata = sb.read_metrics_base(base)
+                expected_calls = 2 if mode == "spawn_failed" else 1
+                self.assertEqual(len(built), expected_calls)
+                self.assertEqual(metadata["fixture_tree_hash"], built[0].fixture_tree_hash)
+                self.assertEqual(metadata["skill_tree_hash"], built[0].mounted_skill_tree_hash)
+                manifest = json.loads((base / "workspace-changes.json").read_text())
+                self.assertEqual((manifest["captured"], metadata["workspace_changes_captured"]),
+                                 (mode != "capture_failed", mode != "capture_failed"))
+                if mode not in {"spawn_failed", "capture_failed"}:
+                    self.assertIn("+paid edit", (base / "candidate.patch").read_text())
+                if mode == "timeout":
+                    self.assertEqual((metadata["timed_out"], metadata["returncode"]), (True, 124))
+                if mode == "capture_failed":
+                    self.assertEqual(manifest["capture_error"],
+                                     {"stage": "evidence", "reason": "OSError: evidence failed"})
+                    self.assertEqual(self.ledgers(runs)[0]["spent_usd"], "0.6")
+                if mode == "spawn_failed":
+                    self.assertEqual(self.ledgers(runs)[0]["calls"][0]["charge"],
+                                     {"basis": "no_model_spend", "reason": "spawn_failed_before_process"})
+                self.assertEqual(len(sidecars), expected_calls)
+                self.assertEqual([path.exists() for path in sidecars], [False] * len(sidecars))
 
     def test_invalid_policy_does_not_launch_or_write(self):
         with tempfile.TemporaryDirectory() as td:

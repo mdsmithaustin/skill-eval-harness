@@ -43,6 +43,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass as _dataclass
 from decimal import ROUND_CEILING, Decimal
 from enum import Enum
@@ -11631,38 +11632,39 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                 continue
             with tempfile.TemporaryDirectory(prefix=f"{backend.name}-changes-") as cd:
                 changes = Path(cd)
+                with ExitStack() as lifetime:
 
-                def invoke(*, pt: PreparedTask = pt, row_model: str | None = row_model,
-                           changes: Path = changes, prov_extra: dict[str, Any] = prov_extra) -> Priced[AnswerOutcome]:
-                    with captured_workspace(prefix=f"{backend.name}-ws-", changes_dir=changes,
-                                            build=functools.partial(workspace_builder, pt)) as (ws, workspace):
+                    def invoke(*, pt: PreparedTask = pt, row_model: str | None = row_model,
+                               changes: Path = changes, lifetime: ExitStack = lifetime) -> Priced[tuple[AnswerOutcome, WorkspaceAttestation]]:
+                        ws, workspace = lifetime.enter_context(captured_workspace(
+                            prefix=f"{backend.name}-ws-", changes_dir=changes,
+                            build=functools.partial(workspace_builder, pt)))
                         skill_rel, input_rel = workspace
-                        attestation = workspace.attestation
-                        if attestation.mounted_skill_tree_hash is not None:
-                            prov_extra["skill_tree_hash"] = attestation.mounted_skill_tree_hash
-                        prov_extra["fixture_tree_hash"] = attestation.fixture_tree_hash
                         prompt = build_task_prompt(pt, skill_paths=skill_rel, input_files=input_rel)
                         outcome = backend.invoke_answer(InvocationRequest.parse(
                             prompt=prompt, workspace=ws, model=row_model,
                             timeout_s=timeout, effort=effort), **options)
-                    context = outcome_context(outcome)
-                    if context.cost_usd is not None:
-                        cost = telemetry_domain.Measurement.available(
-                            telemetry_domain.Money.from_raw(context.cost_usd),
-                            provenance=cost_support if cost_support not in {"missing", "not_applicable"}
-                            else "trace_normalized")
-                    else:
-                        cost = telemetry_domain.Measurement.unavailable("runner_does_not_report_cost")
-                    no_spend = (NoModelSpend("spawn_failed_before_process")
-                                if isinstance(outcome, SpawnFailed) else
-                                NoModelSpend("offline_adapter") if cost_support == "not_applicable" else None)
-                    return Priced(outcome, cost, no_model_spend=no_spend)
+                        context = outcome_context(outcome)
+                        if context.cost_usd is not None:
+                            cost = telemetry_domain.Measurement.available(
+                                telemetry_domain.Money.from_raw(context.cost_usd),
+                                provenance=cost_support if cost_support not in {"missing", "not_applicable"}
+                                else "trace_normalized")
+                        else:
+                            cost = telemetry_domain.Measurement.unavailable("runner_does_not_report_cost")
+                        no_spend = (NoModelSpend("spawn_failed_before_process")
+                                    if isinstance(outcome, SpawnFailed) else
+                                    NoModelSpend("offline_adapter") if cost_support == "not_applicable" else None)
+                        return Priced((outcome, workspace.attestation), cost, no_model_spend=no_spend)
 
-                execution = admission.run(call, invoke)
+                    execution = admission.run(call, invoke)
                 if isinstance(execution, NotStarted):
                     budget_stopped = True
                     continue
-                outcome = execution.value
+                outcome, attestation = execution.value
+                if attestation.mounted_skill_tree_hash is not None:
+                    prov_extra["skill_tree_hash"] = attestation.mounted_skill_tree_hash
+                prov_extra["fixture_tree_hash"] = attestation.fixture_tree_hash
                 if admission.path is not None:
                     prov_extra["spend_ledger_path"] = str(admission.path)
                     prov_extra["spend_call_id"] = call.call_id
