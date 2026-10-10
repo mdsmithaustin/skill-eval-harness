@@ -865,7 +865,8 @@ class JudgePriceTests(unittest.TestCase):
         invalid = (
             ({"cost_usd": 0.06}, "judge cost channels contradict"),
             ({"cost_usd": 0}, "judge cost channels contradict"),
-            ({"cost_normalized": {"source": "provider_reported", "total_cost": 0.06}}, "judge full cost requires"),
+            ({"cost_normalized": {"source": "provider_reported", "total_cost": 0.06}}, "judge observed subtotal requires unavailable full cost"),
+            ({"cost_normalized": {"source": "not_applicable"}}, "judge observed subtotal requires unavailable full cost"),
             ({"telemetry": {"schema_version": 3, "measurements": {"cost": v3}}}, "judge cost channels contradict"),
             ({"invocation_state": "process_failed"}, "judge observed subtotal requires an actual timeout"),
             ({"returncode": 0}, "judge observed subtotal requires an actual timeout"),

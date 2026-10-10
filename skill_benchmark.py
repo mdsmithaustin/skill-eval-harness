@@ -11388,7 +11388,9 @@ class ClaudeBackend(AgentBackend):
             error=(result.get("provider_error") or result.get("parse_error")),
             trace_text=result.get("raw_response") or "",
             trace_utf8_valid=(result.get("trace_utf8_valid") is not False),
-            usage=result.get("usage"), cost_usd=result.get("cost_usd"), model=request.model,
+            usage=result.get("usage"),
+            cost_usd=(result.get("observed_subtotal_usd") if result.get("timed_out") is True
+                      else result.get("cost_usd")), model=request.model,
             environment={
                 **dict(result.get("environment") or {}),
                 "runner": "claude",
@@ -12009,6 +12011,8 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
     """Single owner for invoking Claude via `claude -p`.
 
     Returns the parsed envelope plus returncode/elapsed_ms/stderr/raw_response.
+    Actual timeouts publish captured dollars as observed_subtotal_usd and leave
+    cost_usd unavailable. Natural exits retain independently safe full cost.
     `claude_bin` is an executable path (tests inject a stub that emits a canned
     envelope), NOT a shell string — so there is no shell-quoting seam between
     the harness and the model. `output_format` selects `json` (one envelope; the
@@ -12053,7 +12057,8 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
               "parse_error": "Claude stdout is not valid UTF-8"}
     )
     if result.timed_out:
-        return {"answer": "", "cost_usd": parsed.get("cost_usd"), "usage": {},
+        return {"answer": "", "cost_usd": None,
+                "observed_subtotal_usd": parsed.get("cost_usd"), "usage": {},
                 "parse_error": parsed.get("parse_error"),
                 "returncode": 124, "timed_out": True, "elapsed_ms": result.elapsed_ms,
                 "stderr": result.stderr, "raw_response": result.stdout, "command": command,
@@ -13228,6 +13233,10 @@ def load_judge_results(path: str | None) -> dict[str, dict[str, Any]]:
             die(f"judge results duplicate id {jid!r} at rows {positions[jid]} and {position}")
         try:
             validated = validated_result_row(row)
+            leaves = _judge_cost_leaves([validated])
+            buckets = _judge_cost_buckets(leaves)
+            if any(key in validated for key in ("judge_runs", "judge_panel")):
+                validated.update(_judge_cost_projection(buckets))
         except (TypeError, ValueError) as exc:
             die(f"judge results row {position} ({jid}): {exc}")
         lookup[jid] = validated
@@ -13615,9 +13624,11 @@ def claude_judge_invoke(prompt: str, *, judge_model: str | None, claude_bin: str
             provider_error=(provider_error if isinstance(provider_error, str) else None)),
         provider_error=(provider_error if isinstance(provider_error, str) else None),
         cost_usd=res.get("cost_usd"),
+        observed_subtotal_usd=res.get("observed_subtotal_usd"),
         usage=res.get("usage") if isinstance(res.get("usage"), dict) else None,
         usage_source="provider_reported",
         model_label=judge_model,
+        raw_response=res.get("raw_response"),
         # Same isolation contract as the answer runner: recorded here, not on the
         # verdict row, since only --transcripts persists it (provider-metadata.json).
         metadata=({"context_isolation": list(context_isolation)}
@@ -14096,6 +14107,12 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
            if context_sha256 is not None else {}),
         "judge_observation_complete": invocation_complete and parse_error is None,
         "invocation_state": invocation.invocation_state.value,
+        "timed_out": invocation.invocation_state is InvocationState.TIMED_OUT,
+        **({"cost_availability": "partial", "observed_subtotal_usd": invocation.observed_subtotal_usd,
+            "cost_reason": "process_timeout"}
+           if invocation.observed_subtotal_usd is not None else
+           {"cost_availability": "unavailable", "cost_reason": "process_timeout"}
+           if invocation.invocation_state is InvocationState.TIMED_OUT else {}),
         **({"provider_error": invocation.provider_error}
            if invocation.provider_error is not None else {}),
         "availability": ("complete" if invocation_complete and parse_error is None
@@ -14142,6 +14159,176 @@ def run_one_judge_task(task: dict[str, Any], judge_cmd: str | None = None, trans
     return row
 
 
+def _judge_price_facts(
+    row: Mapping[str, Any],
+) -> tuple[telemetry_domain.Measurement[telemetry_domain.Money], telemetry_domain.Money | None]:
+    basis = telemetry_domain.basis_from_run(row, source="judge", population="judge")
+    channels: list[telemetry_domain.Measurement[telemetry_domain.Money]] = []
+    for key in ("cost_usd", "cost"):
+        amount = row.get(key)
+        if amount is not None:
+            telemetry_domain.finite_nonnegative(amount, f"judge {key}")
+            channels.append(telemetry_domain.Measurement.available(
+                telemetry_domain.Money.from_raw(amount), provenance="legacy_unverified", basis=basis))
+    normalized = row.get("cost_normalized")
+    if normalized is not None:
+        if not isinstance(normalized, Mapping):
+            raise ValueError("judge cost_normalized must be an object")
+        amount = normalized.get("total_cost")
+        if amount is not None:
+            telemetry_domain.finite_nonnegative(amount, "judge normalized cost")
+            if normalized.get("source") not in telemetry_domain.PROVENANCE:
+                raise ValueError("judge normalized cost contradicts its availability")
+        measurement = telemetry_domain.measurement_from_cost_block(normalized, basis=basis)
+        if measurement.reason in {"invalid_cost_block", "unknown_cost_provenance"}:
+            raise ValueError("judge normalized cost is invalid")
+        channels.append(measurement)
+    envelope = row.get("telemetry")
+    if isinstance(envelope, Mapping) and envelope.get("schema_version") == 3:
+        measurements = envelope.get("measurements")
+        if isinstance(measurements, Mapping) and "cost" in measurements:
+            wire = measurements["cost"]
+            if (isinstance(wire, Mapping) and wire.get("availability") != telemetry_domain.AVAILABLE
+                    and (wire.get("value") is not None or wire.get("provenance") is not None)):
+                raise ValueError("judge v3 cost contradicts its availability")
+            measurement = telemetry_domain.Measurement.from_dict(wire)
+            if measurement.availability == telemetry_domain.AVAILABLE:
+                if not isinstance(measurement.value, telemetry_domain.Money):
+                    raise ValueError("judge v3 cost must be money")
+                if not math.isfinite(float(measurement.value.amount)):
+                    raise ValueError("judge v3 cost must fit a finite float")
+            channels.append(measurement)
+    if channels and any(
+            channel.availability != channels[0].availability or channel.value != channels[0].value
+            for channel in channels[1:]):
+        raise ValueError("judge cost channels contradict one another")
+    whole = telemetry_domain.measurement_from_envelope_or_cost(row, source="judge", population="judge")
+    parent = any(row.get(key) is not None for key in ("judge_runs", "judge_panel"))
+    amount = row.get("observed_subtotal_usd")
+    floor = None
+    if amount is not None:
+        telemetry_domain.finite_nonnegative(amount, "judge observed subtotal")
+        if parent:
+            raise ValueError("judge parent price cannot retain a member subtotal")
+        if (row.get("invocation_state") != InvocationState.TIMED_OUT.value
+                or type(row.get("returncode")) is not int or row.get("returncode") != 124
+                or row.get("timed_out", True) is not True):
+            raise ValueError("judge observed subtotal requires an actual timeout with code 124")
+        if row.get("cost_availability") != telemetry_domain.PARTIAL:
+            raise ValueError("judge observed subtotal requires partial cost availability")
+        if row.get("cost_reason") != "process_timeout":
+            raise ValueError("judge observed subtotal requires process_timeout cost reason")
+        if whole.availability != telemetry_domain.UNAVAILABLE:
+            raise ValueError("judge observed subtotal requires unavailable full cost")
+        floor = telemetry_domain.Money.from_raw(amount)
+    if not parent:
+        timed_out = row.get("invocation_state") == InvocationState.TIMED_OUT.value
+        if "timed_out" in row and row.get("invocation_state") is not None and (
+                row.get("timed_out") is not timed_out):
+            raise ValueError("judge cost has contradictory timeout evidence")
+        if whole.availability == telemetry_domain.AVAILABLE and (
+                floor is not None or timed_out or row.get("timed_out") is True
+                or row.get("invocation_state") == InvocationState.SPAWN_FAILED.value):
+            raise ValueError("judge full cost requires a naturally exited process without a subtotal")
+        availability = row.get("cost_availability")
+        if availability is not None:
+            expected = (telemetry_domain.PARTIAL if floor is not None else
+                        telemetry_domain.COMPLETE if whole.availability == telemetry_domain.AVAILABLE
+                        else whole.availability)
+            if availability != expected:
+                raise ValueError("judge cost availability contradicts its price")
+        if timed_out:
+            whole = telemetry_domain.Measurement.unavailable("process_timeout", basis=whole.basis)
+    return whole, floor
+
+
+def _judge_cost_buckets(
+    leaves: Sequence[Mapping[str, Any]],
+) -> dict[str, telemetry_domain.Aggregate[Decimal]]:
+    facts = [_judge_price_facts(row) for row in leaves]
+    measurements = [whole for whole, _ in facts]
+    buckets = telemetry_domain.aggregate_money_by_currency(measurements)
+    floors = [floor.amount for whole, floor in facts if floor is not None
+              and whole.basis.get("population", "judge") == "judge"
+              and whole.basis.get("billing_scope", "run") == "run"]
+    rejected_floors = sum(1 for _, floor in facts if floor is not None) - len(floors)
+    foreign = sum(1 for whole in measurements if isinstance(whole.value, telemetry_domain.Money)
+                  and whole.value.currency != "USD")
+    usd = buckets.get("USD")
+    if floors or rejected_floors:
+        usd = usd or buckets.get("unknown") or telemetry_domain.Aggregate(telemetry_domain.UNAVAILABLE)
+    if usd is not None:
+        reasons = dict(usd.reason_counts)
+        if foreign:
+            reasons["currency_mismatch"] = foreign
+        if rejected_floors:
+            reasons["basis_mismatch"] = reasons.get("basis_mismatch", 0) + rejected_floors
+        observed = sum(1 for whole in measurements if isinstance(whole.value, telemetry_domain.Money)
+                       and whole.value.currency == "USD")
+        unavailable = sum(1 for whole in measurements if whole.availability == telemetry_domain.UNAVAILABLE) + foreign
+        na = sum(1 for whole in measurements if whole.availability == telemetry_domain.NOT_APPLICABLE)
+        known = usd.value if usd.availability == telemetry_domain.COMPLETE else usd.known_subtotal
+        if floors:
+            known = (known if known is not None else Decimal(0)) + sum(floors, Decimal(0))
+        if known is not None and (unavailable or na):
+            buckets["USD"] = telemetry_domain.Aggregate(
+                telemetry_domain.PARTIAL, known_subtotal=known, observed_count=observed,
+                unavailable_count=unavailable, not_applicable_count=na, reason_counts=reasons)
+            buckets.pop("unknown", None)
+        elif "basis_mismatch" in reasons:
+            buckets["USD"] = telemetry_domain.Aggregate(
+                telemetry_domain.UNAVAILABLE, unavailable_count=unavailable + observed,
+                not_applicable_count=na, reason_counts=reasons)
+            buckets.pop("unknown", None)
+    for aggregate in buckets.values():
+        amount = aggregate.value if aggregate.value is not None else aggregate.known_subtotal
+        if amount is not None and not math.isfinite(float(amount)):
+            raise ValueError("judge cost aggregate must fit a finite float")
+    return buckets
+
+
+def _judge_cost_projection(buckets: Mapping[str, telemetry_domain.Aggregate[Decimal]]) -> dict[str, Any]:
+    usd = buckets.get("USD")
+    amount = (usd.value if usd is not None and usd.availability == telemetry_domain.COMPLETE
+              and len(buckets) == 1 else None)
+    cost = float(amount) if amount is not None else None
+    return {"cost_usd": cost,
+            "cost_normalized": normalize_cost(cost, source="provider_reported", pricing_model="consensus"),
+            "cost_aggregate": {currency: aggregate.to_dict() for currency, aggregate in buckets.items()}}
+
+
+def _judge_cost_leaves(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    leaves: list[Mapping[str, Any]] = []
+    for row in rows:
+        keys = [key for key in ("judge_panel", "judge_runs") if row.get(key) is not None]
+        if not keys:
+            leaves.append(row)
+            continue
+        if len(keys) != 1:
+            raise ValueError("judge price has competing membership paths")
+        members = row[keys[0]]
+        if not isinstance(members, list) or not members or not all(isinstance(member, Mapping) for member in members):
+            raise ValueError("judge price membership must be a non-empty list of objects")
+        descendants = _judge_cost_leaves(members)
+        expected = _judge_cost_projection(_judge_cost_buckets(descendants))
+        whole, _ = _judge_price_facts(row)
+        has_price = any(key in row for key in ("cost_normalized", "cost_usd", "cost", "telemetry"))
+        if has_price:
+            expected_whole = telemetry_domain.measurement_from_envelope_or_cost(expected, population="judge")
+            if whole.availability != expected_whole.availability or whole.value != expected_whole.value:
+                raise ValueError("judge parent cost contradicts its billed leaves")
+        if "cost_aggregate" in row and row["cost_aggregate"] != expected["cost_aggregate"]:
+            raise ValueError("judge parent cost aggregate contradicts its billed leaves")
+        if row.get("cost_reason") is not None:
+            raise ValueError("judge parent price cannot retain a member cost reason")
+        if row.get("cost_availability") is not None:
+            bucket = expected["cost_aggregate"].get("USD") or expected["cost_aggregate"].get("unknown")
+            if bucket is None or row["cost_availability"] != bucket["availability"]:
+                raise ValueError("judge parent cost availability contradicts its billed leaves")
+        leaves.extend(descendants)
+    return leaves
+
+
 def aggregate_judge_member_telemetry(
     rows: list[dict[str, Any]], out: dict[str, Any],
 ) -> None:
@@ -14170,25 +14357,10 @@ def aggregate_judge_member_telemetry(
     else:
         out["usage_normalized"] = {"source": "missing"}
 
-    member_cost = [telemetry_domain.measurement_from_envelope_or_cost(
-        row, source="judge", population="judge") for row in rows]
-    cost_buckets = telemetry_domain.aggregate_money_by_currency(member_cost)
-    out["cost_aggregate"] = {
-        currency: aggregate.to_dict()
-        for currency, aggregate in cost_buckets.items()
-    }
-    usd = cost_buckets.get("USD")
-    if (usd is not None and usd.availability == telemetry_domain.COMPLETE
-            and len(cost_buckets) == 1):
-        usd_value = usd.value
-        if not isinstance(usd_value, Decimal):
-            raise TypeError("complete judge USD aggregate must be Decimal")
-        out["cost_usd"] = float(usd_value)
-        out["cost_normalized"] = normalize_cost(
-            out["cost_usd"], source="provider_reported", pricing_model="consensus")
-    else:
-        out["cost_usd"] = None
-        out["cost_normalized"] = {"source": "missing"}
+    for key in ("cost_availability", "observed_subtotal_usd", "cost_reason", "telemetry",
+                "invocation_state", "timed_out", "provider_error", "judge_runs", "judge_panel"):
+        out.pop(key, None)
+    out.update(_judge_cost_projection(_judge_cost_buckets(_judge_cost_leaves(rows))))
 
 
 def _judge_member_errors(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -14219,6 +14391,7 @@ def _incomplete_judge_consensus(
     out["evidence"] = "judge aggregate incomplete: " + "; ".join(
         str(error["reason"]) for error in errors[:5])
     aggregate_judge_member_telemetry(rows, out)
+    out[members_key] = rows
     for key in ("score", "threshold", "dimension_scores", "criteria", "minimum_criteria"):
         out.pop(key, None)
     out.update(verdict_fields(ConsensusVerdict(False)))
@@ -14267,6 +14440,7 @@ def merge_repeated_judge_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     first["availability"] = "complete"
     first["returncode"] = 0
     aggregate_judge_member_telemetry(rows, first)
+    first["judge_runs"] = rows
     for key in ("threshold", "dimension_scores", "criteria", "minimum_criteria"):
         first.pop(key, None)
     first.update(verdict_fields(consensus.verdict()))
@@ -15241,7 +15415,8 @@ def run_subagent(args: argparse.Namespace) -> int:
                 invocation_state=InvocationState(result["invocation_state"]),
                 stdout_utf8_valid=result.get("trace_utf8_valid", True), stderr_utf8_valid=True,
                 timed_out=result.get("timed_out", False))
-            evidence = _subagent_paid_evidence({"usage": {"cost_usd": result.get("cost_usd")},
+            evidence = _subagent_paid_evidence({"usage": {"cost_usd": (
+                result.get("observed_subtotal_usd") if process.timed_out else result.get("cost_usd"))},
                                                "telemetry_scope": "turn_delta"}, process)
             error = ("subagent Claude command timed out" if process.timed_out else
                      result.get("provider_error") or result.get("parse_error"))
@@ -18809,26 +18984,27 @@ def build_cost_summary(results: list[dict[str, Any]], *, judge_results: dict[str
 
 
 def judge_cost_block(judge_results: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    def leaves(row: dict[str, Any]) -> list[dict[str, Any]]:
-        for key in ("judge_panel", "judge_runs"):
-            nested = row.get(key)
-            if isinstance(nested, list) and nested:
-                return [leaf for member in nested if isinstance(member, dict)
-                        for leaf in leaves(member)]
-        return [row]
-
-    billed_rows = [leaf for row in judge_results.values() for leaf in leaves(row)]
-    measurements = [
-        telemetry_domain.measurement_from_envelope_or_cost(
-            row, source=str(row.get("provider") or "judge"), population="judge")
-        for row in billed_rows
-    ]
-    available = sum(1 for measurement in measurements if measurement.availability == telemetry_domain.AVAILABLE)
+    billed_rows = _judge_cost_leaves(judge_results.values())
+    buckets = _judge_cost_buckets(billed_rows)
+    usd = buckets.get("USD") or buckets.get("unknown")
+    if usd is None:
+        usd = telemetry_domain.Aggregate(
+            telemetry_domain.UNAVAILABLE,
+            unavailable_count=len(billed_rows),
+            reason_counts={"currency_mismatch": len(billed_rows)})
+    fields = _numeric_aggregate_fields("total_cost_usd", usd)
+    for key in ("total_cost_usd", "known_total_cost_usd"):
+        if fields.get(key) is not None:
+            fields[key] = float(fields[key])
+    available = sum(1 for row in billed_rows
+                    if telemetry_domain.measurement_from_envelope_or_cost(
+                        row, source="judge", population="judge").availability == telemetry_domain.AVAILABLE)
     return {
         "verdicts": len(judge_results),
         "billed_calls": len(billed_rows),
         "verdicts_with_cost": available,
-        **_money_aggregate_fields(measurements),
+        **fields,
+        "cost_by_currency": {currency: aggregate.to_dict() for currency, aggregate in buckets.items()},
     }
 
 
@@ -19543,7 +19719,7 @@ def build_benchmark_report(
     slice_surface: Any = build_slice_summary(results, variants)
     trajectory_surface: Any = build_trajectory_diff(results)
     cost_surface: Any = build_cost_summary(
-        results, judge_results=judge_lookup,
+        results,
         confirmed_regressions=confirmed_regression_count(ablation_regressions))
     case_flags_surface: Any = case_flags
     observed_case_flags: list[dict[str, Any]] | None = None
@@ -19617,6 +19793,8 @@ def build_benchmark_report(
         cost_surface = invalidate_design_aggregate(cost_surface, reason)
         observed_case_flags = case_flags
         case_flags_surface = []
+    if judge_lookup:
+        cost_surface["judge"] = judge_cost_block(judge_lookup)
     return {
         "manifest": str(path),
         "skill_name": manifest["skill_name"],

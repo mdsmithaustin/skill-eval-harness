@@ -174,6 +174,11 @@ gate. `JudgeInvocation` now has optional immutable `raw_response` and `metadata`
 fields, allowing Gemini's original raw stream, session, resolved models, and
 isolation disclosures to survive as transcript sidecars without making every
 judge backend return provider-shaped dictionaries.
+The implemented record also has keyword-only `observed_subtotal_usd`. It retains safe USD
+capture only for actual `TIMED_OUT` state and code 124, with no full `cost_usd`.
+Metadata cannot set canonical price or process lifecycle fields, including through dataclass
+reconstruction. Nested diagnostics remain legal. The shared Claude invoker publishes this
+subtotal separately from its full-cost field, and all three callers explicitly consume it.
 Gemini `--judge-explore` is rejected at both CLI and programmatic seams until a
 separately tested read-only policy exists.
 

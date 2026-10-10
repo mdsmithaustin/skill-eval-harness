@@ -67,4 +67,10 @@ For a scripted multi-turn task, the runner retains started turn artifacts, safe 
 
 Native Claude and built-in subagent backends retain trustworthy dollars captured before a process timeout as an observed subtotal. The whole-call price remains unavailable because the process may incur later cost. Without an assumption, that partial price closes later admission. An assumption charges at least the subtotal, so $0.01 cannot reduce a known $0.06 floor. Timeout artifacts retain return code 124, false provider completeness, and unavailable whole-call cost. Shell capture requires valid original UTF-8 and one strict complete JSON document. Claude capture requires one unambiguous terminal result with no later session content. Bad sibling token fields do not erase independent dollars. Malformed token records remain raw diagnostics.
 
+Claude judges use the same shared price distinction without entering this spend ceiling.
+Their timeout member rows retain `observed_subtotal_usd` and unavailable full price. Repeat,
+panel, benchmark, and saved cost reports preserve partial known dollars. Two $0.06 judge
+floors report a partial $0.12 subtotal and zero whole-price observations. See the
+[judge command reference](commands.md#judge-backends).
+
 A zero ceiling starts no callback. With no prior destination content, the runner publishes an incomplete terminal root. With any prior destination content, it preserves every existing file and records this invocation's refusals only in its new ledger. A new invocation does not claim the preserved old output as its own result. Capped recovery anywhere in the selected population rejects the whole batch before runs-root writes.

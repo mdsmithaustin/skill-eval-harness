@@ -35,6 +35,11 @@ class CapturedPriceTests(unittest.TestCase):
         self.assertIsNone(invocation.cost_usd)
         self.assertEqual(invocation.observed_subtotal_usd, 0.06)
         self.assertEqual(invocation.invocation_state, sb.InvocationState.TIMED_OUT)
+        sentinel = sb.claude_cli_invoke("prompt", isolation=sb.ContextIsolation.SEALED,
+                                        timeout=1, claude_bin=fixture_bin)
+        self.assertEqual(sentinel["invocation_state"], "spawn_failed")
+        self.assertEqual(sentinel["returncode"], 127)
+        self.assertIsNone(sentinel["cost_usd"])
 
     def shell_timeout(self, stdout, *, requires_delta=False):
         backend = sb.shell_agent_backend("agent", timeout=1)
