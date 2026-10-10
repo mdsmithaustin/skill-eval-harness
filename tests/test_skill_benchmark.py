@@ -1301,11 +1301,9 @@ class SkillBenchmarkTests(unittest.TestCase):
                 self.downloaded: list[str] = []
             def upload_bundle(self, archive_name, data):
                 self.bundle = (archive_name, data)
-                # Live shape: POST /api/v1/sandbox/upload returns file_paths.
                 return "skill-evals/_sandbox_uploads/abc123/demo.zip"
             def submit(self, request_body):
                 self.submitted = request_body
-                # Live shape: sync wait exceeded -> 202 + jetty_metadata.workflow_id.
                 return {"jetty_metadata": {"mode": "runbook", "status": "running", "workflow_id": "traj_1"}}
             def poll(self, collection, task, trajectory_id, *, timeout_s=1800, poll_interval_s=5, on_observation):
                 self.polled = (collection, task, trajectory_id, timeout_s, poll_interval_s)
@@ -1345,7 +1343,6 @@ class SkillBenchmarkTests(unittest.TestCase):
         self.assertEqual(client.downloaded, [
             "skill-evals/demo-case-1-with-skill-1/0000/traj_1.run.0000.app--results--output.md"])
         self.assertEqual(client.submitted["jetty"]["file_paths"], ["skill-evals/_sandbox_uploads/abc123/demo.zip"])
-        # Model-visible sandbox paths never change at run time.
         self.assertEqual(client.submitted["jetty"]["template_variables"]["task_json"], "/app/assets/tasks/demo.json")
         record = records[0]
         self.assertEqual(record["status"], "completed")
