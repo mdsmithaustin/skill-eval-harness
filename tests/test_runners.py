@@ -1001,6 +1001,29 @@ class ClosedRunnerOutcomeTests(unittest.TestCase):
                     **{field: {"trace_observation_complete": True}},
                 )
 
+    def test_partial_cost_extras_cannot_claim_runner_evidence(self):
+        identity = {"answer_task_sha256": "sha256:" + "a" * 64,
+                    "case_id": "case-1", "variant": "with_skill", "run_number": 1}
+        call = sb.SubagentTurnCall(identity["answer_task_sha256"],
+                                  sb.RunCoordinate.of("case-1", "with_skill", 1), 1)
+        rejection = sb._OpaqueResponseRejected(call, "rejected callback")
+        for state in ("completed", "no_process"):
+            for field in ("metadata_extra", "metrics_extra"):
+                for key, value in (("cost_availability", "partial"),
+                                   ("observed_subtotal_usd", 0.06),
+                                   ("cost_reason", "process_timeout")):
+                    with self.subTest(state=state, field=field, key=key), \
+                         self.assertRaisesRegex(ValueError, f"{field} cannot override derived evidence: {key}"):
+                        extras = {"metadata_extra": dict(identity), "metrics_extra": {}}
+                        extras[field][key] = value
+                        context = rc.OutcomeContext(
+                            provider="claude" if state == "completed" else "subagent",
+                            **extras)
+                        if state == "completed":
+                            rc.Completed(context, answer="ok")
+                        else:
+                            sb._NoProcessArtifact(context, rejection)
+
     def test_context_rejects_lossy_or_non_json_evidence_mappings(self):
         for field in ("metadata_extra", "metrics_extra", "environment"):
             for value in (
