@@ -11,7 +11,7 @@ a field widened to ``Any``.
 from argparse import Namespace
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 from typing_extensions import assert_type
 
@@ -51,14 +51,20 @@ from judge_verdict import (
     DynamicVerdict,
     JudgeVerdict,
     ScoredVerdict,
+    _AbsentSummary,
     _CompleteJudgeObservation,
+    _IntegerSummary,
     _JudgeLeaf,
     _JudgeObservation,
     _JudgePanel,
     _JudgePopulation,
     _JudgeRepeats,
+    _MalformedContainerSummary,
+    _MalformedScalarSummary,
     _MissingJudgeObservation,
+    _NullSummary,
     _PartialJudgeObservation,
+    _SavedAggregateSummary,
 )
 from manifest_contracts import (
     CaseId,
@@ -177,8 +183,22 @@ def judge_population_is_exhaustive(population: _JudgePopulation) -> None:
         assert_type(population.call, JudgeCall | None)
     elif isinstance(population, (_JudgeRepeats, _JudgePanel)):
         assert_type(population.members, tuple[_JudgeObservation, ...])
+        assert_type(population.saved_summary, _SavedAggregateSummary | None)
     else:
         _assert_never(population)
+
+
+def saved_aggregate_summary_is_exhaustive(summary: _SavedAggregateSummary) -> None:
+    if isinstance(summary, (_AbsentSummary, _NullSummary)):
+        assert_type(summary, _AbsentSummary | _NullSummary)
+    elif isinstance(summary, _IntegerSummary):
+        assert_type(summary.value, int)
+    elif isinstance(summary, _MalformedScalarSummary):
+        assert_type(summary.value, bool | float | str)
+    elif isinstance(summary, _MalformedContainerSummary):
+        assert_type(summary.json_type, Literal["array", "object"])
+    else:
+        _assert_never(summary)
 
 
 def prepared_task_identity_is_precise(task: PreparedTask) -> None:

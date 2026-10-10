@@ -145,6 +145,174 @@ class JudgeObservationTests(unittest.TestCase):
                         assert_dies(self, lambda raw=raw, value=value: self.load({**raw, "returncode": value}),
                                     "judge aggregate returncode must be an integer")
 
+    def test_historical_summary_zero_and_explicit_incomplete_keep_distinct_evidence(self):
+        for group in self.groups():
+            for code in (0, 1):
+                for incomplete in (False, True):
+                    with self.subTest(code=code, incomplete=incomplete, keys=list(group)):
+                        raw = self.legacy(group)
+                        raw["returncode"] = code
+                        if incomplete:
+                            raw.update(judge_observation_complete=False, availability="partial")
+                        observation = jv._judge_observation_from_row(raw)
+                        reason = ("judge aggregate summary returncode is nonzero (1)" if code else
+                                  "judge observation is not explicitly complete" if incomplete else None)
+                        self.assertEqual(jv._judge_observation_reason(observation), reason)
+                        projected = jv._judge_observation_fields(observation)
+                        self.assertEqual(projected["returncode"], 1 if code or incomplete else 0)
+                        self.assertEqual(projected["judge_aggregate_summary"],
+                                         {"version": 1, "kind": "saved", "status": {"kind": "integer", "value": code}})
+                        for _ in range(5):
+                            observation = jv._judge_observation_from_row(projected)
+                            self.assertEqual(jv._judge_observation_reason(observation), reason)
+                            self.assertEqual(jv._judge_observation_fields(observation), projected)
+                            projected = self.load(projected)
+                        self.assertEqual((projected["passed"], projected["judge_observation_complete"]),
+                                         (not (code or incomplete), not (code or incomplete)))
+        for historical in (False, True):
+            false_group = sb.merge_repeated_judge_rows([{**self.leaf(repeat=index), "passed": False} for index in (1, 2)])
+            if historical:
+                false_group = self.legacy(false_group)
+            loaded = self.load(false_group)
+            self.assertEqual((loaded["passed"], loaded["judge_observation_complete"], loaded["returncode"]), (False, True, 0))
+            self.assertIsNone(sb.judge_observation_incomplete_reason(loaded))
+
+    def test_historical_bad_summary_does_not_bypass_original_complete_policy_validation(self):
+        for code in (None, 1, False, 0.0, "0"):
+            for mutation, reason in (({"passed": False}, "recorded judge consensus contradicts"),
+                                     ({"score": 0.1}, "recorded judge consensus contradicts"),
+                                     ({"agreement": {}}, "recorded judge consensus contradicts"),
+                                     ({"verdict_kind": "boolean"}, "judge group requires consensus verdict")):
+                raw = self.legacy(self.groups()[0])
+                raw.update(returncode=code, **mutation)
+                with self.subTest(code=code, mutation=mutation):
+                    assert_dies(self, lambda raw=raw: self.load(raw), reason)
+                raw.update(judge_observation_complete=False, availability="partial")
+                self.assertFalse(self.load(raw)["judge_observation_complete"])
+
+    def test_saved_summary_envelope_rejects_malformed_forged_and_stale_states(self):
+        historical = self.load({**self.legacy(self.groups()[0]), "returncode": 1})
+        envelopes = (None, {"version": True, "kind": "derived"}, {"version": 1.0, "kind": "derived"},
+                     {"version": 2, "kind": "derived"}, {"version": 1, "kind": "unknown"},
+                     {"version": 1, "kind": "derived", "status": {"kind": "integer", "value": 0}},
+                     {"version": 1, "kind": "saved"},
+                     {"version": 1, "kind": "saved", "status": None},
+                     {"version": 1, "kind": "saved", "status": {"kind": "integer", "value": False}},
+                     {"version": 1, "kind": "saved", "status": {"kind": "integer", "value": 0.0}},
+                     {"version": 1, "kind": "saved", "status": {"kind": "malformed-scalar", "value": 0}},
+                     {"version": 1, "kind": "saved", "status": {"kind": "malformed-scalar", "value": None}},
+                     {"version": 1, "kind": "saved", "status": {"kind": "malformed-container", "json_type": "number"}},
+                     {"version": 1, "kind": "saved", "status": {"kind": "malformed-container", "json_type": "array", "value": []}},
+                     {"version": 1, "kind": "saved", "status": {"kind": "absent", "reason": "complete"}},
+                     {"version": 1, "kind": "saved", "status": {"kind": "unknown"}})
+        for envelope in envelopes:
+            with self.subTest(envelope=envelope):
+                with self.assertRaisesRegex(ValueError, "aggregate"):
+                    jv._judge_observation_from_row({**historical, "judge_aggregate_summary": envelope})
+        for mutation, reason in (({"judge_observation_complete": True, "availability": "complete", "returncode": 0},
+                                  "cannot carry unavailable saved summary"),
+                                 ({"returncode": 0}, "returncode contradicts completeness"),
+                                 ({"judge_observation_complete": 0}, "contradicts completeness flags"),
+                                 ({"availability": "complete"}, "contradicts completeness flags"),
+                                 ({"passed": True}, "exact consensus false shell"),
+                                 ({"score": None}, "exact consensus false shell"),
+                                 ({"agreement": None}, "exact consensus false shell")):
+            with self.subTest(mutation=mutation):
+                assert_dies(self, lambda mutation=mutation: self.load({**historical, **mutation}), reason)
+        assert_dies(self, lambda: self.load({**self.leaf(), "judge_aggregate_summary": {"version": 1, "kind": "derived"}}),
+                    "must belong to a group")
+        fresh = self.groups()[0]
+        assert_dies(self, lambda: self.load({**fresh, "judge_aggregate_summary": historical["judge_aggregate_summary"]}),
+                    "fresh judge group cannot carry saved historical summary")
+        observation = jv._judge_observation_from_row(fresh)
+        with self.assertRaisesRegex(ValueError, "cannot override reserved fields"):
+            jv._CompleteJudgeObservation({"judge_aggregate_summary": {}}, observation.population,
+                                         observation.verdict, observation.explicit_kind)
+        population = jv._JudgeRepeats(observation.population.members, saved_summary=jv._IntegerSummary(1))
+        with self.assertRaisesRegex(ValueError, "nonzero"):
+            jv._CompleteJudgeObservation(observation.fields, population, observation.verdict,
+                                         observation.explicit_kind, fresh=False)
+        population = jv._JudgeRepeats(observation.population.members, saved_summary=jv._IntegerSummary(0))
+        for constructor in (lambda: jv._CompleteJudgeObservation(observation.fields, population, observation.verdict,
+                                                                 observation.explicit_kind),
+                            lambda: jv._MissingJudgeObservation(observation.fields, population, ("unavailable",))):
+            with self.assertRaisesRegex(ValueError, "fresh judge group cannot carry saved historical summary"):
+                constructor()
+
+    def test_malformed_container_summary_retains_category_without_raw_body(self):
+        for value, category in ((["invalid"], "array"), ({"reason": "success"}, "object")):
+            raw = {**self.legacy(self.groups()[0]), "returncode": value}
+            loaded = self.load(raw)
+            self.assertEqual(loaded["judge_aggregate_summary"],
+                             {"version": 1, "kind": "saved", "status": {"kind": "malformed-container", "json_type": category}})
+            for _ in range(5):
+                self.assertEqual(sb.judge_observation_incomplete_reason(loaded),
+                                 f"judge aggregate summary returncode is noninteger ({category})")
+                self.assertEqual(self.load(loaded), loaded)
+
+    def test_internal_unavailable_groups_reject_complete_claims_and_derived_folds_keep_child_causes(self):
+        for index in (0, 1):
+            for historical_outer in (False, True):
+                group = self.groups()[2]
+                if historical_outer:
+                    group = self.legacy(group)
+                inner = self.legacy(group["judge_panel"][index])
+                del inner["returncode"]
+                group["judge_panel"][index] = inner
+                reason = "complete compatible children" if historical_outer else "full declared population"
+                assert_dies(self, lambda group=group: self.load(group), reason)
+                incomplete = self.legacy(group)
+                incomplete.update(judge_observation_complete=False, availability="partial")
+                loaded = self.load(incomplete)
+                self.assertEqual(sb.judge_observation_incomplete_reason(loaded), "judge aggregate summary returncode is absent")
+                self.assertEqual([len(member["judge_runs"]) for member in loaded["judge_panel"]], [2, 2])
+            group = self.groups()[2]
+            group["judge_panel"][index].update(passed=False, judge_observation_kind="missing",
+                                                judge_observation_complete=False, availability="partial", returncode=1)
+            group["judge_panel"][index].pop("agreement")
+            assert_dies(self, lambda group=group: self.load(group), "complete compatible children")
+        missing = self.load({**self.legacy(self.groups()[0]), "returncode": 1})
+        complete = self.load(self.legacy(sb.merge_repeated_judge_rows([
+            self.leaf(model="b"), self.leaf(model="b", repeat=2)])))
+        for rows in ([missing, complete], [complete, missing]):
+            folded = sb.merge_cross_judge_rows(rows)
+            self.assertEqual(folded["judge_aggregate_summary"], {"version": 1, "kind": "derived"})
+            reason = "judge aggregate summary returncode is nonzero (1)"
+            for _ in range(5):
+                observation = jv._judge_observation_from_row(folded)
+                self.assertIsNone(observation.population.saved_summary)
+                self.assertEqual(jv._judge_observation_reason(observation), reason)
+                self.assertEqual(self.load(folded), folded)
+                folded = self.load(folded)
+
+    def test_bad_summary_preserves_strict_children_hard_identity_and_original_accounting(self):
+        for kind, child, reason in (("scored", {"passed": False}, "passed contradicts score and threshold"),
+                                    ("dimensions", {"score": 1, "threshold": 0.75, "dimension_scores": {"clarity": 3}},
+                                     "dimension aggregate score contradicts"),
+                                    ("dynamic", {"score": 1, "minimum_criteria": 1,
+                                                 "criteria": [{"name": "criterion", "met": False}]},
+                                     "dynamic score/passed contradict criteria")):
+            raw = self.legacy(self.groups()[0])
+            raw["returncode"] = 1
+            raw["judge_runs"][1].update(verdict_kind=kind, **child)
+            if kind == "scored":
+                raw["judge_runs"][1].update(score=0.9, threshold=0.5)
+            assert_dies(self, lambda raw=raw: self.load(raw), reason)
+        raw = self.legacy(self.groups()[0])
+        raw["returncode"] = None
+        raw["judge_runs"][1]["judge_task_id"] = "other"
+        assert_dies(self, lambda: self.load(raw), "share one task id")
+        for group in self.groups():
+            raw = self.legacy(group)
+            raw["returncode"] = 1
+            loaded = self.load(raw)
+            count = 4 if "judge_panel" in raw and "judge_runs" in raw["judge_panel"][0] else 2
+            costs = sb.judge_cost_block({"task": loaded})
+            self.assertEqual((costs["requested_calls"], costs["billed_calls"], costs["not_started_calls"],
+                              costs["nonbillable_calls"], costs["unverified_calls"]), (count, count, 0, 0, 0))
+            self.assertEqual(loaded["cost_aggregate"]["USD"]["value"], "0.12" if count == 4 else "0.06")
+            self.assertEqual((costs["counts_availability"], costs["requested_calls_basis"]), ("partial", "retained_leaves"))
+
     def test_incomplete_mixed_population_retains_all_kinds_in_both_orders(self):
         for panel in (False, True):
             for reverse in (False, True):

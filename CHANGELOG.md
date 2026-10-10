@@ -4,6 +4,11 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Saved historical judge groups defer when their aggregate summary status is absent, null,
+  noninteger, or nonzero. Fresh groups reject Boolean and float status codes. The reserved
+  `judge_aggregate_summary` envelope preserves original historical status causes across reloads
+  while new folds retain derived status and every valid child.
+
 - Judge observations separate complete verdicts, partial paid evidence, and missing results. Refused optional-score repeats retain all requested members and exit 2 without a kind exception. Saved readers validate every nested child, requested identity, fresh consensus policy, and original price cache. Counts distinguish launches, refusals, nonbillable calls, and unverified historical calls. Complete saved per-step repeats and panels validate each leaf and reuse the parent's consensus decision and median.
 
 - Native process capture preserves empty provider stderr after a natural exit between polling checks. Successful and nonzero exits keep their actual process code without a false polling-timeout message. Genuine task timeouts retain their diagnostics and code 124. The recovery capture-error regression now waits for the fixture's observed checkpoint before injecting the error.

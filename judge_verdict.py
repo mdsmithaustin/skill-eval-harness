@@ -352,10 +352,54 @@ class _JudgeLeaf:
 
 
 @dataclass(frozen=True)
+class _AbsentSummary:
+    pass
+
+
+@dataclass(frozen=True)
+class _NullSummary:
+    pass
+
+
+@dataclass(frozen=True)
+class _IntegerSummary:
+    value: int
+
+    def __post_init__(self) -> None:
+        if type(self.value) is not int:
+            raise ValueError("saved judge aggregate integer status must be an integer")
+
+
+@dataclass(frozen=True)
+class _MalformedScalarSummary:
+    value: bool | float | str
+
+    def __post_init__(self) -> None:
+        if type(self.value) not in (bool, float, str) or (
+                isinstance(self.value, float) and not math.isfinite(self.value)):
+            raise ValueError("saved judge aggregate malformed scalar must be boolean, finite float or string")
+
+
+@dataclass(frozen=True)
+class _MalformedContainerSummary:
+    json_type: Literal["array", "object"]
+
+    def __post_init__(self) -> None:
+        if self.json_type not in ("array", "object"):
+            raise ValueError("saved judge aggregate malformed container must be array or object")
+
+
+_SavedAggregateSummary: TypeAlias = (
+    _AbsentSummary | _NullSummary | _IntegerSummary | _MalformedScalarSummary | _MalformedContainerSummary
+)
+
+
+@dataclass(frozen=True)
 class _JudgeRepeats:
     members: tuple[_JudgeObservation, ...]
     expected_count: int | None = None
     policy: _JudgeConsensusPolicy | None = None
+    saved_summary: _SavedAggregateSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -364,6 +408,7 @@ class _JudgePanel:
     requested_models: tuple[str, ...]
     policy: _JudgeConsensusPolicy | None = None
     models_recorded: bool = True
+    saved_summary: _SavedAggregateSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -406,8 +451,14 @@ class _CompleteJudgeObservation:
                     self.fields.get("judge_guard_reason") != "empty_steps"
                     or not isinstance(self.verdict, BooleanVerdict) or self.verdict.passed):
                 raise ValueError("only an empty-step local false verdict can be complete without a call")
-        elif not all(isinstance(member, _CompleteJudgeObservation) for member in self.population.members):
-            raise ValueError("complete judge group requires complete children")
+        else:
+            if self.fresh and self.population.saved_summary is not None:
+                raise ValueError("fresh judge group cannot carry saved historical summary")
+            reason = _aggregate_summary_reason(self.population.saved_summary)
+            if reason is not None:
+                raise ValueError(reason)
+            if not all(isinstance(member, _CompleteJudgeObservation) for member in self.population.members):
+                raise ValueError("complete judge group requires complete children")
 
 
 @dataclass(frozen=True)
@@ -436,6 +487,9 @@ class _MissingJudgeObservation:
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", freeze_json_mapping(self.fields, "judge metadata"))
         _check_observation_fields(self.fields)
+        if (self.fresh and isinstance(self.population, (_JudgeRepeats, _JudgePanel))
+                and self.population.saved_summary is not None):
+            raise ValueError("fresh judge group cannot carry saved historical summary")
         if not self.reasons:
             raise ValueError("missing judge observation requires a reason")
 
@@ -445,7 +499,7 @@ _ATTEMPT_FIELDS = frozenset({"returncode", "invocation_state", "timed_out", "pro
 _RESULT_FIELDS = _SEMANTIC_FIELDS | frozenset({
     "verdict_kind", "judge_observation_kind", "judge_observation_complete", "availability",
     "judge_runs", "judge_panel", "agreement", "judge_expected_repeats", "judge_models",
-    "judge_consensus_policy", "judge_execution_kind",
+    "judge_consensus_policy", "judge_execution_kind", "judge_aggregate_summary",
 }) | _ATTEMPT_FIELDS
 _BINDING_FIELDS = (
     "judge_task_id", "id", "case_id", "variant", "run_number", "judge_backend",
@@ -458,6 +512,102 @@ def _check_observation_fields(fields: Mapping[str, Any]) -> None:
     reserved = set(fields) & _RESULT_FIELDS
     if reserved:
         raise ValueError(f"judge metadata cannot override reserved fields: {sorted(reserved)}")
+
+
+def _aggregate_summary_reason(summary: _SavedAggregateSummary | None) -> str | None:
+    prefix = "judge aggregate summary returncode is "
+    if summary is None:
+        return None
+    if isinstance(summary, _IntegerSummary):
+        return f"{prefix}nonzero ({summary.value})" if summary.value else None
+    if isinstance(summary, _AbsentSummary):
+        return prefix + "absent"
+    if isinstance(summary, _NullSummary):
+        return prefix + "null"
+    if isinstance(summary, _MalformedScalarSummary):
+        category = "boolean" if isinstance(summary.value, bool) else "number" if isinstance(summary.value, float) else "string"
+    else:
+        category = summary.json_type
+    return f"{prefix}noninteger ({category})"
+
+
+def _aggregate_summary_fields(summary: _SavedAggregateSummary | None) -> dict[str, Any]:
+    if summary is None:
+        return {"version": 1, "kind": "derived"}
+    if isinstance(summary, _AbsentSummary):
+        status = {"kind": "absent"}
+    elif isinstance(summary, _NullSummary):
+        status = {"kind": "null"}
+    elif isinstance(summary, _IntegerSummary):
+        status = {"kind": "integer", "value": summary.value}
+    elif isinstance(summary, _MalformedScalarSummary):
+        status = {"kind": "malformed-scalar", "value": summary.value}
+    else:
+        status = {"kind": "malformed-container", "json_type": summary.json_type}
+    return {"version": 1, "kind": "saved", "status": status}
+
+
+def _saved_aggregate_summary(raw: Mapping[str, Any], *, fresh: bool) -> _SavedAggregateSummary | None:
+    canonical = "judge_aggregate_summary" in raw
+    if fresh or canonical:
+        code = raw.get("returncode")
+        if type(code) is not int:
+            raise ValueError("judge aggregate returncode must be an integer")
+        if code != (0 if raw.get("judge_observation_complete") is True else 1):
+            raise ValueError("judge aggregate returncode contradicts completeness")
+    if not canonical:
+        if fresh:
+            return None
+        if "returncode" not in raw:
+            return _AbsentSummary()
+        value = raw["returncode"]
+        if value is None:
+            return _NullSummary()
+        if type(value) is int:
+            return _IntegerSummary(value)
+        if type(value) in (bool, float, str):
+            return _MalformedScalarSummary(value)
+        if isinstance(value, (list, Mapping)):
+            return _MalformedContainerSummary("array" if isinstance(value, list) else "object")
+        raise ValueError("judge aggregate returncode must be a JSON value")
+    envelope = raw["judge_aggregate_summary"]
+    if (not isinstance(envelope, Mapping) or type(envelope.get("version")) is not int
+            or envelope["version"] != 1):
+        raise ValueError("judge aggregate summary requires integer version 1")
+    kind = envelope.get("kind")
+    if kind not in ("derived", "saved") or set(envelope) != (
+            {"version", "kind"} if kind == "derived" else {"version", "kind", "status"}):
+        raise ValueError("judge aggregate summary has invalid kind or fields")
+    complete = raw.get("judge_observation_complete") is True
+    if (raw.get("judge_observation_complete") is not complete
+            or raw.get("availability") != ("complete" if complete else "partial")):
+        raise ValueError("canonical judge aggregate summary contradicts completeness flags")
+    if not complete and ({key: raw[key] for key in _SEMANTIC_FIELDS | {"verdict_kind"} if key in raw}
+                         != verdict_fields(ConsensusVerdict(False)) or "agreement" in raw):
+        raise ValueError("canonical missing judge aggregate requires exact consensus false shell without agreement")
+    if kind == "derived":
+        return None
+    if fresh:
+        raise ValueError("fresh judge group cannot carry saved historical summary")
+    status = envelope["status"]
+    if not isinstance(status, Mapping):
+        raise ValueError("judge aggregate saved summary status must be an object")
+    status_kind = status.get("kind")
+    summary: _SavedAggregateSummary
+    if status_kind in ("absent", "null") and set(status) == {"kind"}:
+        summary = _AbsentSummary() if status_kind == "absent" else _NullSummary()
+    elif status_kind == "integer" and set(status) == {"kind", "value"}:
+        summary = _IntegerSummary(status["value"])
+    elif status_kind == "malformed-scalar" and set(status) == {"kind", "value"}:
+        summary = _MalformedScalarSummary(status["value"])
+    elif (status_kind == "malformed-container" and set(status) == {"kind", "json_type"}
+          and status["json_type"] in ("array", "object")):
+        summary = _MalformedContainerSummary(status["json_type"])
+    else:
+        raise ValueError("judge aggregate saved summary status has invalid kind or fields")
+    if complete and _aggregate_summary_reason(summary) is not None:
+        raise ValueError("complete judge aggregate cannot carry unavailable saved summary")
+    return summary
 
 
 def _judge_leaf_incomplete_reason(fields: Mapping[str, Any], attempt: _JudgeAttempt) -> str | None:
@@ -633,6 +783,7 @@ def _judge_observation_fields(observation: _JudgeObservation) -> dict[str, Any]:
         key = "judge_panel" if isinstance(population, _JudgePanel) else "judge_runs"
         out[key] = [_judge_observation_fields(member) for member in population.members]
         out["returncode"] = 0 if complete else 1
+        out["judge_aggregate_summary"] = _aggregate_summary_fields(population.saved_summary)
         if isinstance(population, _JudgePanel):
             if population.models_recorded:
                 out["judge_models"] = list(population.requested_models)
@@ -665,6 +816,8 @@ def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
     if len(memberships) > 1:
         raise ValueError("judge row cannot contain both membership paths")
     if not memberships:
+        if "judge_aggregate_summary" in raw:
+            raise ValueError("judge aggregate summary must belong to a group")
         kind = raw.get("judge_execution_kind")
         if kind is None:
             kind = "not_started" if raw.get("invocation_state") == "not_started" else "historical"
@@ -736,10 +889,9 @@ def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
         policy = _JudgeConsensusPolicy(policy_raw["threshold"], policy_raw["quorum"])
     if fresh and policy is None:
         raise ValueError("fresh judge group requires recorded consensus policy")
-    if fresh and raw.get("returncode") != (0 if marker == "complete" else 1):
-        raise ValueError("judge aggregate returncode contradicts completeness")
-    population = (_JudgePanel(members, models, policy, "judge_models" in raw) if key == "judge_panel" else
-                  _JudgeRepeats(members, expected, policy))
+    summary = _saved_aggregate_summary(raw, fresh=fresh)
+    population = (_JudgePanel(members, models, policy, "judge_models" in raw, summary) if key == "judge_panel" else
+                  _JudgeRepeats(members, expected, policy, summary))
     fields = freeze_json_mapping({name: value for name, value in raw.items() if name not in _RESULT_FIELDS}, "judge group")
     validation_failed = bool(raw.get("schema_errors") or raw.get("verdict_validation_error"))
     if marker == "complete" and validation_failed:
@@ -748,23 +900,26 @@ def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
                 and not errors and not validation_failed)
     if raw.get("judge_observation_complete") is True and errors:
         raise ValueError("complete judge group requires complete compatible children")
-    if not complete:
+    agreement: Consensus | Mapping[str, Any] | None = None
+    if complete:
+        if not isinstance(verdict, ConsensusVerdict):
+            raise ValueError("judge group requires consensus verdict")
+        if policy is not None:
+            agreement = _resolve_judge_observations(tuple(member for member in members
+                                                        if isinstance(member, _CompleteJudgeObservation)), policy)
+            if verdict != agreement.verdict() or raw.get("agreement") != agreement.agreement():
+                raise ValueError("recorded judge consensus contradicts members and policy")
+        elif "agreement" in raw:
+            if not isinstance(raw["agreement"], Mapping):
+                raise ValueError("judge agreement must be an object")
+            agreement = raw["agreement"]
+    summary_reason = _aggregate_summary_reason(summary)
+    if not complete or summary_reason is not None:
         reasons = (("judge verdict failed validation",) if validation_failed else ())
+        reasons += (summary_reason,) if summary_reason is not None else ()
         reasons += tuple(str(error["reason"]) for error in errors)
         return _MissingJudgeObservation(fields, population,
                                         reasons or ("judge observation is not explicitly complete",), fresh)
-    if not isinstance(verdict, ConsensusVerdict):
-        raise ValueError("judge group requires consensus verdict")
-    agreement: Consensus | Mapping[str, Any] | None = None
-    if policy is not None:
-        agreement = _resolve_judge_observations(tuple(member for member in members
-                                                    if isinstance(member, _CompleteJudgeObservation)), policy)
-        if verdict != agreement.verdict() or raw.get("agreement") != agreement.agreement():
-            raise ValueError("recorded judge consensus contradicts members and policy")
-    elif "agreement" in raw:
-        if not isinstance(raw["agreement"], Mapping):
-            raise ValueError("judge agreement must be an object")
-        agreement = raw["agreement"]
     return _CompleteJudgeObservation(fields, population, verdict, explicit, fresh, agreement)
 
 

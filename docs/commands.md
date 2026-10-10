@@ -501,6 +501,11 @@ code. An incomplete observation or partial unpriced ledger exits 2. Settlement p
 before verdict parsing or transcript errors. See [the judge ceiling example](limit-native-spend.md#judge-calls).
 
 An incomplete repeat or panel retains its full population without an aggregate score or agreement.
+Fresh saved groups require genuine integer zero for Complete and integer one for Missing.
+Boolean and float codes reject. Historical absent, null, noninteger, or nonzero aggregate summary
+status defers even with complete children. The reserved `judge_aggregate_summary` envelope retains
+the original status cause across reloads. Its `derived` form belongs to fresh groups and new folds.
+The projected `returncode` is a compatibility summary and attests no parent process or launch.
 Missing observations serialize the exact false `consensus` shell with `judge_observation_kind:
 missing`; this shell cannot vote or establish a behavioral failure. Partial paid observations keep
 their canonical verdict. Saved readers validate every child, including below an incomplete parent,

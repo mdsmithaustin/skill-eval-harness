@@ -70,7 +70,10 @@ known dollars without counting a floor as a whole price. Saved readers reject co
 timeout prices or parent projections. Regenerate those artifacts before using them in a report.
 See [judge price reporting](commands.md#judge-backends).
 
-Only complete observations enter alignment or calibration. A partial paid leaf can retain a valid
+Only complete observations enter alignment or calibration. Historical saved repeat and panel
+summaries with absent, null, noninteger, or nonzero status defer, retaining their cause in
+`judge_aggregate_summary`. Fresh group status requires an actual integer consistent with
+completeness. A partial paid leaf can retain a valid
 score and pass while its process evidence is incomplete. A missing repeat or panel retains every
 child and has no usable aggregate decision. Saved readers reject malformed nested verdicts and
 forged fresh consensus. Loading historical rows preserves absent kind labels, so normalization

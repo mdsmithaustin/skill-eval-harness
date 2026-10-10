@@ -396,6 +396,20 @@ kinds with indexed diagnostics. Complete mixed kinds still reject. Group project
 shared identity from all members and carry no leaf call ID, repeat, served model, or lifecycle.
 Historical loading preserves absent labels and population declarations.
 
+Group rows reserve `judge_aggregate_summary` for the observation owner. Its exact version-1
+envelope is either `{"version": 1, "kind": "derived"}` or `{"version": 1, "kind": "saved",
+"status": ...}`. Fresh groups and new folds use `derived`; it attests no parent process.
+Historical saved status distinguishes absent, null, integer, malformed scalar, and malformed
+container evidence. Boolean, finite float, and string scalars retain their exact type and value.
+Malformed arrays and objects retain their category only. The original file retains their bodies.
+Only genuine integer zero is eligible for completeness. Original Consensus and recorded-policy
+validation still precede historical status deferral. Missing groups project integer `returncode: 1`
+and the false shell while retaining the original status and its cause through reload. Complete groups
+project integer zero. Canonical envelopes require matching flags, status, and semantic shell.
+The parser rejects malformed envelopes, leaf placement, saved evidence on fresh groups, and
+unavailable saved evidence under Complete. Caller metadata cannot replace this reserved field.
+Consumers that rewrite canonical rows must retain the envelope to preserve original status causes.
+
 The existing price leaves also supply disjoint execution counts. `requested_calls` equals
 `billed_calls + not_started_calls + nonbillable_calls + unverified_calls`. Billed means an affirmative
 launch, including a zero or unknown charge. Guards and spawn failures are nonbillable. Explicit
