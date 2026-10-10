@@ -117,7 +117,8 @@ def metadata_lifecycle_error(metadata: dict[str, Any] | None) -> str | None:
         return "timed-out metadata must use returncode 124"
     terminal = metadata.get("artifact_terminal_state")
     if terminal is not None:
-        if terminal not in {"budget_stopped", "response_rejected"} or metadata.get("provider") != "subagent":
+        if (not isinstance(terminal, str) or terminal not in {"budget_stopped", "response_rejected"}
+                or metadata.get("provider") != "subagent"):
             return "unsupported subagent terminal artifact"
         if (rc is not None or timed_out or metadata.get("invocation_state") is not None
                 or metadata.get("process_observation_complete") is not False

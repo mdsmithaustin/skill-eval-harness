@@ -488,6 +488,7 @@ sys.exit({exit_code})
                                ("provider_response_complete", True), ("process_observation_complete", True),
                                ("observation_complete", True), ("timed_out", True),
                                ("artifact_terminal_state", "unknown"), ("provider", "claude"),
+                               ("artifact_terminal_state", []), ("artifact_terminal_state", {}),
                                ("subagent_refusals", []), ("subagent_rejection", {})):
                 with self.subTest(key=key):
                     changed = {**metadata, key: value}
@@ -499,6 +500,15 @@ sys.exit({exit_code})
                 for field in ("metadata_extra", "metrics_extra"):
                     with self.subTest(key=key, field=field), self.assertRaisesRegex(ValueError, "derived evidence"):
                         OutcomeContext(provider=Provider.SUBAGENT, **{field: {key: value}})
+            call = sb.SubagentTurnCall(metadata["answer_task_sha256"],
+                                      sb.RunCoordinate.of("case-1", "with_skill", 1), 1)
+            rejection = sb._OpaqueResponseRejected(call, "rejected callback")
+            with self.assertRaisesRegex(ValueError, "subagent provider"):
+                sb._NoProcessArtifact(OutcomeContext(provider=Provider.CLAUDE), rejection)
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                sb._NoProcessArtifact(OutcomeContext(provider=Provider.SUBAGENT, metadata_extra={
+                    "answer_task_sha256": "sha256:" + "0" * 64, "case_id": "case-1",
+                    "variant": "with_skill", "run_number": 1}), rejection)
 
     def test_started_conversation_retains_tool_replay_when_later_turns_are_refused(self):
         import skill_benchmark as sb

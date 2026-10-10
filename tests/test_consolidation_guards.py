@@ -1052,10 +1052,10 @@ class TimeoutConventionTests(unittest.TestCase):
                     False, 2, "[CODEX FAILURE"),
                 "subagent exception": (
                     subagent(raising(RuntimeError("backend down"))),
-                    False, 1, "[CLAUDE FAILURE"),
+                    False, None, "[CLAUDE FAILURE"),
                 "subagent raised timeout": (
                     subagent(raising(subprocess.TimeoutExpired(cmd="agent", timeout=1))),
-                    True, 124, "[TIMEOUT"),
+                    False, None, "[CLAUDE FAILURE"),
                 "subagent reported timeout": (
                     subagent(lambda: {"answer": "", "timed_out": True}),
                     True, 124, "[TIMEOUT"),
@@ -1090,9 +1090,23 @@ class TimeoutConventionTests(unittest.TestCase):
         self.assertIn("FileNotFoundError", result["stderr"])
 
     def test_shell_agent_backend_encodes_timeouts(self):
-        backend = sb.shell_agent_backend("sleep 5", timeout=1)
-        outcome = backend(prompt="p", workspace=Path("."), model=None, tool_executor=None)
-        self.assertEqual(outcome, {"answer": "", "returncode": 124, "timed_out": True})
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = make_eval_repo(root)
+            tasks = root / "tasks.jsonl"
+            runs = root / "runs"
+            code, _, stderr = run_cli("prepare", manifest, "--out", tasks)
+            self.assertEqual(code, 0, stderr)
+            code, _, stderr = run_cli("run-subagent", "--tasks", tasks, "--runs", runs,
+                                      "--agent-cmd", "sleep 5", "--timeout", "1", "--max-cost-usd", "1")
+            self.assertEqual(code, 2, stderr)
+            base = runs / "case-1" / "with_skill"
+            metadata = sb.read_metrics_base(base)
+            self.assertEqual(metadata["returncode"], 124)
+            self.assertTrue(metadata["timed_out"])
+            self.assertTrue(metadata["artifact_set_complete"])
+            self.assertFalse(metadata["provider_response_complete"])
+            self.assertTrue((base / "output.md").read_text().startswith("[TIMEOUT"))
 
 
 def _publish_grants(node: object) -> Iterator[str]:
