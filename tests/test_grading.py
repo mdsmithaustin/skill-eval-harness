@@ -456,6 +456,19 @@ class GradedScoringSeverityTests(unittest.TestCase):
                 self.assertTrue(verdict["judge_observation_complete"])
                 self.assertIsNone(sb.judge_observation_incomplete_reason(verdict))
 
+    def test_complete_judge_fixture_preserves_supplied_dimension_threshold(self):
+        assertion = {"name": "q", "type": "judge", "graded_dimensions": [{"name": "clarity", "rubric": "clear"}]}
+        case = self.behavior_case([assertion])
+        jid = sb.judge_task_id("case-x", "with_skill", 1, assertion)
+        row = {"passed": False, "score": 0.5, "threshold": 0.5, "dimension_scores": {"clarity": 3}}
+        with self.assertRaisesRegex(ValueError, "dimension passed contradicts score and threshold"):
+            complete_judge_fixtures(case, "text", Path("out.md"), {jid: row})
+        verdict = complete_judge_fixtures(case, "text", Path("out.md"),
+                                        {jid: {**row, "threshold": 0.75}})[jid]
+        self.assertEqual({key: verdict[key] for key in row},
+                         {"passed": False, "score": 0.5, "threshold": 0.75, "dimension_scores": {"clarity": 3.0}})
+        self.assertTrue(verdict["judge_observation_complete"])
+
     def test_graded_dimensions_below_threshold_fail(self):
         assertion = {"name": "q", "type": "judge", "graded_dimensions": [{"name": "d", "rubric": "anchored"}]}
         case = self.behavior_case([assertion])
