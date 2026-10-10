@@ -169,6 +169,36 @@ sys.exit({returncode})
             self.assertEqual(self.ledgers(runs)[0]["spent_usd"], "0.6")
             self.assertEqual(self.ledgers(runs)[0]["calls"][1]["state"], "planned")
 
+    def test_capture_error_retains_observed_cost_before_capture(self):
+        for assumption in (None, "0.1"):
+            with self.subTest(assumption=assumption), tempfile.TemporaryDirectory() as td:
+                _, tasks, runs, marker, stub, _, _ = self.setup_batch(Path(td))
+                error = OSError("workspace evidence failed")
+                at_capture = []
+
+                def capture(*args, at_capture=at_capture, runs=runs, error=error, **kwargs):
+                    at_capture.append(self.ledgers(runs)[0])
+                    raise error
+
+                flags = ("--assumed-cost-per-run-usd", assumption) if assumption else ()
+                with mock.patch("workspace_contracts.capture_workspace_changes", side_effect=capture), \
+                        mock.patch("skill_benchmark.write_runner_outcome") as writer:
+                    with self.assertRaises(OSError) as raised:
+                        self.invoke(tasks, runs, stub, "--max-cost-usd", "1", *flags)
+                self.assertIs(raised.exception, error)
+                self.assertEqual(marker.read_text(), "started\n")
+                self.assertEqual(writer.call_count, 0)
+                expected_charge = {"basis": "observed", "amount_usd": "0.6",
+                                   "provenance": "provider_reported"}
+                self.assertEqual(len(at_capture), 1)
+                self.assertEqual(at_capture[0]["calls"][0].get("charge"), expected_charge)
+                self.assertEqual(at_capture[0]["spent_usd"], "0.6")
+                ledger = self.ledgers(runs)[0]
+                self.assertEqual(ledger["calls"][0]["charge"], expected_charge)
+                self.assertEqual(ledger["spent_usd"], "0.6")
+                self.assertEqual([item["state"] for item in ledger["calls"]],
+                                 ["settled", "planned"])
+
     def test_invalid_policy_does_not_launch_or_write(self):
         with tempfile.TemporaryDirectory() as td:
             _, tasks, runs, marker, stub, _, _ = self.setup_batch(Path(td))
