@@ -528,3 +528,58 @@ class JudgeSpendIdentityTests(unittest.TestCase):
                     sb._BudgetRefusal((Refused(call, SpendStopReason.COST_CEILING),))
                 with self.assertRaisesRegex(TypeError, 'requires a turn call'):
                     sb._OpaqueResponseRejected(call, 'bad call identity')
+
+    def test_documented_optional_score_keeps_paid_and_refused_repeats(self):
+        import os
+        import subprocess
+
+        source = Path(__file__).resolve().parents[1]
+        demo = source / 'examples' / 'demo-skill'
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sentinels = root / 'bin'
+            sentinels.mkdir()
+            env = {**os.environ, 'PATH': f'{sentinels}:/usr/bin:/bin'}
+            for name in ('claude', 'codex', 'gemini', 'vibe', 'pi'):
+                child = sentinels / name
+                child.write_text('#!/bin/sh\nexit 197\n')
+                child.chmod(0o755)
+                blocked = subprocess.run([name, '--version'], env=env, timeout=5,
+                                         capture_output=True)
+                self.assertEqual(blocked.returncode, 197, name)
+            tasks, runs, out = root / 'tasks.jsonl', root / 'runs', root / 'judge.jsonl'
+
+            def cli(*argv):
+                return subprocess.run([sys.executable, str(source / 'skill_benchmark.py'),
+                                       *map(str, argv)], env=env, timeout=30,
+                                      text=True, capture_output=True)
+
+            prepared = cli('prepare', demo / 'evals' / 'shared-benchmark.json',
+                           '--split', 'tune', '--out', tasks)
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            answered = cli('run-codex', '--tasks', tasks, '--runs', runs,
+                           '--codex-cmd', f'{sys.executable} {demo / "stub_runner.py"}',
+                           '--max-cost-usd', '.02', '--assumed-cost-per-run-usd', '.01')
+            self.assertEqual(answered.returncode, 2, answered.stderr)
+            judged = cli('judge', demo / 'evals' / 'shared-benchmark.json', '--runs', runs,
+                         '--judge-cmd', f'{sys.executable} {demo / "stub_judge.py"}',
+                         '--judge-runs', '2', '--max-cost-usd', '.02',
+                         '--assumed-cost-per-run-usd', '.03', '--out', out)
+            self.assertEqual(judged.returncode, 2, judged.stderr)
+            rows = [json.loads(line) for line in out.read_text().splitlines()]
+            self.assertEqual(len(rows), 1)
+            members = rows[0]['judge_runs']
+            self.assertEqual(len(members), 2)
+            self.assertEqual(members[0]['verdict_kind'], 'scored')
+            self.assertEqual(members[0]['score'], 1.0)
+            self.assertEqual(members[1]['judge_observation_kind'], 'missing')
+            self.assertEqual(members[1]['spend_refusal_reason'], 'cost_ceiling')
+            self.assertNotIn('returncode', members[1])
+            self.assertFalse(rows[0]['judge_observation_complete'])
+            ledgers = [json.loads(path.read_text()) for path in
+                       (runs / 'spend').glob('*/spend-ceiling.json')]
+            judge_ledger = next(ledger for ledger in ledgers
+                                if ledger['calls'][0]['call']['kind'] == 'judge')
+            self.assertEqual([call['state'] for call in judge_ledger['calls']],
+                             ['settled', 'not_started'])
+            self.assertIsNone(members[0]['cost_usd'])
