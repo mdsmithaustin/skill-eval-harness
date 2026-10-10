@@ -228,6 +228,8 @@ from manifest_contracts import (
     Split,
 )
 from observation_contracts import COST_SOURCES, USAGE_SOURCES, Availability
+from spend_contracts import AnswerCall, NoModelSpend, SpendPlan, SpendPolicy
+from spend_runtime import NotStarted, Priced, SpendAdmission, spend_invocations
 from text_contracts import (
     ComparisonProfile,
     ComparisonText,
@@ -299,6 +301,8 @@ TRIGGER_IDENTITY_MODULES = (
     "run_pi_trigger_eval.py",
     "run_trigger_matrix.py",
     "skill_benchmark.py",
+    "spend_contracts.py",
+    "spend_runtime.py",
     "telemetry.py",
     "trace_contracts.py",
     "trigger_contracts.py",
@@ -11539,7 +11543,7 @@ def run_recovery_case(pt: PreparedTask, base: Path, backend: AgentBackend, *,
         write_json(base / "recovery.json", record)
 
 
-def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBackend, *, model: str | None = None, timeout: int = DEFAULT_RUNNER_TIMEOUT_S, effort: str | None = None, **options: Any) -> int:
+def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBackend, *, model: str | None = None, timeout: int = DEFAULT_RUNNER_TIMEOUT_S, effort: str | None = None, spend_policy: SpendPolicy | None = None, **options: Any) -> int:
     """Shared answer-runner loop for native CLI backends.
 
     Existing `run-claude` and `run-codex` now use this path, and the new
@@ -11578,62 +11582,113 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
         base = safe_child_path(runs, pt.run_dir)
         if base in seen_destinations:
             die(f"duplicate prepared task run_dir: {pt.run_dir}")
-        if pt.recovery is not None and base.exists():
+        if spend_policy is None and pt.recovery is not None and base.exists():
             die(f"recovery artifacts already exist: {pt.run_dir}")
         seen_destinations.add(base)
         validated.append((task, pt, row_model, base))
+    registration = BACKENDS.get(backend.name)
+    cost_support = registration.capabilities.dollar_cost if registration is not None else "trace_normalized"
+    if spend_policy is not None:
+        for _, pt, _, _ in validated:
+            if pt.recovery is not None:
+                print(f"capped recovery is unsupported for case {pt.case_id}; omit --max-cost-usd", file=sys.stderr)
+                return 2
+        if (spend_policy.ceiling.amount > 0 and cost_support == "missing"
+                and spend_policy.assumed_cost_per_run is None):
+            die(f"{backend.name} does not report dollar cost; --max-cost-usd requires --assumed-cost-per-run-usd")
+    design = answer_design_from_tasks(tasks, default_model=model)
+    calls = tuple(AnswerCall(answer_design_identity(design, pt, row_model)["task_sha256"],
+                             RunCoordinate.of(pt.case_id, pt.variant_truth, pt.run_number, row_model))
+                  for _, pt, row_model, _ in validated)
+    plan = SpendPlan(calls)
     runs.mkdir(parents=True, exist_ok=True)
     design = persist_answer_design(runs, tasks, default_model=model)
     recovery_failed = False
-    for task, pt, row_model, base in validated:
-        base.mkdir(parents=True, exist_ok=pt.recovery is None)
-        prov_extra = {
-            "population": "answer",
-            "case_id": pt.case_id,
-            "run_number": pt.run_number,
-            "variant": pt.variant_truth,
-            "billing_scope": "run",
-            "answer_design_sha256": design["design_sha256"],
-            "answer_task_sha256": answer_design_identity(
-                design, pt, row_model)["task_sha256"],
-            "answer_instruction_sha256": answer_design_identity(
-                design, pt, row_model)["instruction_sha256"],
-            **({"ablation": pt.ablation.as_dict()} if pt.ablation else {}),
-            **effort_setting.as_metadata(),
-        }
-        if pt.recovery is not None:
-            if not run_recovery_case(pt, base, backend, model=row_model, timeout=timeout,
-                                     effort=effort, workspace_builder=workspace_builder,
-                                     provenance=prov_extra, options=options):
-                recovery_failed = True
-            continue
-        with tempfile.TemporaryDirectory(prefix=f"{backend.name}-changes-") as cd:
-            changes = Path(cd)
-            with captured_workspace(prefix=f"{backend.name}-ws-", changes_dir=changes,
-                                    build=functools.partial(workspace_builder, pt)) as (ws, workspace):
-                skill_rel, input_rel = workspace
-                attestation = workspace.attestation
-                if attestation.mounted_skill_tree_hash is not None:
-                    prov_extra["skill_tree_hash"] = attestation.mounted_skill_tree_hash
-                prov_extra["fixture_tree_hash"] = attestation.fixture_tree_hash
-                prompt = build_task_prompt(pt, skill_paths=skill_rel, input_files=input_rel)
-                outcome = backend.invoke_answer(InvocationRequest.parse(
-                    prompt=prompt,
-                    workspace=ws,
-                    model=row_model,
-                    timeout_s=timeout,
-                    effort=effort,
-                ), **options)
-            context = outcome_context(outcome)
-            env = dict(context.environment or {})
-            env.setdefault("runner", backend.name)
-            env["variant"] = pt.variant_truth
-            outcome = outcome_with_context(
-                outcome,
-                context.enriched(metadata=prov_extra, environment=env),
-            )
-            write_runner_outcome(base, outcome, sidecars=changes)
-    return int(recovery_failed)
+    budget_stopped = False
+    with SpendAdmission.open(spend_policy, plan, root=runs / "spend") as admission:
+        if admission.path is not None:
+            print(f"spend ledger: {admission.path}")
+        for (task, pt, row_model, base), call in zip(validated, calls):
+            prov_extra = {
+                "population": "answer",
+                "case_id": pt.case_id,
+                "run_number": pt.run_number,
+                "variant": pt.variant_truth,
+                "billing_scope": "run",
+                "answer_design_sha256": design["design_sha256"],
+                "answer_task_sha256": call.task_sha256,
+                "answer_instruction_sha256": answer_design_identity(
+                    design, pt, row_model)["instruction_sha256"],
+                **({"ablation": pt.ablation.as_dict()} if pt.ablation else {}),
+                **effort_setting.as_metadata(),
+            }
+            if pt.recovery is not None:
+                base.mkdir(parents=True, exist_ok=False)
+                if not run_recovery_case(pt, base, backend, model=row_model, timeout=timeout,
+                                         effort=effort, workspace_builder=workspace_builder,
+                                         provenance=prov_extra, options=options):
+                    recovery_failed = True
+                continue
+            with tempfile.TemporaryDirectory(prefix=f"{backend.name}-changes-") as cd:
+                changes = Path(cd)
+
+                def invoke(*, pt: PreparedTask = pt, row_model: str | None = row_model,
+                           changes: Path = changes, prov_extra: dict[str, Any] = prov_extra) -> Priced[AnswerOutcome]:
+                    with captured_workspace(prefix=f"{backend.name}-ws-", changes_dir=changes,
+                                            build=functools.partial(workspace_builder, pt)) as (ws, workspace):
+                        skill_rel, input_rel = workspace
+                        attestation = workspace.attestation
+                        if attestation.mounted_skill_tree_hash is not None:
+                            prov_extra["skill_tree_hash"] = attestation.mounted_skill_tree_hash
+                        prov_extra["fixture_tree_hash"] = attestation.fixture_tree_hash
+                        prompt = build_task_prompt(pt, skill_paths=skill_rel, input_files=input_rel)
+                        outcome = backend.invoke_answer(InvocationRequest.parse(
+                            prompt=prompt, workspace=ws, model=row_model,
+                            timeout_s=timeout, effort=effort), **options)
+                    context = outcome_context(outcome)
+                    if context.cost_usd is not None:
+                        cost = telemetry_domain.Measurement.available(
+                            telemetry_domain.Money.from_raw(context.cost_usd),
+                            provenance=cost_support if cost_support not in {"missing", "not_applicable"}
+                            else "trace_normalized")
+                    else:
+                        cost = telemetry_domain.Measurement.unavailable("runner_does_not_report_cost")
+                    no_spend = (NoModelSpend("spawn_failed_before_process")
+                                if isinstance(outcome, SpawnFailed) else
+                                NoModelSpend("offline_adapter") if cost_support == "not_applicable" else None)
+                    return Priced(outcome, cost, no_model_spend=no_spend)
+
+                execution = admission.run(call, invoke)
+                if isinstance(execution, NotStarted):
+                    budget_stopped = True
+                    continue
+                outcome = execution.value
+                if admission.path is not None:
+                    prov_extra["spend_ledger_path"] = str(admission.path)
+                    prov_extra["spend_call_id"] = call.call_id
+                context = outcome_context(outcome)
+                env = dict(context.environment or {})
+                env.setdefault("runner", backend.name)
+                env["variant"] = pt.variant_truth
+                outcome = outcome_with_context(outcome, context.enriched(metadata=prov_extra, environment=env))
+                base.mkdir(parents=True, exist_ok=True)
+                write_runner_outcome(base, outcome, sidecars=changes)
+        if admission.ledger is not None and admission.ledger.partial:
+            budget_stopped = True
+    return 2 if budget_stopped else int(recovery_failed)
+
+
+def native_spend_policy(args: argparse.Namespace) -> SpendPolicy | None:
+    ceiling = getattr(args, "max_cost_usd", None)
+    assumption = getattr(args, "assumed_cost_per_run_usd", None)
+    if ceiling is None:
+        if assumption is not None:
+            die("--assumed-cost-per-run-usd requires --max-cost-usd")
+        return None
+    try:
+        return SpendPolicy.from_raw(ceiling, assumption)
+    except (TypeError, ValueError) as exc:
+        die(f"invalid spend policy: {exc}")
 
 
 def run_agent(args: argparse.Namespace) -> int:
@@ -11646,6 +11701,7 @@ def run_agent(args: argparse.Namespace) -> int:
     return run_agent_tasks(load_prepared_tasks(Path(args.tasks)), Path(args.runs), backend,
                            model=getattr(args, "model", None), timeout=int(getattr(args, "timeout", DEFAULT_RUNNER_TIMEOUT_S)),
                            effort=getattr(args, "effort", None),
+                           spend_policy=native_spend_policy(args),
                            **provider_options)
 
 
@@ -11662,6 +11718,7 @@ def run_codex(args: argparse.Namespace) -> int:
     return run_agent_tasks(load_prepared_tasks(Path(args.tasks)), Path(args.runs), registered_agent_backend("codex"),
                            timeout=int(getattr(args, "timeout", DEFAULT_RUNNER_TIMEOUT_S)),
                            effort=getattr(args, "effort", None),
+                           spend_policy=native_spend_policy(args),
                            codex_cmd=getattr(args, "codex_cmd", None) or CODEX_ANSWER_DEFAULT_CMD)
 
 
@@ -11939,6 +11996,7 @@ def run_claude(args: argparse.Namespace) -> int:
     return run_agent_tasks(load_prepared_tasks(Path(args.tasks)), Path(args.runs), registered_agent_backend("claude"),
                            model=getattr(args, "model", None), timeout=int(getattr(args, "timeout", DEFAULT_RUNNER_TIMEOUT_S)),
                            effort=getattr(args, "effort", None),
+                           spend_policy=native_spend_policy(args),
                            claude_bin=getattr(args, "claude_bin", None) or "claude")
 
 
@@ -19234,6 +19292,7 @@ def build_benchmark_report(
         "availability": "partial" if incomplete_reasons else "complete",
         "incomplete_reasons": incomplete_reasons,
         "answer_design": design_coverage,
+        "spend_invocations": spend_invocations(runs / "spend"),
         "skipped_trigger_cases": skipped_trigger_cases,
         "deferred_judge_tasks": deferred_judge_tasks,
         "summary": summary,
@@ -20875,6 +20934,7 @@ def suite_cost_ledger(manifest_path: Path, runs: Path, *, benchmark_report: dict
         "telemetry_schema_version": 3,
         "generated_at": int(time.time()),
         "manifest": str(manifest_path),
+        "spend_invocations": spend_invocations(runs / "spend"),
         "skill_name": manifest.get("skill_name"),
         "runs_root": str(runs),
         "coverage": cost_coverage_block(rows),
@@ -23321,6 +23381,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=int, default=DEFAULT_RUNNER_TIMEOUT_S)
     p.add_argument("--effort", choices=EFFORT_LEVELS, help="requested reasoning effort, recorded on every run; omit to run at the backend default (also recorded, since defaults differ by model and CLI)")
 
+    p.add_argument("--max-cost-usd", type=float, help="per-invocation USD admission ceiling; admitted calls can overshoot")
+    p.add_argument("--assumed-cost-per-run-usd", type=float, help="labeled charge for one unpriced native answer call; requires --max-cost-usd")
+
     p = sub.add_parser("run-claude", help="run prepared tasks through `claude -p --output-format json`, capturing cost/usage")
     p.add_argument("--tasks", required=True, help="prepared task JSONL from skill-benchmark prepare")
     p.add_argument("--runs", required=True, help="output runs directory")
@@ -23328,6 +23391,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--claude-bin", default="claude", help="path to the claude executable (a stub in tests)")
     p.add_argument("--timeout", type=int, default=DEFAULT_RUNNER_TIMEOUT_S)
     p.add_argument("--effort", choices=EFFORT_LEVELS, help="requested reasoning effort, recorded on every run; omit to run at the backend default (also recorded, since defaults differ by model and CLI)")
+
+    p.add_argument("--max-cost-usd", type=float, help="per-invocation USD admission ceiling; admitted calls can overshoot")
+    p.add_argument("--assumed-cost-per-run-usd", type=float, help="labeled charge for one unpriced native answer call; requires --max-cost-usd")
 
     p = sub.add_parser("run-agent", help="run prepared tasks through a registered native agent backend")
     p.add_argument("--agent", required=True, choices=sorted(AGENT_BACKENDS), help="native backend to use")
@@ -23337,6 +23403,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=int, default=DEFAULT_RUNNER_TIMEOUT_S)
     p.add_argument("--effort", choices=EFFORT_LEVELS, help="requested reasoning effort, recorded on every run; omit to run at the backend default (also recorded, since defaults differ by model and CLI)" + "; refused on backends with no known effort control or for a level the backend's CLI does not accept")
     add_surface_cli_options(p, "answer")
+
+    p.add_argument("--max-cost-usd", type=float, help="per-invocation USD admission ceiling; admitted calls can overshoot")
+    p.add_argument("--assumed-cost-per-run-usd", type=float, help="labeled charge for one unpriced native answer call; requires --max-cost-usd")
 
     p = sub.add_parser("run-subagent", help="run prepared tasks through an in-process subagent backend (Claude CLI by default, --agent-cmd for any provider); hosts tool replay")
     p.add_argument("--tasks", required=True, help="prepared task JSONL from skill-benchmark prepare")

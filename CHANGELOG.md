@@ -4,6 +4,8 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Native serial answer commands accept a per-invocation `--max-cost-usd` admission ceiling and an optional `--assumed-cost-per-run-usd`. Durable invocation ledgers retain charges, unresolved calls, and refusals. Capped batches reject recovery before any provider call or runs-root write. See [the native spend walkthrough](docs/limit-native-spend.md).
+
 - Pi trace retry counts come from `agent_end.willRetry` markers in complete streams, including a measured zero when no attempt retries. Truncated streams, malformed retry markers, and providers without a retry protocol leave the count unavailable. The Pi CLI facade continues to use the matrix controller and its independent telemetry completeness checks.
 
 - The offline demo records skill reads and supports a redundant `--loop` path with per-step judges. The trigger stub routes on `description` plus `when_to_use`. New [trajectory](docs/did-my-skill-change-how-the-model-works.md) and [discovery](docs/did-removing-this-break-discovery.md) journeys reproduce the expected evidence.

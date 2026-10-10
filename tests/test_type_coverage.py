@@ -87,6 +87,7 @@ class TypeCoverageContractTests(unittest.TestCase):
             "run_trigger_matrix.py", "trigger_contracts.py",
             "trigger_reporting.py", "invocation_contracts.py",
             "experimental_pairs.py",
+            "spend_contracts.py", "spend_runtime.py",
         } <= trigger_modules)
         self.assertTrue({
             "cli_contracts.py", "grading_contracts.py", "judge_contracts.py",

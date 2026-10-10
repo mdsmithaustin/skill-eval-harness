@@ -137,6 +137,7 @@ Trigger `harness_identity` names a conservative audited module-level inventory i
 packaged module. Standalone report, judge, CLI, and unsupported-provider modules are excluded, but
 `skill_benchmark.py` remains a monolith shared by trigger and non-trigger orchestration. Any edit to
 that file still invalidates trigger identity until those owners are extracted into separate modules.
+The interim inventory also includes `spend_contracts.py` and `spend_runtime.py`, which the monolith imports for native answer admission. Their edits invalidate trigger identity while that import dependency remains.
 
 - Version 2 replaced the overbroad version-1 set. Version-1 trigger reports must be regenerated
   before a new causal comparison; this deliberate incompatibility refuses to guess equivalence.
