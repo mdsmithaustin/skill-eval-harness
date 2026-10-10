@@ -62,7 +62,7 @@ def complete_judge_fixtures(case, text, output_path, rows, *, run_base=None,
         for key in ("passed", "score", "threshold", "dimension_scores"):
             if key in derived:
                 semantic.setdefault(key, derived[key])
-        if assertion.get("graded_dimensions"):
+        if assertion.get("graded_dimensions") and "threshold" not in row:
             semantic["threshold"] = derived["threshold"]
         if assertion.get("dynamic_rubric"):
             minimum = assertion["dynamic_rubric"].get("minimum_criteria", 3)
