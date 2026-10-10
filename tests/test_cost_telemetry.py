@@ -805,6 +805,90 @@ class JudgePriceTests(unittest.TestCase):
             "observed_count": observed, "unavailable_count": unavailable,
             "not_applicable_count": 0, "reason_counts": {"process_timeout": unavailable}})
 
+    def legacy(self, amount=0.03, model="a"):
+        row = self.whole(model=model)
+        row["judge_evidence_mode"] = "text-only"
+        row["judge_input_sha256"] = "sha256:" + "a" * 64
+        row["judge_prompt_sha256"] = "b" * 64
+        row.pop("cost_usd")
+        row.pop("cost_normalized")
+        if amount is not None:
+            row["cost"] = amount
+        return row
+
+    def test_complete_legacy_repeat_panel_round_trip_and_cost_summary(self):
+        for merge in (sb.merge_repeated_judge_rows, sb.merge_cross_judge_rows):
+            with self.subTest(merge=merge.__name__), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                manifest = cost_repo(root)
+                runs = root / "runs"
+                write_run(runs / "c1" / "with_skill", "alpha", metadata={"returncode": 0})
+                members = [self.legacy(), self.legacy(model="b")]
+                row = merge(members)
+                saved = root / "judge.jsonl"
+                saved.write_text(json.dumps(row) + "\n")
+                loaded = sb.load_judge_results(str(saved))
+                report = sb.judge_cost_block(loaded)
+                self.assertEqual(report["total_cost_usd"], 0.06)
+                self.assertEqual(report["billed_calls"], 2)
+                self.assertEqual(report["verdicts_with_cost"], 2)
+                self.assertNotIn("cost", row)
+                self.assertEqual(row["cost_usd"], 0.06)
+                self.assertTrue(row["judge_observation_complete"])
+                self.assertEqual([member["cost"] for member in members], [0.03, 0.03])
+                summary = root / "summary.json"
+                code, _, stderr = run_cli("cost-summary", "--manifest", manifest, "--runs", runs,
+                                          "--judge-results", saved, "--out", summary)
+                self.assertEqual(code, 0, stderr)
+                block = json.loads(summary.read_text())["judge"]
+                self.assertEqual(block["total_cost_usd"], 0.06)
+                self.assertEqual(block["billed_calls"], 2)
+
+    def test_legacy_zero_missing_and_partial_prices_survive_both_merges(self):
+        cases = ((0.0, 0.0, "complete", 0.0, 2),
+                 (None, None, "unavailable", None, 0),
+                 (0.03, None, "partial", 0.03, 1),
+                 (0.0, None, "partial", 0.0, 1),
+                 (0.03, "floor", "partial", 0.09, 1))
+        for merge in (sb.merge_repeated_judge_rows, sb.merge_cross_judge_rows):
+            for first, second, availability, amount, observed in cases:
+                with self.subTest(merge=merge.__name__, first=first, second=second):
+                    members = [self.legacy(first), self.floor(model="b") if second == "floor"
+                               else self.legacy(second, model="b")]
+                    row = merge(members)
+                    with tempfile.TemporaryDirectory() as td:
+                        saved = Path(td) / "judge.jsonl"
+                        saved.write_text(json.dumps(row) + "\n")
+                        block = sb.judge_cost_block(sb.load_judge_results(str(saved)))
+                    self.assertEqual(block["total_cost_usd_availability"], availability)
+                    self.assertEqual(block["billed_calls"], 2)
+                    self.assertEqual(block["verdicts_with_cost"], observed)
+                    self.assertEqual(block["total_cost_usd"], amount if availability == "complete" else None)
+                    if availability == "partial":
+                        self.assertEqual(block["known_total_cost_usd"], amount)
+                    self.assertNotIn("cost", row)
+
+    def test_nested_completed_legacy_consensus_counts_billed_leaves_once(self):
+        repeats = [sb.merge_repeated_judge_rows([self.legacy(model=model), self.legacy(model=model)])
+                   for model in ("a", "b")]
+        panel = sb.merge_cross_judge_rows(repeats)
+        outer = sb.merge_repeated_judge_rows([panel, panel])
+        for row, total, count in ((panel, 0.12, 4), (outer, 0.24, 8)):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as td:
+                saved = Path(td) / "judge.jsonl"
+                saved.write_text(json.dumps(row) + "\n")
+                report = sb.judge_cost_block(sb.load_judge_results(str(saved)))
+                self.assertEqual(report["total_cost_usd"], total)
+                self.assertEqual(report["billed_calls"], count)
+                self.assertEqual(report["verdicts_with_cost"], count)
+
+    def test_legacy_alias_does_not_bypass_price_validation(self):
+        for amount in (True, -0.03, float("inf"), float("nan"), 10 ** 400):
+            with self.subTest(amount=amount), self.assertRaisesRegex(ValueError, "judge cost must be finite"):
+                sb.judge_cost_block({"j": self.legacy(amount)})
+        with self.assertRaisesRegex(ValueError, "judge cost channels contradict"):
+            sb.judge_cost_block({"j": {**self.whole(), "cost": 0.04}})
+
     def test_repeat_panel_and_saved_report_preserve_each_floor(self):
         for merge in (sb.merge_repeated_judge_rows, sb.merge_cross_judge_rows):
             with self.subTest(merge=merge.__name__):
