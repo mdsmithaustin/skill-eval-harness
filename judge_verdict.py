@@ -966,7 +966,7 @@ def _judge_observation_fields(observation: _JudgeObservation) -> dict[str, Any]:
     return project(observation)
 
 
-def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
+def _admit_judge_observation(raw: Mapping[str, Any]) -> _JudgeObservation:
     if not isinstance(raw, Mapping):
         raise TypeError("judge result row must be an object")
     marker = raw.get("judge_observation_kind")
@@ -1018,14 +1018,14 @@ def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
         observation = _judge_leaf_observation(None if marker == "missing" else verdict, raw,
                                               attempt_kind=kind, complete=reason is None,
                                               reasons=(reason,) if reason else (), fresh=fresh, explicit_kind=explicit)
-        return _admit_judge_diagnostic_evidence(observation, raw)
+        return observation
     if marker == "partial":
         raise ValueError("partial judge observation must be a leaf")
     key = memberships[0]
     children = raw[key]
     if not isinstance(children, list) or not children:
         raise ValueError("judge members must be a non-empty list")
-    members = tuple(_judge_observation_from_row(child) for child in children)
+    members = tuple(_admit_judge_observation(child) for child in children)
     _validate_judge_group_identity(members, panel=key == "judge_panel")
     provisional = _JudgePanel(members, tuple(_judge_model(member) for member in members)) if key == "judge_panel" else _JudgeRepeats(members)
     errors = _judge_population_causes(provisional, raw, tuple(_judge_diagnostics(member) for member in members))
@@ -1088,7 +1088,21 @@ def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
         observation = _MissingJudgeObservation(fields, population, (), fresh)
     else:
         observation = _CompleteJudgeObservation(fields, population, verdict, explicit, fresh, agreement)
-    return _admit_judge_diagnostic_evidence(observation, raw)
+    return observation
+
+
+def _judge_observation_from_row(raw: Mapping[str, Any]) -> _JudgeObservation:
+    observation = _admit_judge_observation(raw)
+
+    def attach(node: _JudgeObservation, row: Mapping[str, Any]) -> _JudgeObservation:
+        population = node.population
+        if not isinstance(population, _JudgeLeaf):
+            key = "judge_panel" if isinstance(population, _JudgePanel) else "judge_runs"
+            members = tuple(attach(member, child) for member, child in zip(population.members, row[key], strict=True))
+            node = replace(node, population=replace(population, members=members))
+        return _admit_judge_diagnostic_evidence(node, row)
+
+    return attach(observation, raw)
 
 
 def _judge_observation_matches_steps(observation: _JudgeObservation, *, fingerprint: str | None,

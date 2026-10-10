@@ -425,7 +425,10 @@ member value once, including null or malformed-looking claims, separately from c
 Canonical reload retains that original value and rejects calculated arrays whose JSON types,
 values, or order disagree with the retained tree. Unavailable leaves omit the member array and
 add a nonempty `leaf_reasons` array to the envelope. These existing local messages survive their
-first fresh fold and reload. The parser determines availability before decoding messages.
+first fresh fold and reload. The parser completes semantic, identity, status, and recorded-policy
+checks across the retained tree before decoding diagnostic envelopes. It determines availability
+independently of those envelopes, then restores leaf messages and checks canonical group arrays
+from children upward. A malformed earlier child's diagnostics cannot mask a later hard error.
 Messages cannot establish a verdict, execution fact, identity, or policy. The envelope validates
 format consistency, not authenticity. Complete observations and groups cannot carry `leaf_reasons`.
 Rewriters must retain the diagnostic envelope and calculated group records together.
