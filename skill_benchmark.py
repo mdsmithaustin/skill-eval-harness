@@ -11737,7 +11737,7 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                                     if isinstance(outcome, SpawnFailed) else
                                     NoModelSpend("offline_adapter") if cost_support == "not_applicable" else None)
                         subtotal = cost.value if isinstance(outcome, TimedOut) else None
-                        if isinstance(outcome, TimedOut):
+                        if subtotal is not None:
                             cost = telemetry_domain.Measurement.unavailable("runner_cost_incomplete_after_timeout")
                         return Priced((outcome, workspace.attestation), cost,
                                       observed_subtotal=subtotal, no_model_spend=no_spend)
@@ -14501,7 +14501,7 @@ def _invoke_paid_subagent(agent_fn: Any, *, requires_delta: bool, **kwargs: Any)
     if requires_delta and paid.evidence.scope != "turn_delta":
         cost = telemetry_domain.Measurement.unavailable("subagent_turn_cost_lacks_delta_scope")
     subtotal = cost.value if paid.evidence.incomplete_price else None
-    if paid.evidence.incomplete_price:
+    if subtotal is not None:
         cost = telemetry_domain.Measurement.unavailable("subagent_cost_incomplete_after_timeout")
     no_spend = (NoModelSpend("spawn_failed_before_process")
                 if paid.evidence.process is not None

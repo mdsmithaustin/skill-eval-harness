@@ -52,6 +52,7 @@ class CapturedPriceTests(unittest.TestCase):
                 priced = self.shell_timeout(raw)
                 self.assertIsNone(priced.cost.value)
                 self.assertIsNone(priced.observed_subtotal)
+                self.assertEqual(priced.cost.reason, "subagent_does_not_report_safe_dollars")
                 self.assertEqual(priced.value.evidence.process.stdout_utf8_valid,
                                  b"\xff" not in raw)
 
@@ -64,6 +65,8 @@ class CapturedPriceTests(unittest.TestCase):
                 priced = self.shell_timeout(json.dumps(response).encode(), requires_delta=True)
                 self.assertIsNone(priced.cost.value)
                 self.assertEqual(priced.observed_subtotal is not None, scope == "turn_delta")
+                self.assertEqual(priced.cost.reason, "subagent_cost_incomplete_after_timeout" if scope == "turn_delta"
+                                 else "subagent_turn_cost_lacks_delta_scope")
                 self.assertEqual(str(priced.value.evidence.reported_cost.value.amount), "0.06")
 
     def test_opaque_callback_exception_cannot_supply_price_or_process(self):
