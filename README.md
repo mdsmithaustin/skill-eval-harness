@@ -362,7 +362,7 @@ A plain judge that scores on its own scale declares it as `score_scale: [low, hi
 Judge results are keyed by `judge_task_id`:
 
 ```json
-{"judge_task_id":"case::with_skill::run-1::qualitative-review","passed":true,"score":4,"evidence":"Specific evidence from output"}
+{"judge_task_id":"case::with_skill::run-1::qualitative-review","verdict_kind":"scored","passed":true,"score":4,"threshold":4,"evidence":"Specific evidence from output"}
 ```
 
 ## Run output contract
@@ -394,7 +394,7 @@ runs/<case_id>/<variant>/run-1/workspace-changes.json  # what the model added, m
 runs/<case_id>/<variant>/run-1/candidate.patch         # text edits as one git patch, only when there are any
 runs/<case_id>/<variant>/run-1/candidate-files/<sha256> # content copies the patch cannot carry
 runs/answer-design.json                          # exact expected answer experiment and eval-contract digest
-runs/spend/<invocation-id>/spend-ceiling.json     # runtime admission ledger when a native answer or subagent ceiling is set
+runs/spend/<invocation-id>/spend-ceiling.json     # runtime admission ledger when an answer, subagent, or judge ceiling is set
 ```
 
 Prepared `run-agent` rows can optionally carry a fixed [recovery case](docs/recovery.md).
@@ -403,6 +403,11 @@ They write `recovery.json` and raw process evidence rather than an ordinary answ
 Completed phases establish runner capability, not provider eligibility or permission enforcement.
 
 `run-agent`, `run-codex`, `run-claude`, and `run-subagent` accept `--max-cost-usd` and `--assumed-cost-per-run-usd` for a per-invocation admission ceiling. A zero ceiling starts no calls. Missing prices close later admission unless an explicit assumption applies. Capped batches reject every recovery row before any run starts. See [the answer and subagent spend walkthrough](docs/limit-native-spend.md) for offline examples, refusal records, and report references. Subagent admission prices each external callback turn. A refused conversation root is incomplete. An invocation that starts no turn preserves any prior destination content.
+
+`judge` also accepts these ceiling flags. Evidence guards run before cost-support checks.
+Refused ready calls retain their requested repeat and panel slots, so incomplete work cannot
+pass through a smaller consensus. Native and shell judge charges settle before verdict parsing
+or transcript writes. See [the judge ceiling example](docs/limit-native-spend.md#judge-calls).
 
 Ordinary answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
 temporary workspace and delete it afterwards. Before deletion they diff it against a copy taken
@@ -643,9 +648,9 @@ skill-eval-harness/
 ├── grading_contracts.py        # closed assertion observations and immutable judge tasks
 ├── report_contracts.py         # empty/complete/partial report coverage cohorts and rates
 ├── runner_contracts.py         # closed answer-runner outcome union
-├── spend_contracts.py          # immutable answer and subagent call plans and spend receipts
+├── spend_contracts.py          # immutable answer, subagent, and judge call plans and spend receipts
 ├── spend_runtime.py            # serial admission and invocation ledger publication
-├── judge_verdict.py            # strict imported/stored judge verdict variants
+├── judge_verdict.py            # strict verdicts and complete/partial/missing observation trees
 ├── jetty_contracts.py          # closed Jetty lifecycle and observation contract
 ├── trace_contracts.py          # normalized event-log and event lifecycle contracts
 ├── trigger_contracts.py        # autonomous-trigger invocation/detection/observation contract

@@ -11,7 +11,7 @@ a field widened to ``Any``.
 from argparse import Namespace
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 from typing_extensions import assert_type
 
@@ -51,6 +51,24 @@ from judge_verdict import (
     DynamicVerdict,
     JudgeVerdict,
     ScoredVerdict,
+    _AbsentSummary,
+    _AbsentSuppliedDiagnostics,
+    _CompleteJudgeObservation,
+    _IntegerSummary,
+    _JudgeCause,
+    _JudgeLeaf,
+    _JudgeObservation,
+    _JudgePanel,
+    _JudgePopulation,
+    _JudgeRepeats,
+    _MalformedContainerSummary,
+    _MalformedScalarSummary,
+    _MissingJudgeObservation,
+    _NullSummary,
+    _PartialJudgeObservation,
+    _SavedAggregateSummary,
+    _SuppliedDiagnosticEvidence,
+    _SuppliedDiagnostics,
 )
 from manifest_contracts import (
     CaseId,
@@ -75,6 +93,7 @@ from runner_contracts import (
     SpawnFailed,
     TimedOut,
 )
+from spend_contracts import JudgeCall
 from trace_contracts import (
     EventLogObservation,
     InvalidEventLog,
@@ -147,6 +166,56 @@ def judge_verdict_is_exhaustive(verdict: JudgeVerdict) -> None:
         _consensus_passed: bool = verdict.passed
     else:
         _assert_never(verdict)
+
+
+def judge_observation_is_exhaustive(observation: _JudgeObservation) -> None:
+    if isinstance(observation, _CompleteJudgeObservation):
+        assert_type(observation.verdict, JudgeVerdict)
+        assert_type(observation.population, _JudgePopulation)
+    elif isinstance(observation, _PartialJudgeObservation):
+        assert_type(observation.verdict, JudgeVerdict)
+        assert_type(observation.population, _JudgeLeaf)
+    elif isinstance(observation, _MissingJudgeObservation):
+        assert_type(observation.reasons, tuple[str, ...])
+        assert_type(observation.local_reasons, tuple[str, ...])
+        assert_type(observation.population, _JudgePopulation)
+    else:
+        _assert_never(observation)
+
+
+def judge_population_is_exhaustive(population: _JudgePopulation) -> None:
+    if isinstance(population, _JudgeLeaf):
+        assert_type(population.call, JudgeCall | None)
+    elif isinstance(population, (_JudgeRepeats, _JudgePanel)):
+        assert_type(population.members, tuple[_JudgeObservation, ...])
+        assert_type(population.saved_summary, _SavedAggregateSummary | None)
+    else:
+        _assert_never(population)
+
+
+def saved_aggregate_summary_is_exhaustive(summary: _SavedAggregateSummary) -> None:
+    if isinstance(summary, (_AbsentSummary, _NullSummary)):
+        assert_type(summary, _AbsentSummary | _NullSummary)
+    elif isinstance(summary, _IntegerSummary):
+        assert_type(summary.value, int)
+    elif isinstance(summary, _MalformedScalarSummary):
+        assert_type(summary.value, bool | float | str)
+    elif isinstance(summary, _MalformedContainerSummary):
+        assert_type(summary.json_type, Literal["array", "object"])
+    else:
+        _assert_never(summary)
+
+
+def judge_diagnostic_types_are_precise(cause: _JudgeCause, supplied: _SuppliedDiagnosticEvidence) -> None:
+    assert_type(cause.path, tuple[int, ...])
+    assert_type(cause.scope, Literal["observation", "aggregate"])
+    assert_type(cause.reason, str)
+    if isinstance(supplied, _AbsentSuppliedDiagnostics):
+        assert_type(supplied, _AbsentSuppliedDiagnostics)
+    elif isinstance(supplied, _SuppliedDiagnostics):
+        assert_type(supplied.value, Any)
+    else:
+        _assert_never(supplied)
 
 
 def prepared_task_identity_is_precise(task: PreparedTask) -> None:

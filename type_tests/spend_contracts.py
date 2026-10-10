@@ -9,6 +9,7 @@ from spend_contracts import (
     CallState,
     Charge,
     InFlight,
+    JudgeCall,
     NoModelSpend,
     ObservedCharge,
     Planned,
@@ -61,6 +62,10 @@ def admission_precision(admission: SpendAdmission, call: SpendCall,
 def call_precision(call: SpendCall) -> None:
     if isinstance(call, SubagentTurnCall):
         assert_type(call.external_turn, int)
+    elif isinstance(call, JudgeCall):
+        assert_type(call.judge_input_sha256, str)
+        assert_type(call.requested_model, str | None)
+        assert_type(call.repeat, int)
     elif isinstance(call, AnswerCall):
         assert_type(call.task_sha256, str)
     else:

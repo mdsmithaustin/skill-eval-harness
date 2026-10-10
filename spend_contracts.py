@@ -10,6 +10,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Literal
 
+from json_contracts import validate_json_text
 from manifest_contracts import RunCoordinate
 from telemetry import AVAILABLE, PROVENANCE, Measurement, Money
 
@@ -99,7 +100,41 @@ class SubagentTurnCall:
                                          separators=(",", ":")).encode()).hexdigest()
 
 
-SpendCall = AnswerCall | SubagentTurnCall
+@dataclass(frozen=True)
+class JudgeCall:
+    judge_task_id: str
+    judge_input_sha256: str
+    backend: str
+    requested_model: str | None
+    repeat: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.judge_task_id, str) or not self.judge_task_id.strip():
+            raise ValueError("judge call requires a nonempty task identity")
+        validate_json_text(self.judge_task_id, "judge task identity")
+        if not isinstance(self.judge_input_sha256, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", self.judge_input_sha256) is None:
+            raise ValueError("judge call requires an input SHA-256")
+        if self.backend not in {"claude", "codex", "gemini", "vibe", "cmd"}:
+            raise ValueError("judge call requires a known backend")
+        if self.requested_model is not None:
+            if not isinstance(self.requested_model, str) or not self.requested_model.strip():
+                raise ValueError("judge call model must be nonempty or None")
+            validate_json_text(self.requested_model, "judge requested model")
+        if type(self.repeat) is not int or self.repeat <= 0:
+            raise ValueError("judge repeat must be a positive integer")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"kind": "judge", "judge_task_id": self.judge_task_id,
+                "judge_input_sha256": self.judge_input_sha256, "backend": self.backend,
+                "requested_model": self.requested_model, "repeat": self.repeat}
+
+    @property
+    def call_id(self) -> str:
+        return hashlib.sha256(json.dumps(self.as_dict(), sort_keys=True,
+                                         separators=(",", ":")).encode()).hexdigest()
+
+
+SpendCall = AnswerCall | SubagentTurnCall | JudgeCall
 
 
 @dataclass(frozen=True)
@@ -107,7 +142,7 @@ class SpendPlan:
     calls: tuple[SpendCall, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.calls, tuple) or not all(isinstance(call, (AnswerCall, SubagentTurnCall)) for call in self.calls):
+        if not isinstance(self.calls, tuple) or not all(isinstance(call, (AnswerCall, SubagentTurnCall, JudgeCall)) for call in self.calls):
             raise TypeError("spend plan requires a tuple of spend calls")
         if len({call.call_id for call in self.calls}) != len(self.calls):
             raise ValueError("spend plan contains duplicate call identities")
@@ -321,6 +356,10 @@ class SpendLedger:
                 call = SubagentTurnCall(call_raw.get("task_sha256"),
                                         RunCoordinate.from_row(call_raw.get("coordinate")),
                                         call_raw.get("external_turn"))
+            elif call_raw.get("kind") == "judge":
+                call = JudgeCall(call_raw.get("judge_task_id"), call_raw.get("judge_input_sha256"),
+                                 call_raw.get("backend"), call_raw.get("requested_model"),
+                                 call_raw.get("repeat"))
             else:
                 raise ValueError("unsupported spend call kind")
             if call.call_id in states or row.get("call_id") != call.call_id:

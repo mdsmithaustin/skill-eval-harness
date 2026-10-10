@@ -4,7 +4,19 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Saved judge groups calculate member diagnostics from every retained cause. Nested explanations
+  identify the member path, while original supplied claims remain separately inspectable in
+  `judge_diagnostic_evidence`. Canonical diagnostic records must match the retained tree.
+
+- Saved historical judge groups defer when their aggregate summary status is absent, null,
+  noninteger, or nonzero. Fresh groups reject Boolean and float status codes. The reserved
+  `judge_aggregate_summary` envelope preserves original historical status causes across reloads
+  while new folds retain derived status and every valid child.
+
+- Judge observations separate complete verdicts, partial paid evidence, and missing results. Refused optional-score repeats retain all requested members and exit 2 without a kind exception. Saved readers validate every nested child, requested identity, fresh consensus policy, and original price cache. Counts distinguish launches, refusals, nonbillable calls, and unverified historical calls. Complete saved per-step repeats and panels validate each leaf and reuse the parent's consensus decision and median.
+
 - Native process capture preserves empty provider stderr after a natural exit between polling checks. Successful and nonzero exits keep their actual process code without a false polling-timeout message. Genuine task timeouts retain their diagnostics and code 124. The recovery capture-error regression now waits for the fixture's observed checkpoint before injecting the error.
+- `judge` accepts `--max-cost-usd` and `--assumed-cost-per-run-usd` for actual native and shell calls. Evidence guards run before spend policy checks. Refused ready calls retain every requested panel and repeat slot. Paid malformed verdicts and transcript failures keep settled dollars. Prepared prompts and consumed exploration evidence remain fixed through the batch. See [the judge ceiling example](docs/limit-native-spend.md#judge-calls).
 
 - `run-subagent` accepts a per-invocation `--max-cost-usd` ceiling and a labeled `--assumed-cost-per-run-usd` charge for each unpriced external turn. Paid errors retain safe dollars and actual process codes. Refused required turns record no process result or provider turn artifact. New incomplete conversation roots preserve started evidence and fail grading. Zero-start invocations preserve existing destination content. See [the subagent ceiling example](docs/limit-native-spend.md#subagent-external-turns).
 

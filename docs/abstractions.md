@@ -238,10 +238,10 @@ hashed paths are the paths an agent lists. The judge's explore-surface digest fr
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract for ordinary rows. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11809`), Claude (`run_claude:12098`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11823`), Claude (`run_claude:12112`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:15394`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4278` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:15405`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:4290` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -258,7 +258,15 @@ independently set timeout, return code, answer, and failure into a contradictory
 calls no model during default grading; it reads what the runner left behind. The explicit
 `--allow-scripts` and `--embed-cmd` modes may invoke caller-supplied external oracle subprocesses.
 
-`spend_contracts.py` owns an immutable `AnswerCall | SubagentTurnCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` owns serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. Native runners retain workspace, subprocess, artifact, and recovery policy. Reports read each ledger without changing the immutable answer design. The [native spend walkthrough](limit-native-spend.md) describes the operator contract.
+`spend_contracts.py` owns an immutable `AnswerCall | SubagentTurnCall | JudgeCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` owns serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. Native runners retain workspace, subprocess, artifact, and recovery policy. Reports read each ledger without changing the immutable answer design. The [native spend walkthrough](limit-native-spend.md) describes the operator contract.
+
+Judge admission keeps private immutable guarded and ready slots beside the current judge owner.
+Only ready slots derive the paid plan. `JudgeCall` binds task identity, effective input hash,
+backend, requested model or default, and repeat. Prepared tasks and steps thaw recursively at
+existing validators. Each admitted adapter receives a disposable exploration copy made from
+the private retained template inside `SpendAdmission.run`. Per-call cleanup, verdict parsing,
+and transcript writes follow settlement. Guarded and refused result slots stay in both consensus
+merges. No new guard state enters the ledger.
 
 Subagent admission binds each required external callback turn to its prepared task digest, `RunCoordinate`, and positive turn number. The immutable plan uses the scripted `turns` list, or turn 1 for a single call. Provider-internal turn limits do not add calls. Built-in backends capture immutable reported dollars, scope, and actual process evidence before response validation. Accepted responses freeze recursively and thaw at the existing dictionary validators. Rejected responses retain safe dollars and raw envelopes in diagnostics. Multi-turn prices require explicit `turn_delta`. Cumulative or unspecified counters remain provider diagnostics. Assumptions remain in the ledger.
 
@@ -362,7 +370,7 @@ keeps its original `cost` evidence. Incompatible bases and currencies retain the
 reasons without reviving rejected sums or converting money.
 
 `merge_repeated_judge_rows` majority-votes pass/fail and medians scores across repeats. The
-harness picks no model. At the result boundary, `judge_verdict.py` parses one strict variant:
+harness picks no model. At the semantic boundary, `judge_verdict.py` parses one strict variant:
 boolean, scored, dimension-scored, dynamic-rubric, or consensus. Pass is derived from the typed
 payload; duplicate IDs and contradictory score/threshold/pass rows are rejected. The serialized
 row still carries `{judge_task_id, verdict_kind, passed, score, evidence}` — plus
@@ -372,13 +380,78 @@ row still carries `{judge_task_id, verdict_kind, passed, score, evidence}` — p
 exact rendered prompt, candidate output, and evidence. A stale or mismatched result is rejected
 or re-queued even when its `judge_task_id` still matches.
 
+The same module owns the private complete, partial, and missing observation union and its
+leaf, repeat, and panel populations. A partial paid leaf retains its canonical verdict independently
+of process success. A missing observation holds no verdict. Its compatibility projection is exactly
+`verdict_kind: consensus` and `passed: false`, with `judge_observation_kind: missing`, false
+completeness, and partial availability. It supplies no score or agreement. Only the existing local
+empty-step false result can be complete without a model call.
+
+Execution and folding use the typed tree. One recursive stored-result parser validates every
+child before checking availability. Fresh leaves bind a closed `JudgeCall`; groups declare their
+requested population and consensus policy. The reader rejects changed identities, incomplete
+children under a complete parent, and a pass, median, or agreement that does not replay from
+the recorded policy. A missing group retains every valid member, including incompatible explicit
+kinds with indexed diagnostics. Complete mixed kinds still reject. Group projections derive
+shared identity from all members and carry no leaf call ID, repeat, served model, or lifecycle.
+Historical loading preserves absent labels and population declarations.
+
+Group rows reserve `judge_aggregate_summary` for the observation owner. Its exact version-1
+envelope is either `{"version": 1, "kind": "derived"}` or `{"version": 1, "kind": "saved",
+"status": ...}`. Fresh groups and new folds use `derived`; it attests no parent process.
+Historical saved status distinguishes absent, null, integer, malformed scalar, and malformed
+container evidence. Boolean, finite float, and string scalars retain their exact type and value.
+Malformed arrays and objects retain their category only. The original file retains their bodies.
+Only genuine integer zero is eligible for completeness. Original Consensus and recorded-policy
+validation still precede historical status deferral. Missing groups project integer `returncode: 1`
+and the false shell while retaining the original status and its cause through reload. Complete groups
+project integer zero. Canonical envelopes require matching flags, status, and semantic shell.
+The parser rejects malformed envelopes, leaf placement, saved evidence on fresh groups, and
+unavailable saved evidence under Complete. Caller metadata cannot replace this reserved field.
+Consumers that rewrite canonical rows must retain the envelope to preserve original status causes.
+
+The owner also reserves `incomplete_judge_members` and `judge_diagnostic_evidence`.
+Every normalized group emits calculated `{member, reason}` records, including an empty array
+for Complete. Member numbers are one-based positions in the retained population. A group's own
+cause uses `member: "aggregate"`. Deeper locations appear in the reason, such as `member 1: ...`
+inside member 2's record. Scalar explanations render that path as `member 2, member 1: ...`.
+Root-local reasons keep their existing wording. The scalar ends with `...` when it exceeds
+512 characters; calculated records retain the full text, every cause, and repeated identical texts.
+Missing groups derive their reasons from the immutable tree rather than storing descendant copies.
+
+The version-1 diagnostic envelope has `supplied: {"kind": "absent"}` or
+`supplied: {"kind": "present", "value": ...}`. First normalization captures a legacy supplied
+member value once, including null or malformed-looking claims, separately from calculated records.
+Canonical reload retains that original value and rejects calculated arrays whose JSON types,
+values, or order disagree with the retained tree. Unavailable leaves omit the member array and
+add a nonempty `leaf_reasons` array to the envelope. These existing local messages survive their
+first fresh fold and reload. The parser completes semantic, identity, status, and recorded-policy
+checks across the retained tree before decoding diagnostic envelopes. It determines availability
+independently of those envelopes, then restores leaf messages and checks canonical group arrays
+from children upward. A malformed earlier child's diagnostics cannot mask a later hard error.
+Messages cannot establish a verdict, execution fact, identity, or policy. The envelope validates
+format consistency, not authenticity. Complete observations and groups cannot carry `leaf_reasons`.
+Rewriters must retain the diagnostic envelope and calculated group records together.
+
+Both merge helpers validate a singleton and return the original row object. That identity operation
+can retain legacy supplied diagnostic bytes. Direct projection and saved loading normalize the
+calculated and supplied channels without inventing a parent or member 1.
+
+The existing price leaves also supply disjoint execution counts. `requested_calls` equals
+`billed_calls + not_started_calls + nonbillable_calls + unverified_calls`. Billed means an affirmative
+launch, including a zero or unknown charge. Guards and spawn failures are nonbillable. Explicit
+refusals are not started. Missing historical launch facts are unverified. `requested_calls_basis`
+is `requested_slots` for fresh declared calls and `retained_leaves` for historical rows without a
+known requested population. Historical uncertainty makes `counts_availability` partial even
+when every retained launch is known. Count coverage and dollar coverage remain independent.
+
 Every per-run record shares one key, `manifest_contracts.RunCoordinate` (case, execution variant,
 run number, and a model on a model-fanned run). `judge_task_id` is that coordinate's rendering
 with an assertion label, so a judge task, a human judgement and a result row cannot name the same
 run differently. Repeated runs of one judge and a panel of judge models fold their verdicts with one
 rule, `judge_verdict.resolve_consensus`: a strict majority passes, an explicit `--quorum` overrides
 it, and an exact tie is decided by the median score only against an explicit threshold, else it is
-`unresolved` and does not pass. Both merges report the same `agreement` block, so a judge that
+`unresolved` and does not pass. Complete merges report the same `agreement` block, so a judge that
 disagrees with itself is visible rather than averaged away.
 
 Human verdicts have one shape, `human_judgements.HumanJudgement`: a run coordinate, an optional
@@ -471,7 +544,7 @@ by domain, difficulty, trigger type, and success goal. Case flags mark saturated
 flaky, and with-skill-failed cases, and `effect_estimates.ceiling_or_floor` separates the two
 ways a case stops discriminating: both arms always pass (ceiling) or both always fail (floor, which
 `suggest-cases` never offers for hardening). These flags, the leakage lint
-(`prompt_assertion_leakage_findings:972`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:984`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as

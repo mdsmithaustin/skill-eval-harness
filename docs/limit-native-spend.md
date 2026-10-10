@@ -1,4 +1,4 @@
-# How do I stop an answer or subagent batch at a dollar ceiling?
+# How do I stop an answer, subagent, or judge batch at a dollar ceiling?
 
 Use `--max-cost-usd` on `run-agent`, `run-claude`, or `run-codex` to limit admission for one command invocation. A call can exceed the ceiling. The command finishes that call and refuses later calls.
 
@@ -39,7 +39,7 @@ The harness publishes `in_flight` before dispatch and publishes the charge befor
 
 Each publication flushes and syncs the file before atomic replacement, then syncs the directory where the platform supports it. File publication failures stop dispatch. An abrupt process kill or failed settlement publication can leave unresolved `in_flight` evidence. The ledger then reports partial spend. A raised callback exception retains an attempted, unpriced receipt, or a labeled assumption if one was supplied. Raised setup, provider, or pricing exceptions skip workspace capture. A settlement publication error also skips capture. Returned failure and timeout outcomes still capture workspace evidence before deletion.
 
-For capped batches, every selected task must be an ordinary native answer task. A recovery row anywhere in the batch rejects the command before provider calls or writes to the runs root. Uncapped recovery keeps its existing phase behavior. The native rules above apply to the serial native answer commands. `run-subagent` has the external-turn rules below. Judges, Jetty submissions, trigger matrices, and Pi trigger evaluations keep their existing execution policies.
+For capped batches, every selected task must be an ordinary native answer task. A recovery row anywhere in the batch rejects the command before provider calls or writes to the runs root. Uncapped recovery keeps its existing phase behavior. The native rules above apply to the serial native answer commands. `run-subagent` has the external-turn rules below. Judge calls have the rules below. Jetty submissions, trigger matrices, and Pi trigger evaluations keep their existing execution policies.
 
 ## Subagent external turns
 
@@ -67,10 +67,68 @@ For a scripted multi-turn task, the runner retains started turn artifacts, safe 
 
 Native Claude and built-in subagent backends retain trustworthy dollars captured before a process timeout as an observed subtotal. The whole-call price remains unavailable because the process may incur later cost. Without an assumption, that partial price closes later admission. An assumption charges at least the subtotal, so $0.01 cannot reduce a known $0.06 floor. Timeout artifacts retain return code 124, false provider completeness, and unavailable whole-call cost. Shell capture requires valid original UTF-8 and one strict complete JSON document. Claude capture requires one unambiguous terminal result with no later session content. Bad sibling token fields do not erase independent dollars. Malformed token records remain raw diagnostics.
 
-Claude judges use the same shared price distinction without entering this spend ceiling.
+Claude judges use the same shared price distinction in their admission ledger and verdict rows.
 Their timeout member rows retain `observed_subtotal_usd` and unavailable full price. Repeat,
 panel, benchmark, and saved cost reports preserve partial known dollars. Two $0.06 judge
 floors report a partial $0.12 subtotal and zero whole-price observations. See the
 [judge command reference](commands.md#judge-backends).
 
 A zero ceiling starts no callback. With no prior destination content, the runner publishes an incomplete terminal root. With any prior destination content, it preserves every existing file and records this invocation's refusals only in its new ledger. A new invocation does not claim the preserved old output as its own result. Capped recovery anywhere in the selected population rejects the whole batch before runs-root writes.
+
+
+## Judge calls
+
+`judge` accepts the same ceiling and assumption flags for native backends and `--judge-cmd`.
+Each ready task, requested model, and repeat is one paid call. The command checks all evidence
+guards before creating its ledger. Guarded results invoke no model and have no paid ledger entry.
+An all-guarded batch needs no cost assumption. A zero ceiling retains those results and refuses
+all ready calls.
+
+Using the demo answer runs above, limit the offline shell judge to one assumed charge:
+
+```sh
+skill-benchmark judge examples/demo-skill/evals/shared-benchmark.json \
+  --runs /tmp/spend-demo-runs \
+  --judge-cmd "python3 $(pwd)/examples/demo-skill/stub_judge.py" \
+  --judge-runs 2 --max-cost-usd 0.02 --assumed-cost-per-run-usd 0.03 \
+  --out /tmp/spend-demo-judge.jsonl
+```
+
+The command exits 2 after its first ready call. The shell judge supplies no provider dollars,
+so its $0.03 charge has the ledger's `assumed` basis. Later ready rows carry
+`spend_refusal_reason`, `invocation_state: not_started`, and their effective input hashes.
+They have no process return code or served-model evidence. Every requested repeat and panel
+member remains in the results. Consensus remains incomplete when any member is refused.
+
+A positive ceiling on ready shell, Codex, Gemini, or Vibe work requires an assumption before
+any launch or output-file write. Claude uses reported dollars when available. Missing whole-call
+dollars close later admission without an assumption, including a timeout with a safe subtotal.
+An assumption cannot lower that subtotal. Assumptions never fill verdict price telemetry.
+The command exits 2 for an incomplete observation or partial unpriced accounting.
+
+Missing results use `judge_observation_kind: missing`, incomplete availability, and a compatibility
+`consensus` false shell without a score. A paid scored result keeps its score even beside a refusal.
+An incomplete group carries all members and no aggregate score or agreement. Saved per-step
+consensus validates every leaf's exact steps, minimum, and trajectory binding before using the
+parent's decision and median.
+
+`cost-summary.judge.requested_calls` partitions into `billed_calls`, `not_started_calls`,
+`nonbillable_calls`, and `unverified_calls`. Billed counts affirmative launches, including unknown
+and zero dollars. Guards and spawn failures are nonbillable. Historical rows without launch facts
+are unverified. `requested_calls_basis` is `requested_slots` for fresh calls and `retained_leaves`
+when the historical requested population is unknown; that uncertainty makes `counts_availability`
+partial. The demo has four requested slots, one launch, and three refusals. Its assumed charge
+stays in the ledger, while verdict price telemetry remains unavailable.
+
+The judge retains the effective prompt and consumed evidence before its first call. Declared
+text-only input checks remain separate from trajectory and exploration bindings. Exploration
+hashes retain the source view, which excludes oracle names and symlinks. The provider's copy
+also excludes agent context files. Each admitted invocation receives a disposable copy of a
+private retained template. Provider edits cannot change a later repeat's evidence. Ordinary
+text-only judging copies no unrelated files. The template lasts through the batch. All scratch
+evidence is removed after success, refusal, or failure.
+
+Settlement precedes verdict parsing and transcript publication. A paid malformed verdict or
+failed transcript write retains its settled price. The output error still stops execution.
+`benchmark` and `cost-summary` include the invocation ledger and retain the existing recursive
+judge price accounting. A refused slot cannot establish a billed whole-price observation.

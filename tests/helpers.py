@@ -856,11 +856,7 @@ def claude_streams_ending_after_result() -> list[tuple[str, str]]:
 
 
 def judge_with_scores(manifest: Path, runs: Path, out: Path, *,
-                      scores: dict[str, float]) -> Path:
-    """Write judge verdicts through the real `skill-benchmark judge` command
-    with a local stub judge (no model) that answers only a `score`: the score
-    of the first marker in `scores` that appears in its prompt. For judges
-    that declare a `score_scale`, whose pass/fail the harness derives."""
+                      scores: dict[str, float], expected_exit: int = 0) -> Path:
     stub = out.parent / "score_judge.py"
     stub.write_text(
         "import json, sys\n"
@@ -871,8 +867,10 @@ def judge_with_scores(manifest: Path, runs: Path, out: Path, *,
         encoding="utf-8")
     code, _, stderr = run_cli("judge", manifest, "--runs", runs,
                               "--judge-cmd", f"{sys.executable} {stub}", "--out", out)
-    if code != 0:
-        raise AssertionError(f"judge stub failed: {stderr}")
+    if code != expected_exit:
+        raise AssertionError(f"judge stub exited {code}, expected {expected_exit}: {stderr}")
+    if not out.is_file():
+        raise AssertionError(f"judge stub did not write {out}")
     return out
 
 

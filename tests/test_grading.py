@@ -44,7 +44,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def complete_judge_fixtures(case, text, output_path, rows, *, run_base=None,
                             model=None):
-    """Attach the lifecycle/input binding a real judge invocation persists."""
     _, tasks = sb.grade_case_variant(
         case, "with_skill", text, output_path, {}, run_base=run_base,
         judge_results={}, model=model)
@@ -52,7 +51,34 @@ def complete_judge_fixtures(case, text, output_path, rows, *, run_base=None,
     complete = {}
     for jid, row in rows.items():
         task = by_id[jid]
-        derived = sb.merged_qualitative_entry(task["assertion"], row, jid)
+        assertion = task["assertion"]
+        payload = dict(row)
+        if "threshold" in assertion:
+            if "threshold" in payload and payload["threshold"] != assertion["threshold"]:
+                raise ValueError("fixture threshold contradicts assertion threshold")
+            payload["threshold"] = assertion["threshold"]
+        derived = sb.merged_qualitative_entry(assertion, payload, jid)
+        semantic = dict(payload)
+        for key in ("passed", "score", "threshold", "dimension_scores"):
+            if key in derived:
+                semantic.setdefault(key, derived[key])
+        if assertion.get("graded_dimensions") and "threshold" not in row:
+            semantic["threshold"] = derived["threshold"]
+        if assertion.get("dynamic_rubric"):
+            minimum = assertion["dynamic_rubric"].get("minimum_criteria", 3)
+            if "minimum_criteria" in semantic and semantic["minimum_criteria"] != minimum:
+                raise ValueError("fixture minimum contradicts assertion minimum")
+            semantic["minimum_criteria"] = minimum
+        elif sb.is_per_step_assertion(assertion):
+            minimum = sb.per_step_minimum(assertion, len(row["criteria"]))
+            if "minimum_criteria" in semantic and semantic["minimum_criteria"] != minimum:
+                raise ValueError("fixture minimum contradicts assertion minimum")
+            semantic["minimum_criteria"] = minimum
+        canonical = sb.validated_result_row(semantic)
+        if "passed" in payload and canonical["passed"] != derived["passed"]:
+            raise ValueError("fixture passed contradicts assertion semantics")
+        if "verdict_kind" not in row:
+            canonical.pop("verdict_kind")
         steps = None
         if sb.is_per_step_assertion(task["assertion"]):
             events, _ = sb.read_events_base(run_base)
@@ -60,7 +86,7 @@ def complete_judge_fixtures(case, text, output_path, rows, *, run_base=None,
         _, _, prompt_sha256, _ = sb.judge_input_material(
             task, text, run_base=run_base, steps=steps)
         complete[jid] = {
-            **row, "judge_task_id": jid, "passed": derived["passed"],
+            **canonical, "judge_task_id": jid,
             "returncode": 0, "judge_observation_complete": True,
             "availability": "complete",
             "judge_input_sha256": task["judge_input_sha256"],
@@ -264,7 +290,6 @@ class OracleSchemaClosureTests(unittest.TestCase):
 
 
 class GradedScoringSeverityTests(unittest.TestCase):
-    """2.2 — graded scoring, three-tier severity, veto, and statistical lift."""
 
     def grade(self, case: dict, output: str, judge_results: dict | None = None, strict: bool = False) -> dict:
         with tempfile.TemporaryDirectory() as td:
@@ -359,6 +384,90 @@ class GradedScoringSeverityTests(unittest.TestCase):
         self.assertTrue(entry["passed"])                # >= default threshold 4 (0.75)
         self.assertIn("dimension scores", entry["evidence"])
         self.assertEqual(result["graded_score"], 0.875)
+
+    def test_complete_judge_fixture_rejects_invalid_scored_payload(self):
+        assertion = {"name": "q", "type": "judge", "rubric": ["good"]}
+        case = self.behavior_case([assertion])
+        jid = sb.judge_task_id("case-x", "with_skill", 1, assertion)
+        for row, diagnostic in (
+            ({"passed": False, "score": 1}, "stored scored verdict requires threshold"),
+            ({"passed": False, "score": 1, "threshold": 1}, "passed contradicts score and threshold"),
+        ):
+            with self.subTest(row=row), self.assertRaisesRegex(ValueError, diagnostic):
+                complete_judge_fixtures(case, "text", Path("out.md"), {jid: row})
+
+    def test_complete_judge_fixture_uses_declared_threshold(self):
+        assertion = {"name": "q", "type": "judge", "rubric": ["good"], "threshold": 4}
+        case = self.behavior_case([assertion])
+        jid = sb.judge_task_id("case-x", "with_skill", 1, assertion)
+        for row in ({"passed": False, "score": 1},
+                    {"passed": False, "score": 1, "threshold": 4}):
+            with self.subTest(row=row):
+                verdict = complete_judge_fixtures(case, "text", Path("out.md"), {jid: row})[jid]
+                self.assertEqual(verdict["threshold"], 4)
+                self.assertEqual(verdict["score"], 1)
+                self.assertFalse(verdict["passed"])
+        with self.assertRaisesRegex(ValueError, "fixture threshold contradicts assertion threshold"):
+            complete_judge_fixtures(case, "text", Path("out.md"),
+                                    {jid: {"passed": False, "score": 1, "threshold": 1}})
+
+    def test_complete_judge_fixture_rejects_both_supplied_polarity_contradictions(self):
+        plain = {"name": "q", "type": "judge", "rubric": ["good"]}
+        dimensions = {"name": "q", "type": "judge", "graded_dimensions": [{"name": "clarity", "rubric": "clear"}]}
+        dynamic = {"name": "q", "type": "judge", "dynamic_rubric": {"instruction": "clear", "minimum_criteria": 1}}
+        for assertion, rows, reason in (
+            (plain, ({"passed": True, "score": 0, "threshold": 1},
+                     {"passed": False, "score": 1, "threshold": 1}), "contradict"),
+            (dimensions, ({"passed": False, "score": 1, "threshold": 0.75, "dimension_scores": {"clarity": 5}},
+                          {"passed": True, "score": 0, "threshold": 0.75, "dimension_scores": {"clarity": 1}}), "contradict"),
+            (dynamic, ({"passed": True, "score": 0, "criteria": [{"name": "clear", "met": False}]},
+                       {"passed": False, "score": 1, "criteria": [{"name": "clear", "met": True}]}), "contradict"),
+            (plain, ({"passed": True, "score": 0}, {"passed": False, "score": 1}), "stored scored verdict requires threshold"),
+            ({**plain, "threshold": 4}, ({"passed": True, "score": 1},), "contradict"),
+            (dimensions, ({"passed": True, "score": 0.5, "threshold": 0.75, "dimension_scores": {"clarity": 5}},),
+             "dimension aggregate score contradicts"),
+            (dynamic, ({"passed": True, "score": 0.5, "criteria": [{"name": "clear", "met": True}]},),
+             "dynamic score/passed contradict"),
+            (dynamic, ({"passed": True, "criteria": [{"name": "clear", "met": True}], "minimum_criteria": 2},),
+             "fixture minimum contradicts assertion minimum"),
+        ):
+            case = self.behavior_case([assertion])
+            jid = sb.judge_task_id("case-x", "with_skill", 1, assertion)
+            for row in rows:
+                with self.subTest(assertion=assertion, row=row), self.assertRaisesRegex(ValueError, reason):
+                    complete_judge_fixtures(case, "text", Path("out.md"), {jid: row})
+
+    def test_complete_judge_fixture_derives_missing_canonical_fields_with_supplied_polarity(self):
+        for assertion, row, expected in (
+            ({"name": "q", "type": "judge", "graded_dimensions": [{"name": "clarity", "rubric": "clear"}], "threshold": 4},
+             {"passed": True, "dimension_scores": {"clarity": 4}},
+             {"passed": True, "score": 0.75, "threshold": 0.75, "dimension_scores": {"clarity": 4.0}}),
+            ({"name": "q", "type": "judge", "dynamic_rubric": {"instruction": "clear", "minimum_criteria": 2}},
+             {"passed": False, "criteria": [{"name": "clear", "met": True}, {"name": "correct", "met": False}]},
+             {"passed": False, "score": 0.5, "minimum_criteria": 2}),
+            ({"name": "q", "type": "judge", "threshold": 4, "rubric": ["good"]},
+             {"score": 1}, {"passed": False, "score": 1.0, "threshold": 4.0}),
+        ):
+            case = self.behavior_case([assertion])
+            jid = sb.judge_task_id("case-x", "with_skill", 1, assertion)
+            with self.subTest(assertion=assertion):
+                verdict = complete_judge_fixtures(case, "text", Path("out.md"), {jid: row})[jid]
+                self.assertEqual({key: verdict[key] for key in expected}, expected)
+                self.assertTrue(verdict["judge_observation_complete"])
+                self.assertIsNone(sb.judge_observation_incomplete_reason(verdict))
+
+    def test_complete_judge_fixture_preserves_supplied_dimension_threshold(self):
+        assertion = {"name": "q", "type": "judge", "graded_dimensions": [{"name": "clarity", "rubric": "clear"}]}
+        case = self.behavior_case([assertion])
+        jid = sb.judge_task_id("case-x", "with_skill", 1, assertion)
+        row = {"passed": False, "score": 0.5, "threshold": 0.5, "dimension_scores": {"clarity": 3}}
+        with self.assertRaisesRegex(ValueError, "dimension passed contradicts score and threshold"):
+            complete_judge_fixtures(case, "text", Path("out.md"), {jid: row})
+        verdict = complete_judge_fixtures(case, "text", Path("out.md"),
+                                        {jid: {**row, "threshold": 0.75}})[jid]
+        self.assertEqual({key: verdict[key] for key in row},
+                         {"passed": False, "score": 0.5, "threshold": 0.75, "dimension_scores": {"clarity": 3.0}})
+        self.assertTrue(verdict["judge_observation_complete"])
 
     def test_graded_dimensions_below_threshold_fail(self):
         assertion = {"name": "q", "type": "judge", "graded_dimensions": [{"name": "d", "rubric": "anchored"}]}
@@ -667,11 +776,13 @@ class GradedScoringSeverityTests(unittest.TestCase):
             write_run(runs / "case-1" / "without_skill", "alpha none")
             attest_answer_design(path, runs)
             verdicts = judge_with_scores(path, runs, root / "verdicts.jsonl",
-                                         scores={"alpha high": 7, "alpha none": 1})
+                                         scores={"alpha high": 7, "alpha none": 1},
+                                         expected_exit=2)
             rows = {json.loads(line)["variant"]: json.loads(line)
                     for line in verdicts.read_text(encoding="utf-8").splitlines()}
         self.assertEqual(rows["with_skill"]["availability"], "partial")
         self.assertFalse(rows["with_skill"]["passed"])
+        self.assertEqual(rows["with_skill"]["raw_verdict_payload"]["score"], 7)
         self.assertIn("score in [1, 5] (score_scale)", rows["with_skill"]["evidence"])
         self.assertEqual((rows["without_skill"]["availability"], rows["without_skill"]["passed"],
                           rows["without_skill"]["score"]), ("complete", False, 1))
@@ -1030,8 +1141,6 @@ class MultiTurnCaseTests(unittest.TestCase):
 
 
 class ReviewFixRegressionTests(unittest.TestCase):
-    """Regression tests for the PR #22 review findings — each encodes one
-    reported defect so it cannot return."""
 
     def graded_case(self) -> tuple[dict, dict]:
         assertion = {"name": "quality", "type": "judge",
@@ -1075,25 +1184,23 @@ class ReviewFixRegressionTests(unittest.TestCase):
         self.assertEqual(row["score"], 1.0)
 
     def test_p1_judge_task_ids_are_model_scoped(self):
-        # Without the model segment, case-1/m1/with_skill and case-1/m2/with_skill
-        # shared an ID and the last verdict silently applied to both models.
         assertion = {"name": "q", "type": "judge", "rubric": ["good"]}
         self.assertNotEqual(
             sb.judge_task_id("case-1", "with_skill", 1, assertion, model="m1"),
             sb.judge_task_id("case-1", "with_skill", 1, assertion, model="m2"))
         self.assertEqual(sb.judge_task_id("case-1", "with_skill", 1, assertion),
-                         "case-1::with_skill::run-1::q")   # single-model shape unchanged
+                         "case-1::with_skill::run-1::q")
         case = {"id": "case-1", "split": "tune", "kind": "behavior", "prompt": "p", "assertions": [assertion]}
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             (base / "output.md").write_text("t", encoding="utf-8")
             verdicts = {}
-            for model, passed, score in (("m1", True, 5), ("m2", False, 1)):
+            for model, passed, score in (("m1", True, 5), ("m2", False, 0)):
                 model_jid = sb.judge_task_id(
                     "case-1", "with_skill", 1, assertion, model=model)
                 verdicts.update(complete_judge_fixtures(
                     case, "t", base / "output.md",
-                    {model_jid: {"passed": passed, "score": score}},
+                    {model_jid: {"passed": passed, "score": score, "threshold": 1}},
                     run_base=base, model=model))
             m1, _ = sb.grade_case_variant(case, "with_skill", "t", base / "output.md", {}, run_base=base, judge_results=verdicts, model="m1")
             m2, _ = sb.grade_case_variant(case, "with_skill", "t", base / "output.md", {}, run_base=base, judge_results=verdicts, model="m2")
@@ -1126,19 +1233,19 @@ class ReviewFixRegressionTests(unittest.TestCase):
             jid = sb.judge_task_id("c", "with_skill", 1, assertion)
             soft_verdict = complete_judge_fixtures(
                 case, "alpha", base / "output.md",
-                {jid: {"passed": False, "score": 0.0}}, run_base=base)
+                {jid: {"passed": False, "score": 0.0, "threshold": 1}}, run_base=base)
             soft, _ = sb.grade_case_variant(case, "with_skill", "alpha", base / "output.md", {}, run_base=base,
                                             judge_results=soft_verdict)
             case_gate = json.loads(json.dumps(case))
             case_gate["assertions"][1]["severity"] = "gate"
             gate_verdict = complete_judge_fixtures(
                 case_gate, "alpha", base / "output.md",
-                {jid: {"passed": False, "score": 0.0}}, run_base=base)
+                {jid: {"passed": False, "score": 0.0, "threshold": 1}}, run_base=base)
             gate, _ = sb.grade_case_variant(case_gate, "with_skill", "alpha", base / "output.md", {}, run_base=base,
                                             judge_results=gate_verdict)
-        self.assertEqual(soft["combined_pass_rate"], 1.0)   # soft failure feeds graded only
+        self.assertEqual(soft["combined_pass_rate"], 1.0)
         self.assertEqual(soft["graded_score"], 0.0)
-        self.assertEqual(gate["combined_pass_rate"], 0.5)   # gate judge stays in the rate
+        self.assertEqual(gate["combined_pass_rate"], 0.5)
 
     def test_p2_junit_counts_qualitative_gate_failures_not_soft(self):
         result = {"case_id": "c", "variant": "with_skill", "run_number": 1, "missing_output": False,
@@ -1168,8 +1275,6 @@ class ReviewFixRegressionTests(unittest.TestCase):
 
 
 class AssertionDependenciesTests(unittest.TestCase):
-    """G2 — depends_on / staged grading. Mutation-killing: exact totals, and the
-    critical-tie both-directions (a running critical vetoes; a skipped one does not)."""
 
     def _grade(self, assertions, text="alpha", judge_results=None):
         case = {"id": "c", "split": "tune", "kind": "behavior", "assertions": assertions}
@@ -1266,10 +1371,10 @@ class AssertionDependenciesTests(unittest.TestCase):
         expanded = sb.expand_judge_preset(jassert)
         jid = sb.judge_task_id("c", "with_skill", 1, expanded)
         result, _ = self._grade([jassert, {"name": "dep", "type": "contains", "value": "alpha", "depends_on": "jpre"}],
-                                judge_results={jid: {"judge_task_id": jid, "passed": False, "score": 0}})
+                                judge_results={jid: {"judge_task_id": jid, "passed": False, "score": 0, "threshold": 1}})
         dep = next(r for r in result["assertions"] if r["name"] == "dep")
-        self.assertTrue(dep["skipped"])                  # resolved on the verdict-loaded pass
-        self.assertEqual(result["objective_total"], 0)   # dep skipped out
+        self.assertTrue(dep["skipped"])
+        self.assertEqual(result["objective_total"], 0)
         self.assertEqual((result["qualitative_total"], result["qualitative_passed"]), (1, 0))
 
     def test_no_depends_on_is_byte_identical_grading(self):
@@ -1293,10 +1398,6 @@ class AssertionDependenciesTests(unittest.TestCase):
         self.assertEqual(result["qualitative_total"], 0)      # skipped judge dependent drops out of the qual denominator
 
     def test_forward_reference_to_preset_prerequisite_resolves_both_orders(self):
-        # A preset prerequisite's row name is rewritten (-> "factuality") while depends_on
-        # targets the author's label ("grounded"). A forward reference (dependent listed
-        # first) must STILL skip, not spuriously veto. Regression for the order-dependent
-        # bug: the post-pass keyed row_by_label on the emitted name, missing the preset.
         A = {"type": "factuality", "description": "grounded"}
         B = {"name": "B", "type": "contains", "value": "ZZZ_absent", "depends_on": "grounded", "critical": True}
         jid = sb.judge_task_id("c", "with_skill", 1, sb.expand_judge_preset(A))
@@ -1304,8 +1405,8 @@ class AssertionDependenciesTests(unittest.TestCase):
         for order, assertions in (("in_order", [A, B]), ("forward", [B, A])):
             result, _ = self._grade(assertions, judge_results=verdict)
             skipped = {r.get("name") for r in result["assertions"] if r.get("skipped")}
-            self.assertEqual(skipped, {"B"}, order)            # dependent skipped in BOTH orders
-            self.assertFalse(result.get("vetoed"), order)      # never a spurious critical veto
+            self.assertEqual(skipped, {"B"}, order)
+            self.assertFalse(result.get("vetoed"), order)
             self.assertEqual(result["skipped_total"], 1, order)
 
     def test_reverse_order_transitive_chain_needs_fixed_point(self):

@@ -60,13 +60,7 @@ class ResolveConsensusTests(unittest.TestCase):
 class BothMergesShareTheRuleTests(unittest.TestCase):
     def test_repeats_and_a_panel_fold_the_same_votes_the_same_way(self):
         cases = [
-            # (passed, score) votes, threshold -> passed, unresolved
-            # A tie with no threshold was a silent fail for repeats; now both
-            # merges report it as unresolved.
             ([(True, None), (False, None)], None, False, True),
-            # Scores without a calibrated threshold must not pass on a default.
-            ([(True, 3), (False, 2)], None, False, True),
-            # A tie decided by the median score against an explicit threshold.
             ([(True, 0.9), (False, 0.6)], 0.7, True, False),
             ([(True, 1.0), (True, 0.9), (False, 0.0)], 0.7, True, False),
         ]
@@ -81,6 +75,11 @@ class BothMergesShareTheRuleTests(unittest.TestCase):
                     self.assertIs(merged["passed"], passed)
                     self.assertIs(merged["agreement"]["unresolved"], unresolved)
                 self.assertEqual(repeats["agreement"], panel["agreement"])
+
+    def test_stored_scores_require_a_canonical_threshold_before_folding(self):
+        for merge in (sb.merge_repeated_judge_rows, sb.merge_cross_judge_rows):
+            with self.assertRaisesRegex(ValueError, "stored scored verdict requires threshold"):
+                merge([judge_row(True, 3, model="a"), judge_row(False, 2, model="b")])
 
 
 if __name__ == "__main__":
