@@ -333,6 +333,66 @@ class JudgeObservationTests(unittest.TestCase):
         forged = {**projected, "judge_observation_kind": "missing"}
         assert_dies(self, lambda: self.load(forged), "full declared population")
 
+    def test_whole_tree_hard_admission_precedes_earlier_child_diagnostic_codecs(self):
+        for unavailable in (False, True):
+            groups = [sb.merge_repeated_judge_rows([
+                self.leaf(model=model, repeat=repeat, missing=unavailable and model == "a" and repeat == 1)
+                for repeat in (1, 2, 3)]) for model in ("a", "b", "c")]
+            baseline = sb.merge_cross_judge_rows(groups)
+            self.assertEqual(self.load(baseline), baseline)
+            self.assertEqual(baseline["judge_observation_complete"], not unavailable)
+            cases = [
+                ("later sibling semantics", ("judge_panel", 2, "judge_runs", 2), {"passed": "bad"},
+                 "passed must be a boolean"),
+                ("parent task", (), {"judge_task_id": "wrong"}, "judge parent judge_task_id contradicts members"),
+                ("parent requested model", ("judge_panel", 2), {"judge_requested_model": "wrong"},
+                 "judge parent requested model contradicts members"),
+                ("parent binding", (), {"judge_prompt_sha256": "c" * 64},
+                 "judge parent judge_prompt_sha256 contradicts members"),
+                ("nested consensus", ("judge_panel", 2), {"passed": False},
+                 "recorded judge consensus contradicts members and policy"),
+                ("nested policy", ("judge_panel", 2), {"judge_consensus_policy": {"threshold": None, "quorum": 4}},
+                 "recorded judge consensus contradicts members and policy"),
+                ("fresh boolean status", (), {"returncode": True}, "judge aggregate returncode must be an integer"),
+                ("fresh float status", ("judge_panel", 2), {"returncode": 0.0},
+                 "judge aggregate returncode must be an integer"),
+                ("saved summary codec", ("judge_panel", 2), {"judge_aggregate_summary": None},
+                 "judge aggregate summary requires integer version 1"),
+            ]
+            if unavailable:
+                cases.append(("complete parent over unavailable child", (),
+                              {"judge_observation_kind": "complete", "judge_observation_complete": True,
+                               "availability": "complete", "returncode": 0},
+                              "complete judge group requires complete compatible children"))
+            else:
+                cases.extend([
+                    ("parent consensus", (), {"passed": False},
+                     "recorded judge consensus contradicts members and policy"),
+                    ("parent policy", (), {"judge_consensus_policy": {"threshold": None, "quorum": 4}},
+                     "recorded judge consensus contradicts members and policy"),
+                ])
+            for diagnostic_path in (("judge_panel", 0), ("judge_panel", 1),
+                                    ("judge_panel", 0, "judge_runs", 0), ("judge_panel", 0, "judge_runs", 1)):
+                for case, hard_path, mutation, hard_error in cases:
+                    for mode in ("hard-only", "diagnostic-only", "combined"):
+                        with self.subTest(unavailable=unavailable, diagnostic_path=diagnostic_path, case=case, mode=mode):
+                            row = copy.deepcopy(baseline)
+                            if mode != "hard-only":
+                                node = row
+                                for part in diagnostic_path:
+                                    node = node[part]
+                                node["judge_diagnostic_evidence"] = None
+                            if mode != "diagnostic-only":
+                                node = row
+                                for part in hard_path:
+                                    node = node[part]
+                                node.update(mutation)
+                            expected = ("judge diagnostic evidence requires integer version 1"
+                                        if mode == "diagnostic-only" else hard_error)
+                            with self.assertRaises(ValueError) as caught:
+                                jv._judge_observation_from_row(row)
+                            self.assertEqual(str(caught.exception), expected)
+
     def test_scalar_diagnostics_cap_text_without_truncating_stored_records(self):
         text = "x" * 600
         missing = jv._judge_leaf_observation(None, self.leaf(missing=True), attempt_kind="not_started", complete=False, reasons=(text,))
