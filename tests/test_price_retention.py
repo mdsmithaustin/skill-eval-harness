@@ -186,6 +186,14 @@ sys.exit({exit_code})
                 metadata = json.loads((runs / run_dir / "metadata.json").read_text())
                 self.assertEqual(metadata["returncode"], 124)
                 self.assertTrue(metadata["timed_out"])
+                if route == "native":
+                    self.assertEqual(metadata["cost_availability"], "partial")
+                    self.assertEqual(metadata["observed_subtotal_usd"], 0.06)
+                else:
+                    diagnostic = metadata["subagent_rejected_calls"][0]
+                    self.assertEqual(diagnostic["cost_availability"], "partial")
+                    self.assertEqual(diagnostic["reported_cost_usd"], "0.06")
+                    self.assertTrue(diagnostic["stdout_utf8_valid"])
 
     def test_assumption_cannot_reduce_timeout_floor_and_allows_later_admission(self):
         for route in ("shell", "claude", "native"):
@@ -245,6 +253,31 @@ sys.exit({exit_code})
                 charge = self.ledger(fixture[1])["calls"][0]["charge"]
                 self.assertEqual(charge["basis"], "unpriced" if mode == "timeout" else "observed")
                 self.assertEqual(charge.get("observed_subtotal_usd", charge.get("amount_usd")), "0.06")
+
+    def test_multi_turn_shell_timeout_preserves_only_eligible_delta_floor(self):
+        for scope in ("turn_delta", "conversation_cumulative", None, "bad"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as td:
+                response = {"answer": "candidate", "usage": {"cost_usd": 0.06}}
+                if scope is not None:
+                    response["telemetry_scope"] = scope
+                fixture = self.fixture(Path(td), "shell", raw=json.dumps(response).encode())
+                tasks, runs, run_dir, marker, _, _ = fixture
+                row = json.loads(tasks.read_text().splitlines()[0])
+                row["turns"] = ["first", "second"]
+                tasks.write_text(json.dumps(row) + "\n")
+                code, _, stderr = self.invoke(fixture)
+                self.assertEqual(code, 2, stderr)
+                self.assertEqual(marker.read_text(), "started\n")
+                ledger = self.ledger(runs)
+                charge = ledger["calls"][0]["charge"]
+                self.assertEqual(charge["basis"], "unpriced")
+                self.assertEqual(charge["observed_subtotal_usd"], "0.06" if scope == "turn_delta" else None)
+                self.assertEqual([row["state"] for row in ledger["calls"]], ["settled", "not_started"])
+                turn_metadata = json.loads((runs / run_dir / "turn-1" / "metadata.json").read_text())
+                self.assertEqual(turn_metadata["returncode"], 124)
+                self.assertTrue(turn_metadata["timed_out"])
+                self.assertIsNone(turn_metadata["cost_normalized"].get("total_cost"))
+                self.assertEqual(turn_metadata["subagent_paid_evidence"]["reported_cost_usd"], "0.06")
 
 
 if __name__ == "__main__":

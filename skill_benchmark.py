@@ -9265,6 +9265,19 @@ def write_trace_artifacts(
             record_lines = list(range(1, len(records) + 1))
     else:
         records, parse_errors = parsed_records, parsed_errors
+    if source.casefold() == "claude" and retain_invalid_provider_trace:
+        retained_records = []
+        for line, record in zip(record_lines, records):
+            try:
+                for holder in (record, record.get("message")):
+                    if isinstance(holder, dict) and isinstance(holder.get("usage"), dict):
+                        normalize_usage(holder["usage"], source="trace_normalized")
+            except ValueError as exc:
+                parse_errors.append(f"line {line}: invalid Claude usage: {exc}")
+                retained_records.append(_claude_protocol_error(f"invalid Claude usage: {exc}"))
+            else:
+                retained_records.append(record)
+        records = retained_records
     events, metrics = normalize_trace_records(
         records, source=source, pi_stream=pi_stream, record_lines=record_lines)
     semantic_protocol_error = trace_dialect_for(source).protocol_error(records, pi_stream)
@@ -9568,7 +9581,11 @@ def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome | _NoProce
     else:  # pragma: no cover - closed union exhaustiveness guard
         raise TypeError(f"unsupported answer outcome {type(outcome).__name__}")
     usage_block = normalize_usage(dict(context.usage) if context.usage is not None else None, source="provider_reported")
-    cost_block = normalize_cost(context.cost_usd, source="provider_reported", pricing_model=context.model)
+    cost_block = normalize_cost(None if isinstance(outcome, TimedOut) else context.cost_usd,
+                                source="provider_reported", pricing_model=context.model)
+    partial_cost = ({"cost_availability": "partial", "observed_subtotal_usd": context.cost_usd,
+                     "cost_reason": "process_timeout"}
+                    if isinstance(outcome, TimedOut) and context.cost_usd is not None else {})
     elapsed = context.elapsed_ms
     # Completion evidence every answer run records. A runner that observed a
     # stop reason, a served model or an effort setting overrides these through
@@ -9591,6 +9608,7 @@ def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome | _NoProce
         "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
         "usage_normalized": usage_block,
         "cost_normalized": cost_block,
+        **partial_cost,
         **({"elapsed_ms": elapsed} if elapsed is not None else {}),
     }
     if isinstance(outcome, _NoProcessArtifact):
@@ -9603,7 +9621,7 @@ def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome | _NoProce
             metadata.update(artifact_terminal_state="response_rejected", subagent_rejection={
                 "call_id": outcome.terminal.call.call_id,
                 "call": outcome.terminal.call.as_dict(), "reason": outcome.terminal.reason})
-    extra_metrics = {**dict(context.metrics_extra), "returncode": returncode,
+    extra_metrics = {**dict(context.metrics_extra), **partial_cost, "returncode": returncode,
                      **({"invocation_state": invocation_state.value} if invocation_state is not None else {}),
                      **({"elapsed_ms": elapsed} if elapsed is not None else {})}
     events, metrics = write_trace_artifacts(
@@ -11718,7 +11736,11 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                         no_spend = (NoModelSpend("spawn_failed_before_process")
                                     if isinstance(outcome, SpawnFailed) else
                                     NoModelSpend("offline_adapter") if cost_support == "not_applicable" else None)
-                        return Priced((outcome, workspace.attestation), cost, no_model_spend=no_spend)
+                        subtotal = cost.value if isinstance(outcome, TimedOut) else None
+                        if isinstance(outcome, TimedOut):
+                            cost = telemetry_domain.Measurement.unavailable("runner_cost_incomplete_after_timeout")
+                        return Priced((outcome, workspace.attestation), cost,
+                                      observed_subtotal=subtotal, no_model_spend=no_spend)
 
                     execution = admission.run(call, invoke)
                 if isinstance(execution, NotStarted):
@@ -11833,11 +11855,15 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     text = stdout if isinstance(stdout, str) else ""
     env: dict[str, Any] | None = None
     stream_records: list[dict[str, Any]] = []
+    duplicate_keys: Sequence[str] = ()
     stripped = text.strip()
     try:
-        single = stream_json_loads(stripped)
+        parsed_single = parse_stream_json(stripped)
+        single = parsed_single.value
+        duplicate_keys = parsed_single.duplicate_keys
     except json.JSONDecodeError:
-        records, errors = parse_trace_jsonl_text(text, strict=False)
+        records, errors, _, duplicate_keys = parse_trace_jsonl_text_with_lines(
+            text, strict=False, strict_json_errors=False)
         stream_records = records
         results = [record for record in records if record.get("type") == "result"]
         if errors:
@@ -11856,31 +11882,36 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     else:
         if isinstance(single, dict):
             env = single
-    if not isinstance(env, dict) or "result" not in env:
+    if not isinstance(env, dict) or ("result" not in env and env.get("type") != "result"):
         return {"answer": "", "raw_response": text, "cost_usd": None,
                 "usage": {}, "parse_error": "not a claude -p json envelope"}
     if "type" in env and env.get("type") != "result":
         return {"answer": "", "raw_response": text, "cost_usd": None,
                 "usage": {}, "parse_error": "Claude envelope type must be 'result'"}
+    cost = env.get("total_cost_usd")
+    normalized_cost = _num(cost)
+    ambiguous_price = any(key.rsplit(": ", 1)[-1] in {"type", "result", "total_cost_usd"}
+                          for key in duplicate_keys)
+    reported_cost = (normalized_cost
+                     if normalized_cost is not None and normalized_cost >= 0 and not ambiguous_price
+                     else None)
     if "is_error" in env and not isinstance(env.get("is_error"), bool):
-        return {"answer": "", "raw_response": text, "cost_usd": None,
+        return {"answer": "", "raw_response": text, "cost_usd": reported_cost,
                 "usage": {}, "parse_error": "Claude is_error must be boolean"}
     api_error_status = env.get("api_error_status")
     if (api_error_status is not None
             and (isinstance(api_error_status, bool)
                  or not isinstance(api_error_status, int)
                  or not 100 <= api_error_status <= 599)):
-        return {"answer": "", "raw_response": text, "cost_usd": None,
+        return {"answer": "", "raw_response": text, "cost_usd": reported_cost,
                 "usage": {}, "parse_error": "Claude api_error_status must be an HTTP status integer"}
     raw_usage = env.get("usage") if isinstance(env.get("usage"), dict) else {}
     try:
         normalized_usage = normalize_usage(raw_usage, source="provider_reported")
     except ValueError as exc:
-        return {"answer": "", "raw_response": text, "cost_usd": None,
+        return {"answer": "", "raw_response": text, "cost_usd": reported_cost,
                 "usage": {}, "parse_error": f"invalid Claude usage: {exc}"}
     usage = {key: value for key, value in normalized_usage.items() if key != "source"}
-    cost = env.get("total_cost_usd")
-    normalized_cost = _num(cost)
     result = env.get("result")
     result_error = None if isinstance(result, str) else "claude result must be a string"
     if cost is not None and (normalized_cost is None or normalized_cost < 0):
@@ -11898,9 +11929,7 @@ def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
     ]
     return {
         "answer": result if isinstance(result, str) else "",
-        "cost_usd": (normalized_cost
-                     if normalized_cost is not None and normalized_cost >= 0
-                     else None),
+        "cost_usd": reported_cost,
         "usage": usage,
         "parse_error": result_error,
         "is_error": env.get("is_error", False),
@@ -12017,8 +12046,15 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
     else:
         result = invoke(cwd)
     command = " ".join(shlex.quote(a) for a in ["claude", *argv[1:]])
+    parsed = (
+        parse_claude_cli_json(result.stdout)
+        if result.stdout_utf8_valid
+        else {"answer": "", "cost_usd": None, "usage": {},
+              "parse_error": "Claude stdout is not valid UTF-8"}
+    )
     if result.timed_out:
-        return {"answer": "", "cost_usd": None, "usage": {}, "parse_error": None,
+        return {"answer": "", "cost_usd": parsed.get("cost_usd"), "usage": {},
+                "parse_error": parsed.get("parse_error"),
                 "returncode": 124, "timed_out": True, "elapsed_ms": result.elapsed_ms,
                 "stderr": result.stderr, "raw_response": result.stdout, "command": command,
                 "context_isolation": list(isolation_args),
@@ -12026,12 +12062,6 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
                 "trace_utf8_valid": result.stdout_utf8_valid,
                 **({"environment": dict(result.adapter_metadata or {})}
                    if recovery_capture is not None else {})}
-    parsed = (
-        parse_claude_cli_json(result.stdout)
-        if result.stdout_utf8_valid
-        else {"answer": "", "cost_usd": None, "usage": {},
-              "parse_error": "Claude stdout is not valid UTF-8"}
-    )
     provider_error = (
         "Claude provider error"
         + (f" (HTTP {parsed['api_error_status']})"
@@ -14397,11 +14427,20 @@ class _SubagentPaidEvidence:
     scope: Literal["turn_delta", "conversation_cumulative", "unavailable"]
     process: InvocationResult | None = None
 
+    @property
+    def incomplete_price(self) -> bool:
+        return self.process is not None and self.process.timed_out
+
     def diagnostic(self) -> dict[str, Any]:
         return {"reported_cost_usd": (None if self.reported_cost.value is None
                                       else format(self.reported_cost.value.amount, "f")),
                 "telemetry_scope": self.scope,
-                **({"raw_response": self.process.stdout} if self.process is not None else {})}
+                "cost_availability": ("unavailable" if self.reported_cost.value is None
+                                      else "partial" if self.incomplete_price else "complete"),
+                **({"raw_response": self.process.stdout,
+                    "stdout_utf8_valid": self.process.stdout_utf8_valid,
+                    "stderr_utf8_valid": self.process.stderr_utf8_valid}
+                   if self.process is not None else {})}
 
 
 @_dataclass(frozen=True)
@@ -14461,17 +14500,20 @@ def _invoke_paid_subagent(agent_fn: Any, *, requires_delta: bool, **kwargs: Any)
     cost = paid.evidence.reported_cost
     if requires_delta and paid.evidence.scope != "turn_delta":
         cost = telemetry_domain.Measurement.unavailable("subagent_turn_cost_lacks_delta_scope")
+    subtotal = cost.value if paid.evidence.incomplete_price else None
+    if paid.evidence.incomplete_price:
+        cost = telemetry_domain.Measurement.unavailable("subagent_cost_incomplete_after_timeout")
     no_spend = (NoModelSpend("spawn_failed_before_process")
                 if paid.evidence.process is not None
                 and paid.evidence.process.invocation_state is InvocationState.SPAWN_FAILED else None)
-    return Priced(paid, cost, no_model_spend=no_spend)
+    return Priced(paid, cost, observed_subtotal=subtotal, no_model_spend=no_spend)
 
 
 def _subagent_artifact_response(paid: _SubagentTurnResult) -> tuple[dict[str, Any], str | None]:
     if isinstance(paid, _SubagentResponseAccepted):
         return string_keyed_dict(thaw_json_value(paid.response), "subagent response"), None
     response: dict[str, Any] = {"answer": ""}
-    if paid.evidence.reported_cost.value is not None:
+    if paid.evidence.reported_cost.value is not None and not paid.evidence.incomplete_price:
         response["usage"] = {"cost_usd": float(paid.evidence.reported_cost.value.amount)}
     if paid.evidence.scope != "unavailable":
         response["telemetry_scope"] = paid.evidence.scope
@@ -15120,23 +15162,44 @@ def shell_agent_backend(agent_cmd: str, timeout: int = DEFAULT_RUNNER_TIMEOUT_S)
         payload = {"prompt": prompt, "model": model, "workspace": str(workspace)}
         if history:
             payload["history"] = history
+        def captured_text(value: str | bytes | None) -> tuple[str, bool]:
+            if value is None:
+                return "", True
+            if isinstance(value, bytes):
+                try:
+                    return value.decode("utf-8", errors="strict"), True
+                except UnicodeDecodeError:
+                    return value.decode("utf-8", errors="backslashreplace"), False
+            return value, True
         started = time.time()
         try:
-            proc = subprocess.run(agent_cmd, shell=True, input=json.dumps(payload),
-                                  text=True, capture_output=True, timeout=timeout, check=False)
+            proc = subprocess.run(agent_cmd, shell=True, input=json.dumps(payload).encode("utf-8"),
+                                  capture_output=True, timeout=timeout, check=False)
         except subprocess.TimeoutExpired as exc:
+            stdout, stdout_valid = captured_text(exc.stdout)
+            stderr, stderr_valid = captured_text(exc.stderr)
             process = InvocationResult(
-                stdout=coerce_text(exc.stdout), stderr=coerce_text(exc.stderr), returncode=124,
+                stdout=stdout, stderr=stderr, returncode=124,
                 elapsed_ms=int((time.time() - started) * 1000), invocation_state=InvocationState.TIMED_OUT,
-                stdout_utf8_valid=True, stderr_utf8_valid=True, timed_out=True)
-            return _SubagentResponseRejected("subagent command timed out", _subagent_paid_evidence(None, process))
+                stdout_utf8_valid=stdout_valid, stderr_utf8_valid=stderr_valid, timed_out=True)
+            parsed = None
+            if stdout_valid:
+                try:
+                    parsed = strict_json_loads(stdout)
+                except (ValueError, TypeError):
+                    pass
+            return _SubagentResponseRejected("subagent command timed out", _subagent_paid_evidence(parsed, process))
+        stdout, stdout_valid = captured_text(proc.stdout)
+        stderr, stderr_valid = captured_text(proc.stderr)
         process = InvocationResult(
-            stdout=proc.stdout, stderr=proc.stderr, returncode=proc.returncode,
+            stdout=stdout, stderr=stderr, returncode=proc.returncode,
             elapsed_ms=int((time.time() - started) * 1000),
             invocation_state=InvocationState.COMPLETE if proc.returncode == 0 else InvocationState.PROCESS_FAILED,
-            stdout_utf8_valid=True, stderr_utf8_valid=True)
+            stdout_utf8_valid=stdout_valid, stderr_utf8_valid=stderr_valid)
+        if not stdout_valid:
+            return _SubagentResponseRejected("subagent stdout is not valid UTF-8", _subagent_paid_evidence(None, process))
         try:
-            parsed = strict_json_loads(proc.stdout)
+            parsed = strict_json_loads(stdout)
         except (ValueError, TypeError) as exc:
             return _SubagentResponseRejected(
                 f"subagent response must be exactly one JSON object: {exc}", _subagent_paid_evidence(None, process))
@@ -15180,7 +15243,8 @@ def run_subagent(args: argparse.Namespace) -> int:
                 timed_out=result.get("timed_out", False))
             evidence = _subagent_paid_evidence({"usage": {"cost_usd": result.get("cost_usd")},
                                                "telemetry_scope": "turn_delta"}, process)
-            error = result.get("provider_error") or result.get("parse_error")
+            error = ("subagent Claude command timed out" if process.timed_out else
+                     result.get("provider_error") or result.get("parse_error"))
             if error:
                 return _SubagentResponseRejected(str(error), evidence)
             try:
