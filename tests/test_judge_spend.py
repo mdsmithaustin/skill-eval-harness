@@ -11,7 +11,7 @@ class JudgeSpendTests(unittest.TestCase):
     def batch(self, root, *, verdict=None, cost=0.6):
         manifest = make_eval_repo(root, cases=[{
             'id': 'case-1', 'split': 'tune', 'prompt': 'Do the task.',
-            'assertions': [{'name': 'quality', 'type': 'judge', 'rubric': ['Be correct.']}],
+            'assertions': [{'name': 'quality', 'type': 'judge', 'rubric': ['Be correct.'], 'gate': True}],
         }])
         runs = root / 'runs'
         write_run(runs / 'case-1' / 'with_skill', 'candidate')
