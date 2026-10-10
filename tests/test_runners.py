@@ -2530,6 +2530,72 @@ class TraceDialectRegistryTests(unittest.TestCase):
                 self.assertEqual(metrics["trace_observation_complete"], not errors)
                 self.assertIs(metrics["skill_invoked"], invoked)
 
+    def test_pi_dialect_counts_retries_from_will_retry_markers(self):
+        for fixture, expected in (("retry-then-success.jsonl", 1),
+                                  ("retries-exhausted.jsonl", 1),
+                                  ("lifecycle-success.jsonl", 0)):
+            with self.subTest(fixture=fixture):
+                raw = (ROOT / "tests" / "fixtures" / "pi" / fixture).read_text(encoding="utf-8")
+                records, _ = sb.parse_trace_jsonl_text(raw)
+                self.assertEqual(sb.TRACE_DIALECTS["pi"].retries(records, None), expected)
+
+    def test_truncated_pi_stream_does_not_observe_retries(self):
+        records = [{"type": "agent_start"}, {"type": "agent_end", "willRetry": True},
+                   {"type": "agent_start"}]
+        self.assertEqual(sb.TRACE_DIALECTS["pi"].retries([*records, {"type": "agent_end"}], None), 1)
+        self.assertIsNone(sb.TRACE_DIALECTS["pi"].retries(records, None))
+
+    def test_pi_retry_observation_distinguishes_metadata_from_a_new_attempt(self):
+        fixture = ROOT / "tests" / "fixtures" / "pi" / "retry-then-success.jsonl"
+        records, _ = sb.parse_trace_jsonl_text(fixture.read_text(encoding="utf-8"))
+        cases = (
+            ("two retries", [*records[:3], *records], 2),
+            ("metadata after completion", [*records, {"type": "session", "version": 1}], 1),
+            ("another attempt started", [*records, {"type": "agent_start"}], None),
+            ("unknown retry marker", [*records[:-1], {**records[-1], "willRetry": "false"}], None),
+            ("unknown historical marker", [*records[:2], {**records[2], "willRetry": 1}, *records[3:]], None),
+        )
+        for label, stream, expected in cases:
+            with self.subTest(label=label):
+                parsed = sb.PiStream.from_records(stream)
+                self.assertIsNone(parsed.failure_error)
+                self.assertEqual(parsed.retries, expected)
+                _, metrics = sb.normalize_trace_records(stream, source="pi", pi_stream=parsed)
+                self.assertEqual(metrics.get("retries"), expected)
+
+    def test_pi_parse_error_keeps_retries_unavailable(self):
+        fixture = ROOT / "tests" / "fixtures" / "pi" / "retry-then-success.jsonl"
+        raw = fixture.read_text(encoding="utf-8")
+        self.assertEqual(sb.PiStream.parse(raw).retries, 1)
+        self.assertIsNone(sb.PiStream.parse(raw + "{broken\n").retries)
+
+    def test_empty_or_unterminated_pi_stream_does_not_report_zero_retries(self):
+        complete = sb.PiStream.parse('{"type":"agent_end"}\n')
+        self.assertEqual(complete.retries, 0)
+        for raw in ("", '{"type":"session","version":1}\n', '{"type":"agent_start"}\n'):
+            with self.subTest(raw=raw):
+                parsed = sb.PiStream.parse(raw)
+                self.assertIn("without a final agent_end", parsed.protocol_error)
+                self.assertIsNone(parsed.retries)
+
+    def test_only_dialects_whose_protocol_marks_retries_observe_them(self):
+        records = [{"type": "agent_start"}, {"type": "agent_end", "willRetry": True},
+                   {"type": "agent_start"}, {"type": "agent_end"}]
+        self.assertEqual(sb.TRACE_DIALECTS["pi"].retries(records, None), 1)
+        for source, dialect in sb.TRACE_DIALECTS.items():
+            if source == "pi":
+                continue
+            with self.subTest(source=source):
+                self.assertIsNone(dialect.retries(records, None))
+
+    def test_retries_metric_is_derived_or_absent_never_a_default_zero(self):
+        raw = (ROOT / "tests" / "fixtures" / "pi" / "retry-then-success.jsonl").read_text(encoding="utf-8")
+        records, _ = sb.parse_trace_jsonl_text(raw)
+        _, pi_metrics = sb.normalize_trace_records(records, source="pi")
+        self.assertEqual(pi_metrics["retries"], 1)
+        _, generic_metrics = sb.normalize_trace_records(
+            [{"type": "command", "command": "ls", "status": "completed"}], source="generic")
+        self.assertNotIn("retries", generic_metrics)
 
 if __name__ == "__main__":
     unittest.main()

@@ -186,7 +186,6 @@ Adapters may preserve additional fields under `raw` or `details`, but assertions
   "file_reads": 4,
   "file_writes": 2,
   "errors": 0,
-  "retries": 0,
   "repeated_command_max": 1,
   "skill_invoked": true,
   "skill_invocation_evidence": ["skills/good-readme/SKILL.md"]
@@ -194,6 +193,14 @@ Adapters may preserve additional fields under `raw` or `details`, but assertions
 ```
 
 If a runner does not expose a metric, omit the field or set it to `null`; do not invent values.
+
+Pi reports `retries` by counting `agent_end` events with `willRetry: true` after the
+stream reaches a final `agent_end`. A complete stream with no retry markers reports
+zero. Truncated streams and malformed retry markers leave the count unavailable.
+Other registered providers omit `retries` because their protocols have no retry
+marker. For a complete operation, the v3 telemetry envelope reports `missing_retries`
+when the count is absent. Failed operations retain the fork's independent process,
+provider-response, and trace completeness checks.
 
 Stop evidence is not a metric and does not live here. `stop_class`, `stop_reason`, and
 `stop_source` are written to the run's `metadata.json` beside the served-model and effort fields,

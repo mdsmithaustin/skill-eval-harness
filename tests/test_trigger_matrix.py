@@ -1637,6 +1637,43 @@ class TriggerContextIsolationTests(unittest.TestCase):
         argv = self.seen_argv()
         self.assertEqual(Path(argv[argv.index("--skill") + 1]).name, "skills")
 
+    def test_pi_cli_persists_observed_retry_counts_and_truncation(self):
+        retry_fixture = (ROOT / "tests/fixtures/pi/retry-then-success.jsonl").read_text(encoding="utf-8")
+        retry_records = [json.loads(line) for line in retry_fixture.splitlines()]
+        zero_fixture = (ROOT / "tests/fixtures/pi/lifecycle-success.jsonl").read_text(encoding="utf-8")
+        zero_records = [json.loads(line) for line in zero_fixture.splitlines()]
+        cases = (
+            ("retried", retry_records, 0, 1, "available"),
+            ("no-retry", zero_records, 0, 0, "available"),
+            ("truncated", retry_records[:4], 1, None, "unavailable"),
+        )
+        rows_file = write_rows(self.root, [{"query": "ordinary chat", "should_trigger": False}])
+        for label, records, expected_code, count, availability in cases:
+            with self.subTest(label=label):
+                stub_agent_cli(self.bindir / "pi", probe_path=self.probe, stdout_records=records)
+                output = self.root / f"{label}.json"
+                traces = self.root / f"{label}-traces"
+                env = {**os.environ, "PATH": f"{self.bindir}{os.pathsep}{os.environ['PATH']}",
+                       "HOME": str(self.home), "PI_CODING_AGENT_DIR": str(self.root / "user-pi")}
+                completed = subprocess.run(
+                    [sys.executable, str(ROOT / "run_pi_trigger_eval.py"), str(DEMO_MANIFEST),
+                     "--eval-set", str(rows_file), "--runs-per-query", "1", "--workers", "1",
+                     "--out", str(output), "--trace-runs", str(traces)],
+                    env=env, capture_output=True, text=True, timeout=30, check=False)
+                self.assertEqual(completed.returncode, expected_code, completed.stderr)
+                report = json.loads(output.read_text(encoding="utf-8"))
+                self.assertEqual(len(report["results"]), 1)
+                paths = list(traces.rglob("metrics.json"))
+                self.assertEqual(len(paths), 1)
+                metrics = json.loads(paths[0].read_text(encoding="utf-8"))
+                self.assertEqual(metrics.get("retries"), count)
+                measurement = metrics["telemetry"]["measurements"]["retries"]
+                self.assertEqual(measurement["availability"], availability)
+                if count is None:
+                    self.assertNotIn("retries", metrics)
+                else:
+                    self.assertEqual(measurement["value"], count)
+
 
 @unittest.skipIf(sys.version_info < (3, 11), "tomllib is stdlib from Python 3.11")
 class CodexSkillConfigTomlEncodingTests(unittest.TestCase):
