@@ -113,14 +113,128 @@ class NormalizeUsageCostTests(unittest.TestCase):
         self.assertEqual(normalized["total_tokens"], 15)
         self.assertEqual(normalized["cost_usd"], 0.5)
         self.assertEqual(normalized["usage_source"], "provider_reported")
+        self.assertEqual(normalized["cost_source"], "provider_reported")
+        self.assertEqual(normalized["total_tokens_measurement"].provenance, "provider_reported")
+        self.assertEqual(normalized["cost_measurement"].provenance, "provider_reported")
         legacy = sb.run_cost_facts({"total_tokens": 999, "cost_usd": 9.9})
         self.assertEqual(legacy["total_tokens"], 999)
         self.assertEqual(legacy["cost_usd"], 9.9)
         self.assertEqual(legacy["usage_source"], "legacy_fields")
+        self.assertEqual(legacy["cost_source"], "legacy_fields")
+        self.assertEqual(legacy["total_tokens_measurement"].provenance, "legacy_unverified")
+        self.assertEqual(legacy["cost_measurement"].provenance, "legacy_unverified")
+        comparison = sb.telemetry_domain.compare_cost_pair(
+            legacy["cost_measurement"], legacy["cost_measurement"])
+        self.assertEqual(comparison.availability, "blocked")
+        self.assertEqual(comparison.reason, "legacy_unverified")
+        token_comparison = sb.telemetry_domain.compare_numeric_pair(
+            legacy["total_tokens_measurement"], legacy["total_tokens_measurement"])
+        self.assertEqual(token_comparison.availability, "blocked")
+        self.assertEqual(token_comparison.reason, "legacy_unverified")
         empty = sb.run_cost_facts({})
         self.assertIsNone(empty["total_tokens"])
         self.assertIsNone(empty["cost_usd"])
         self.assertEqual(empty["cost_source"], "missing")
+        self.assertEqual(empty["usage_source"], "missing")
+        for key in ("total_tokens_measurement", "cost_measurement"):
+            self.assertEqual(empty[key].availability, "unavailable")
+            self.assertEqual(empty[key].reason, "missing")
+
+    def test_run_cost_facts_preserves_normalized_sources_and_zero(self):
+        for source in ("provider_reported", "trace_normalized", "price_table_estimated"):
+            with self.subTest(source=source):
+                facts = sb.run_cost_facts({
+                    "usage_normalized": {"total_tokens": 0, "source": source},
+                    "cost_normalized": {"currency": "USD", "total_cost": 0, "source": source},
+                })
+                self.assertEqual(facts["total_tokens"], 0)
+                self.assertEqual(facts["cost_usd"], 0.0)
+                self.assertEqual(facts["cost_currency"], "USD")
+                self.assertEqual(facts["usage_source"], source)
+                self.assertEqual(facts["cost_source"], source)
+                for key in ("total_tokens_measurement", "cost_measurement"):
+                    self.assertEqual(facts[key].availability, "available")
+                    self.assertEqual(facts[key].provenance, source)
+                    self.assertIsNone(facts[key].reason)
+
+    def test_run_cost_facts_preserves_not_applicable_sources_and_reasons(self):
+        facts = sb.run_cost_facts({
+            "usage_normalized": {"source": "not_applicable"},
+            "cost_normalized": {"source": "not_applicable"},
+            "total_tokens": 999, "cost_usd": 9.9,
+        })
+        self.assertIsNone(facts["total_tokens"])
+        self.assertIsNone(facts["cost_usd"])
+        self.assertEqual(facts["usage_source"], "not_applicable")
+        self.assertEqual(facts["cost_source"], "not_applicable")
+        for key in ("total_tokens_measurement", "cost_measurement"):
+            self.assertEqual(facts[key].availability, "not_applicable")
+            self.assertEqual(facts[key].reason, "not_applicable")
+            self.assertIsNone(facts[key].provenance)
+
+    def test_run_cost_facts_preserves_typed_unavailable_reasons_and_basis(self):
+        facts = sb.run_cost_facts({
+            "telemetry": {"schema_version": 3, "measurements": {
+                "total_tokens": {
+                    "availability": "unavailable", "reason": "provider_usage_absent",
+                    "basis": {"provider": "jetty"},
+                },
+                "cost": {
+                    "availability": "unavailable", "reason": "invoice_pending",
+                    "basis": {"provider": "jetty"},
+                },
+            }},
+            "total_tokens": 999, "cost_usd": 9.9,
+        })
+        self.assertEqual(facts["usage_source"], "missing")
+        self.assertEqual(facts["cost_source"], "missing")
+        self.assertIsNone(facts["total_tokens"])
+        self.assertIsNone(facts["cost_usd"])
+        for key, reason in (
+            ("total_tokens_measurement", "provider_usage_absent"),
+            ("cost_measurement", "invoice_pending"),
+        ):
+            self.assertEqual(facts[key].availability, "unavailable")
+            self.assertEqual(facts[key].reason, reason)
+            self.assertEqual(facts[key].basis, {"provider": "jetty"})
+            self.assertIsNone(facts[key].provenance)
+
+    def test_run_cost_facts_keeps_non_usd_money_without_a_usd_scalar(self):
+        facts = sb.run_cost_facts({
+            "usage_normalized": {"source": "not_applicable"},
+            "cost_normalized": {"currency": "EUR", "total_cost": 1.25, "source": "provider_reported"},
+        })
+        self.assertEqual(facts["usage_source"], "not_applicable")
+        self.assertEqual(facts["cost_source"], "provider_reported")
+        self.assertIsNone(facts["cost_usd"])
+        self.assertEqual(facts["cost_currency"], "EUR")
+        cost = facts["cost_measurement"]
+        self.assertEqual(cost.availability, "available")
+        self.assertEqual(cost.provenance, "provider_reported")
+        self.assertEqual(cost.value.to_dict(), {"amount": "1.25", "currency": "EUR"})
+        self.assertEqual(cost.basis["population"], "answer")
+        self.assertEqual(cost.basis["billing_scope"], "run")
+
+    def test_run_cost_facts_keeps_jetty_floor_without_complete_price(self):
+        facts = sb.run_cost_facts({
+            "provider": "jetty", "cost_reason": "jetty_billing_finality_unavailable",
+            "observed_subtotal_usd": "0.60",
+            "usage_normalized": {"total_tokens": 0, "source": "provider_reported"},
+            "cost_normalized": {"currency": "USD", "total_cost": 0.60, "source": "provider_reported"},
+        })
+        self.assertEqual(facts["usage_source"], "provider_reported")
+        self.assertEqual(facts["total_tokens"], 0)
+        self.assertEqual(facts["cost_source"], "missing")
+        self.assertIsNone(facts["cost_usd"])
+        self.assertIsNone(facts["cost_currency"])
+        cost = facts["cost_measurement"]
+        self.assertEqual(cost.availability, "unavailable")
+        self.assertEqual(cost.reason, "jetty_billing_finality_unavailable")
+        self.assertIsNone(cost.provenance)
+        self.assertEqual(cost.basis["observed_subtotal_usd"], "0.60")
+        self.assertEqual(cost.basis["provider"], "jetty")
+        self.assertEqual(cost.basis["population"], "answer")
+        self.assertEqual(cost.basis["billing_scope"], "run")
 
 
 class RunnerStampTests(unittest.TestCase):

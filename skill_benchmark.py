@@ -4390,12 +4390,11 @@ class JettyClient:
                 last = self._json_request("GET", path)
             except urllib.error.HTTPError as exc:
                 if exc.code == 404:
-                    # The DB row can lag the submission by a few seconds;
-                    # 404 while waiting means queued, not gone.
-                    last = {
+                    http_404_pending_receipt: dict[str, Any] = {
                         "status": "queued",
                         "trajectory_id": trajectory_id,
                     }
+                    last = http_404_pending_receipt
                     time.sleep(poll_interval_s)
                     continue
                 raise
@@ -6031,8 +6030,6 @@ def normalized_jetty_metadata(record: dict[str, Any], *, success: bool) -> dict[
         "jetty_snapshot": jetty.get("snapshot"),
         "trace_url": f"https://jetty.io/{collection}/{task}/{trajectory_id}" if collection and task and trajectory_id else None,
         "jetty_raw_path": "jetty_raw.json",
-        # Normalized telemetry (issue #21): provider-reported when the
-        # trajectory carried numbers, explicit missing markers otherwise.
         "usage_normalized": normalize_usage({
             key: telemetry_values[key]
             for key in ("input_tokens", "output_tokens", "total_tokens")
@@ -6150,9 +6147,6 @@ def _jetty_record_preflight(
             raise ValueError("no unique answer-design identity")
         harness_metadata["answer_task_sha256"] = identity_matches[0]["task_sha256"]
         harness_metadata["answer_instruction_sha256"] = identity_matches[0]["instruction_sha256"]
-    # Jetty trajectories expose no stop reason or served model, so the import
-    # records that explicitly; a report then counts these runs as unobserved
-    # rather than as predating completion evidence.
     completion = {
         **StopObservation.unavailable("jetty trajectory exposes no stop signal").as_metadata(),
         **ServedModel.observe(
@@ -7704,10 +7698,8 @@ def run_cost_facts(merged: dict[str, Any]) -> dict[str, Any]:
     def value_of(measurement):
         return measurement.value if measurement.availability == telemetry_domain.AVAILABLE else None
 
-    def source_of(measurement) -> str:
+    def scalar_compatibility_source_label(measurement: telemetry_domain.Measurement[Any]) -> str:
         if measurement.availability == telemetry_domain.AVAILABLE:
-            # Keep the historical scalar reader label stable; the typed
-            # measurement still records the stricter legacy_unverified fact.
             return "legacy_fields" if measurement.provenance == "legacy_unverified" else str(measurement.provenance)
         return "not_applicable" if measurement.availability == telemetry_domain.NOT_APPLICABLE else "missing"
 
@@ -7719,8 +7711,8 @@ def run_cost_facts(merged: dict[str, Any]) -> dict[str, Any]:
         "total_tokens": value_of(total_measurement),
         "cost_usd": cost_usd,
         "cost_currency": cost.currency if isinstance(cost, telemetry_domain.Money) else None,
-        "usage_source": source_of(total_measurement),
-        "cost_source": source_of(cost_measurement),
+        "usage_source": scalar_compatibility_source_label(total_measurement),
+        "cost_source": scalar_compatibility_source_label(cost_measurement),
         "input_tokens_measurement": input_measurement,
         "output_tokens_measurement": output_measurement,
         "total_tokens_measurement": total_measurement,
@@ -23870,10 +23862,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     """The complete CLI surface, buildable without parsing. Split out of
     main() so tests can enumerate every subcommand and flag (e.g. the
     README-coverage doc-sync guard) without invoking anything."""
-    # allow_abbrev=False on the parser and every subparser: a prefix of a long
-    # option is an error, not that option, so renaming a flag cannot leave its
-    # old spelling's prefix working and a user's abbreviation never silently
-    # picks a flag.
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
