@@ -409,6 +409,12 @@ Refused ready calls retain their requested repeat and panel slots, so incomplete
 pass through a smaller consensus. Native and shell judge charges settle before verdict parsing
 or transcript writes. See [the judge ceiling example](docs/limit-native-spend.md#judge-calls).
 
+`run-jetty` also accepts the ceiling flags for fresh submissions. Zero starts no HTTP request
+for fresh tasks and still permits prior reconciliation and durable replay. Unknown replacements
+retain ordered attempt history. Current provider dollars remain cumulative floors because the
+provider contract supplies no complete billing marker. See [Jetty spend and migration](docs/limit-native-spend.md#jetty-submissions).
+
+
 Ordinary answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
 temporary workspace and delete it afterwards. Before deletion they diff it against a copy taken
 right after the harness built it, for every outcome including a timeout, so partial edits from a
@@ -648,7 +654,7 @@ skill-eval-harness/
 ├── grading_contracts.py        # closed assertion observations and immutable judge tasks
 ├── report_contracts.py         # empty/complete/partial report coverage cohorts and rates
 ├── runner_contracts.py         # closed answer-runner outcome union
-├── spend_contracts.py          # immutable answer, subagent, and judge call plans and spend receipts
+├── spend_contracts.py          # immutable answer, subagent, judge, and Jetty call plans and spend receipts
 ├── spend_runtime.py            # serial admission and invocation ledger publication
 ├── judge_verdict.py            # strict verdicts and complete/partial/missing observation trees
 ├── jetty_contracts.py          # closed Jetty lifecycle and observation contract

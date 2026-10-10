@@ -292,6 +292,13 @@ skill-benchmark run-jetty \
   --out jetty-runs.jsonl
 ```
 
+`--max-cost-usd` admits only fresh submissions, including explicitly requested unknown
+replacements. `--assumed-cost-per-run-usd` supplies a labeled ledger assumption when complete
+billing is unavailable. A fresh zero ceiling performs zero HTTP requests and leaves the journal
+unchanged. Whole-selection preflight precedes ledger creation and output replacement. Earlier
+polling, downloads, and replay remain available. See
+[Jetty spend and migration](limit-native-spend.md#jetty-submissions) for pricing, exit, and schema rules.
+
 Execution is currently sequential. The parser reserves `--concurrency`, but the executor does not
 yet apply it; streaming/concurrent execution remains in `TODO.md`.
 
@@ -308,8 +315,9 @@ Responsibilities:
    returned storage path.
 3. Submit `jetty_request` to `/v1/chat/completions` and extract the trajectory
    id from `jetty_metadata` (`trajectory_id` on 200; on 202 the bare suffix of
-   `workflow_id`). Only a documented 429 rejection returns to the automatically
-   submit-ready state. Every other exception or unproven HTTP response becomes
+   `workflow_id`). Only HTTP 429 returns to the automatically
+   submit-ready state. Internal transport retries keep one logical attempt. A rejected status
+   alone does not prove free execution. Every other exception or unproven HTTP response becomes
    `submission_unknown`; a blind resubmit could double the sandbox spend.
 4. Require file output, resolve all journal aliases to one canonical path, and
    take one exclusive OS lock before loading it. Reject hard-linked journals
@@ -318,7 +326,8 @@ Responsibilities:
    ID and response immediately after validating the acknowledgement. A restart
    with an acknowledged ID resumes it; a restart while the acknowledgement was
    pending becomes `submission_unknown` and cannot submit again without the
-   explicit `--resubmit-unknown` operator override. The OS releases the lock
+   explicit `--resubmit-unknown` operator override. An admitted override appends a distinct
+   UUID while preserving the old identity and receipts. The OS releases the lock
    when the owner exits or crashes, so overlapping invocations cannot both
    cross the submit boundary.
 5. Poll `/api/v1/db/trajectory/{collection}/{task}/{trajectory_id}` until

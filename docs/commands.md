@@ -857,6 +857,15 @@ Comparison then forms complete (agent, model, query-ID) cells and collapses ever
 
 ## Jetty adapter
 
+`run-jetty --max-cost-usd` limits fresh submission admission. Add
+`--assumed-cost-per-run-usd` to charge a labeled assumption when complete billing is unavailable.
+A fresh zero ceiling makes zero HTTP requests. Polling, downloads, and saved replay remain
+available for earlier attempts. Each capped invocation writes
+`<out>.spend/<invocation-id>/spend-ceiling.json`. Refusal or current partial accounting exits 2.
+Current dollar telemetry stays a cumulative floor even at terminal execution status. See
+[Jetty spend and migration](limit-native-spend.md#jetty-submissions).
+
+
 Jetty support is optional and validated against production `flows-api.jetty.io` (live smoke first passed 2026-07-17; captured response fixtures live in `tests/fixtures/jetty/` — see [`jetty-support-spec.md`](jetty-support-spec.md)). The harness exports runbook-mode chat-completion payloads, Jetty executes them, and `import-jetty-results` copies `output.md`, artifacts, and metadata back into the normal run layout. `run-jetty` zips each task's upload plan (Jetty's sandbox upload flattens single files to basenames; a zip auto-extracts under `/app/assets/` with paths preserved), submits with a short `timeout_hint` so polling drives the wait, and downloads every `/app/results` artifact from trajectory storage before writing the run record. Provider status aliases parse into queued/running/succeeded/failed/timed-out/protocol-invalid states; unknown status and completed-without-`output.md` fail closed as protocol-invalid rather than ordinary model failures. Imports validate every record, destination, embedded answer design, model-visible task digest, and uploaded-file digest before committing the batch; one invalid record leaves all destination run directories untouched.
 
 Every live invocation requires `--out`, exclusively locks its attempt journal, and atomically checkpoints `prepared`, upload completion, submission acknowledgement, terminal provider observation, artifact download, and result publication. The default journal path is `<out>.attempts.json`; `--journal PATH` selects another location. Journal aliases resolve to one canonical identity, hard-linked journals and symlinked lock files are rejected, and the separate `<journal>.lock` file is intentionally retained while its OS lock is released automatically when the process exits or crashes. The identity contains the full attested task contract plus its digest, collection, task, and model, so a stale or mismatched receipt fails closed. Provider submit/poll responses are reduced to allowlisted causal receipts before persistence. Rerunning the same command resumes an acknowledged trajectory without another `POST /v1/chat/completions`, and a terminal receipt resumes download/import. A local polling deadline leaves the attempt acknowledged, emits a nonterminal record, exits nonzero, and is rejected by `import-jetty-results`; the next invocation polls the same ID again.

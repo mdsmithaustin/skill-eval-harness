@@ -4,6 +4,13 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- `run-jetty` accepts an invocation dollar ceiling for fresh submissions. Fresh zero ceilings
+  perform no HTTP requests. Earlier reconciliation and exact durable replay remain available.
+  Ordered attempt history preserves unknown replacements and lazy schema 1 migration. Current
+  provider dollars remain cumulative floors with unavailable complete billing across admission,
+  import, and reports. See [Jetty spend and migration](docs/limit-native-spend.md#jetty-submissions).
+
+
 - Saved judge groups calculate member diagnostics from every retained cause. Nested explanations
   identify the member path, while original supplied claims remain separately inspectable in
   `judge_diagnostic_evidence`. Canonical diagnostic records must match the retained tree.
