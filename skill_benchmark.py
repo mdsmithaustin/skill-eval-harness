@@ -14357,7 +14357,7 @@ def aggregate_judge_member_telemetry(
     else:
         out["usage_normalized"] = {"source": "missing"}
 
-    for key in ("cost_availability", "observed_subtotal_usd", "cost_reason", "telemetry",
+    for key in ("cost", "cost_availability", "observed_subtotal_usd", "cost_reason", "telemetry",
                 "invocation_state", "timed_out", "provider_error", "judge_runs", "judge_panel"):
         out.pop(key, None)
     out.update(_judge_cost_projection(_judge_cost_buckets(_judge_cost_leaves(rows))))

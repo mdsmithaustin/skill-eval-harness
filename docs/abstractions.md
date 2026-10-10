@@ -356,7 +356,9 @@ Two $0.06 timeout floors retain a partial USD subtotal of $0.12, zero whole-pric
 and two unavailable calls. Whole-price totals, ratios, and `verdicts_with_cost` exclude those floors.
 The saved reader validates scalar, normalized, and v3 prices before choosing a channel. It rejects
 contradictory timeout or parent price projections and competing membership paths. Completed legacy
-rows retain their supported price semantics. Incompatible bases and currencies retain their
+rows retain their supported price semantics. Repeat and panel parents regenerate their price
+channels from billed leaves and omit the inherited legacy scalar `cost`. Each completed member
+keeps its original `cost` evidence. Incompatible bases and currencies retain their
 reasons without reviving rejected sums or converting money.
 
 `merge_repeated_judge_rows` majority-votes pass/fail and medians scores across repeats. The
