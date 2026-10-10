@@ -49,6 +49,8 @@ One temporary fixture workspace persists across a fixed sequence.
 The existing timeout applies separately to each invocation. The deadline takes priority over a matching checkpoint.
 A checkpoint already present in the built fixture blocks the initial process.
 A mismatching or malformed checkpoint, natural completion, observer error, capture error, signal failure, or unconfirmed cleanup blocks later phases.
+If the original group disappears before the checkpoint stop signal reaches it, the initial phase records `natural_completion` and no delivered signal.
+Original-group cleanup, pipe draining, and leader reaping still run.
 An intentional stop requires a signal return code, a reaped leader, drained pipes, stopped original group members, and unchanged matching checkpoint bytes after cleanup.
 The owner kills remaining original-group descendants with `SIGKILL`.
 On Linux, group observation excludes zombies because they cannot write. Other POSIX hosts require the group to disappear.

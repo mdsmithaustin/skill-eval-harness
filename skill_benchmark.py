@@ -759,6 +759,65 @@ def repo_root_for_manifest(manifest_path: Path) -> Path:
     return manifest_path.parent.resolve()
 
 
+def skill_root_rule(manifest_path: Path) -> str:
+    root = repo_root_for_manifest(manifest_path)
+    if manifest_path.name == "shared-benchmark.json" and (
+            manifest_path.parent.name == "evals" or manifest_path.parent.parent.name == "evals"):
+        return (f"skill paths in {manifest_path} resolve from the repository "
+                f"root {root}, not from {manifest_path.parent}")
+    return (f"skill paths in {manifest_path.name} resolve from the manifest's own directory "
+            f"{root} (only a file named evals/shared-benchmark.json or "
+            "evals/<skill>/shared-benchmark.json resolves them from the repository root)")
+
+
+def skill_path_resolution_problems(manifest_path: Path, manifest: dict[str, Any]) -> list[str]:
+    """Every skill path an arm would mount, resolved exactly as prepare resolves it,
+    must exist inside ``repo_root_for_manifest``. ``validate``, ``prepare`` and
+    ``audit-manifest`` share this one check so they cannot disagree about the same
+    manifest (a with_skill arm must never mount a nonexistent or out-of-repo path)."""
+    repo_root = repo_root_for_manifest(manifest_path)
+    declared: list[tuple[str, str]] = []
+    for field in ("skill_paths", "old_skill_paths"):
+        values = manifest.get(field) or []
+        if isinstance(values, list):
+            declared.extend((field, raw) for raw in values if isinstance(raw, str))
+    for ablation in manifest.get("ablations") or []:
+        if not isinstance(ablation, dict):
+            continue
+        for comp in ablation_components(ablation):
+            target = comp.get("target") if isinstance(comp, dict) else None
+            raw = target.get("skill_root") if isinstance(target, dict) else None
+            if isinstance(raw, str):
+                declared.append((f"ablation {ablation.get('id')!r} target.skill_root", raw))
+    fields_by_raw: dict[str, list[str]] = {}
+    for field, raw in declared:
+        if field not in fields_by_raw.setdefault(raw, []):
+            fields_by_raw[raw].append(field)
+    problems: list[str] = []
+    for raw, fields in fields_by_raw.items():
+        where = " and ".join(fields[:2]) + (f" (+{len(fields) - 2} more)" if len(fields) > 2 else "")
+        resolved = (repo_root / raw).resolve()
+        if resolved != repo_root and repo_root not in resolved.parents:
+            problem = f"{where} entry {raw!r} resolves to {resolved}, outside {repo_root}"
+        elif not resolved.exists():
+            problem = f"{where} entry {raw!r} does not exist: {resolved}"
+        else:
+            continue
+        problem += f"; {skill_root_rule(manifest_path)}"
+        manifest_relative = (manifest_path.parent / raw).resolve()
+        if (manifest_relative != resolved and manifest_relative.exists()
+                and (manifest_relative == repo_root or repo_root in manifest_relative.parents)):
+            problem += f". Did you mean {manifest_relative.relative_to(repo_root).as_posix()!r}?"
+        problems.append(problem)
+    return problems
+
+
+def require_resolvable_skill_paths(manifest_path: Path, manifest: dict[str, Any]) -> None:
+    problems = skill_path_resolution_problems(manifest_path, manifest)
+    if problems:
+        die("skill paths must exist inside the manifest's skill root:\n  - " + "\n  - ".join(problems))
+
+
 def script_command_list(assertion: dict[str, Any]) -> list[str]:
     command = assertion.get("command")
     if isinstance(command, str):
@@ -1318,13 +1377,6 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
         die("manifest.skill_name is required")
     if not isinstance(manifest.get("skill_paths", []), list) or not manifest.get("skill_paths") or not all(isinstance(p, str) for p in manifest.get("skill_paths", [])):
         die("manifest.skill_paths must be a non-empty list of strings")
-    for label in ("skill_paths", "old_skill_paths"):
-        roots = manifest.get(label) or []
-        if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
-            continue
-        for first, second, key in skill_root_key_collisions(repo_root_for_manifest(path), roots):
-            die(f"manifest.{label}: {first!r} and {second!r} both mount as skill directory {key!r}; "
-                "agents list skills by directory name, so rename one directory")
     variants = manifest.get("variants", DEFAULT_VARIANTS)
     if (not isinstance(variants, list) or len(variants) != len(set(variants))
             or set(variants) != {"with_skill", "without_skill"}):
@@ -1390,7 +1442,11 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
         trigger_case = case_kind.population is CasePopulation.TRIGGER
         if trigger_case:
             if not isinstance(case.get("should_trigger"), bool):
-                die(f"{cid}: trigger cases require an explicit boolean should_trigger")
+                suggested = "true" if legacy_inferred_should_trigger(case) else "false"
+                die(f"{cid}: trigger cases require an explicit boolean should_trigger; "
+                    f"add \"should_trigger\": {suggested} (the polarity harness <= 0.6.0 "
+                    "inferred from this case's expected_behavior/assertion text). "
+                    "See CHANGELOG.md 'Unreleased' and docs/upgrading.md")
         elif "should_trigger" in case:
             die(f"{cid}: should_trigger is only valid when kind is 'trigger'")
         eval_intent = case.get("eval_intent")
@@ -1530,9 +1586,18 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
                     and assertion_severity(assertion) in {"gate", "critical"}
                 ]
                 if not applicable:
+                    soft_only = [
+                        assertion_label(assertion) for assertion in all_assertions
+                        if assertion_applies_to_variant(assertion, variant)]
+                    hint = (
+                        f"; its applicable assertions {soft_only} are all severity 'soft' "
+                        "(the default for judge/rubric/factuality/similarity), so mark the "
+                        "one that decides the case \"gate\": true"
+                        if soft_only else "; add an objective assertion or a \"gate\": true judge")
                     die(
                         f"{cid}: answer variant {variant!r} needs at least one "
-                        "applicable gate or critical grading oracle")
+                        f"applicable gate or critical grading oracle{hint}. "
+                        "See CHANGELOG.md 'Unreleased' and docs/upgrading.md")
         validate_judge_assertion_ids(cid, assertions, turns or [])
 
     seen_ablation_ids: set[str] = set()
@@ -1553,6 +1618,14 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
             validate_ablation_removal(ablation, manifest)
         except AblationError as exc:
             die(f"ablation {aid}: {exc}")
+    require_resolvable_skill_paths(path, manifest)
+    for label in ("skill_paths", "old_skill_paths"):
+        roots = manifest.get(label) or []
+        if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
+            continue
+        for first, second, key in skill_root_key_collisions(repo_root_for_manifest(path), roots):
+            die(f"manifest.{label}: {first!r} and {second!r} both mount as skill directory {key!r}; "
+                "agents list skills by directory name, so rename one directory")
     return manifest
 
 
@@ -1741,6 +1814,7 @@ def prepared_task_rows(
     trees: dict[str, Any] | None = None,
     models: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    require_resolvable_skill_paths(manifest_path, manifest)
     variants = task_variants(manifest, include_old_skill=include_old_skill, include_ablations=include_ablations)
     if (isinstance(runs_per_variant, bool) or not isinstance(runs_per_variant, int)
             or runs_per_variant < 1):
@@ -7018,8 +7092,11 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                         killpg(proc.pid, signal.SIGTERM)
                         signal_sent = int(signal.SIGTERM)
                     except OSError as exc:
-                        state = RecoveryProcessState.SIGNAL_FAILED
-                        error = f"{type(exc).__name__}: {exc}"
+                        if isinstance(exc, ProcessLookupError) or exc.errno == errno.ESRCH:
+                            state = RecoveryProcessState.NATURAL_COMPLETION
+                        else:
+                            state = RecoveryProcessState.SIGNAL_FAILED
+                            error = f"{type(exc).__name__}: {exc}"
             if state is RecoveryProcessState.CHECKPOINT_STOP:
                 try:
                     out, err = proc.communicate(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
@@ -21619,6 +21696,23 @@ def profile_skill(args: argparse.Namespace) -> int:
     return 0
 
 
+_LEGACY_TRIGGER_NEGATION_RE = re.compile(r"NO_TRIGGER|not trigger|should not", re.IGNORECASE)
+
+
+def legacy_inferred_should_trigger(case: dict[str, Any]) -> bool:
+    """The polarity harness <= 0.6.0 inferred for a trigger case without an
+    explicit should_trigger: a negation marker (NO_TRIGGER, 'not trigger',
+    'should not') in expected_behavior or an assertion pattern/value meant
+    NO_TRIGGER, otherwise TRIGGER. Used ONLY to suggest the explicit value in
+    the validation error that replaced the inference; it never decides polarity
+    (expected_trigger_polarity reads the validated boolean alone)."""
+    text = " ".join(str(item) for item in case.get("expected_behavior", []) or [])
+    for assertion in case.get("assertions", []) or []:
+        if isinstance(assertion, dict):
+            text += " " + str(assertion.get("pattern", assertion.get("value", "")))
+    return not _LEGACY_TRIGGER_NEGATION_RE.search(text)
+
+
 def expected_trigger_polarity(case: dict[str, Any]) -> str:
     """Resolve discovery polarity only from the validated explicit boolean."""
     value = case.get("should_trigger")
@@ -22179,6 +22273,7 @@ def audit_manifest_report(
     grading: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     manifest = validate_manifest(manifest_path)
+    require_resolvable_skill_paths(manifest_path, manifest)
     cases = iter_cases(manifest, split)
     skill_text = read_skill_text(manifest_path, manifest, skill_path)
     counts = {
@@ -23473,6 +23568,9 @@ def validate_cli_command(args: argparse.Namespace) -> int:
     manifest_path = Path(args.manifest)
     manifest = validate_manifest(
         manifest_path, allow_missing_holdback=not args.strict_holdback)
+    require_resolvable_skill_paths(manifest_path, manifest)
+    if manifest_path.parent.name == "evals" and manifest_path.name != "shared-benchmark.json":
+        print(f"note: {skill_root_rule(manifest_path)}", file=sys.stderr)
     leakage = prompt_assertion_leakage_findings(
         manifest, manifest_path, min_chars=args.leakage_min_chars)
     for finding in leakage:

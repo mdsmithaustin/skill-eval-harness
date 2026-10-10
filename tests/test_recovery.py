@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -60,13 +61,18 @@ elif mode != "one-shot":
             Path("checkpoint.json").write_bytes(b'{{"phase":1}}')
         print(json.dumps({{"role": "assistant", "content": "early"}}), flush=True)
         raise SystemExit(0)
-    if mode == "descendant":
+    if mode in {{"descendant", "exit-before-signal-descendant"}}:
         child = os.fork()
         if child == 0:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            if mode == "exit-before-signal-descendant":
+                Path("child-ready").touch()
             time.sleep(60)
             os._exit(0)
         Path("child.pid").write_text(str(child))
+        if mode == "exit-before-signal-descendant":
+            while not Path("child-ready").exists():
+                time.sleep(0.005)
     os.write(1, (json.dumps({{"role": "assistant", "content": "initial"}}) + "\\n").encode())
     os.write(1, (json.dumps({{"raw": "z" * 16000}}) + "\\r\\n").encode())
     os.write(2, b"raw-secret\\xff" + b"x" * 16000)
@@ -108,6 +114,10 @@ elif mode != "one-shot":
         Path("checkpoint.json").symlink_to(outside)
     else:
         Path("checkpoint.json").write_bytes(b'{{ "phase": 1 }}\\n')
+    if mode in {{"exit-before-signal", "exit-before-signal-descendant"}}:
+        while not Path("release").exists():
+            time.sleep(0.005)
+        raise SystemExit(0)
     time.sleep(60)
 print(json.dumps({{"role": "assistant", "content": "answer " + phase,
                   "usage": {{"input_tokens": 2, "output_tokens": 3}}}}), flush=True)
@@ -496,6 +506,54 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
             self.assertEqual((process["state"], process["os_returncode"]), ("signal_failed", -signal.SIGKILL))
             self.assertTrue(process["group_stopped"])
             self.assertEqual(json.loads((base / "recovery.json").read_text())["failure"], "signal_failed")
+
+    def test_exit_before_checkpoint_signal_blocks_recovery_and_cleans_group(self):
+        popen, killpg = sb.subprocess.Popen, os.killpg
+        processes = {}
+        signal_errors = []
+        def spawn(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            processes[process.pid] = (process, Path(kwargs["cwd"]))
+            return process
+        def exit_before_term(process_group, number):
+            if number == signal.SIGTERM:
+                process, workspace = processes[process_group]
+                (workspace / "release").touch()
+                self.assertEqual(process.wait(timeout=2), 0)
+            try:
+                return killpg(process_group, number)
+            except ProcessLookupError as exc:
+                if number == signal.SIGTERM:
+                    signal_errors.append(exc.errno)
+                raise
+        for descendant in (False, True):
+            with self.subTest(descendant=descendant), tempfile.TemporaryDirectory() as temporary:
+                processes.clear()
+                signal_errors.clear()
+                mode = "exit-before-signal-descendant" if descendant else "exit-before-signal"
+                with mock.patch.object(sb.subprocess, "Popen", side_effect=spawn), \
+                        mock.patch.object(sb.os, "killpg", side_effect=exit_before_term):
+                    result, base = self.run_case(Path(temporary), mode=mode)
+                self.assertEqual(signal_errors, [] if descendant else [errno.ESRCH])
+                self.assertEqual(result[0], 1, result[2])
+                process = json.loads((base / "recovery/initial/process.json").read_text())
+                self.assertEqual(process["os_returncode"], 0)
+                self.assertEqual(process["signal_sent"], signal.SIGTERM if descendant else None)
+                self.assertEqual((process["leader_reaped"], process["pipes_drained"],
+                                  process["group_stopped"], process["checkpoint_observed_live"]),
+                                 (True, True, True, True))
+                self.assertEqual(process["process_group_cleanup"]["status"],
+                                 "kill_sent" if descendant else "not_needed")
+                self.assertEqual(sb.recovery_group_stopped(process["process_group"])[0], True)
+                record = json.loads((base / "recovery.json").read_text())
+                self.assertEqual((record["status"], [phase["phase"] for phase in record["phases"]]),
+                                 ("failed", ["initial"]))
+                turns = [json.loads(line) for line in self.read_snapshot(
+                    base / "recovery/final", "turns.jsonl").splitlines()]
+                self.assertEqual([turn["phase"] for turn in turns], ["INITIAL"])
+                self.assertEqual((process["state"], record["failure"]),
+                                 ("natural_completion", "natural_completion"))
+                self.assertIsNone(process["error"])
 
     def test_unconfirmed_group_cleanup_blocks_recovery(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
