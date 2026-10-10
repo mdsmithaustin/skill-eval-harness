@@ -106,4 +106,5 @@ The consumer must establish the prescribed attempted write, enforcing denial, an
 
 The model-free public-command checks are in `tests/test_recovery.py`.
 The pipe-capture fault test injects its error after observing the fixture's checkpoint, which the fixture writes after both streams.
+The natural-completion test waits for the real child to exit before observation and retains its matching checkpoint.
 Fake identities and denials prove plumbing only. Live provider eligibility remains a separate consumer integration task.
