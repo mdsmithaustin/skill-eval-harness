@@ -360,6 +360,17 @@ class GradedScoringSeverityTests(unittest.TestCase):
         self.assertIn("dimension scores", entry["evidence"])
         self.assertEqual(result["graded_score"], 0.875)
 
+    def test_complete_judge_fixture_rejects_invalid_scored_payload(self):
+        assertion = {"name": "q", "type": "judge", "rubric": ["good"]}
+        case = self.behavior_case([assertion])
+        jid = sb.judge_task_id("case-x", "with_skill", 1, assertion)
+        for row, diagnostic in (
+            ({"passed": False, "score": 1}, "stored scored verdict requires threshold"),
+            ({"passed": False, "score": 1, "threshold": 1}, "passed contradicts score and threshold"),
+        ):
+            with self.subTest(row=row), self.assertRaisesRegex(ValueError, diagnostic):
+                complete_judge_fixtures(case, "text", Path("out.md"), {jid: row})
+
     def test_graded_dimensions_below_threshold_fail(self):
         assertion = {"name": "q", "type": "judge", "graded_dimensions": [{"name": "d", "rubric": "anchored"}]}
         case = self.behavior_case([assertion])
