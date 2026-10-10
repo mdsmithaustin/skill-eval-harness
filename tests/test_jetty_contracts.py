@@ -322,10 +322,8 @@ class JettyBoundaryIntegrationTests(unittest.TestCase):
                 mutate(payload)
                 client = FakeJettyClient()
 
-                record = next(iter(sb.execute_jetty_payloads([payload], client=client)))
-
-                self.assertEqual(record["status"], "failed")
-                self.assertIn("changed after attestation", record["error"])
+                with self.assertRaisesRegex(RuntimeError, "changed after attestation"):
+                    list(sb.execute_jetty_payloads([payload], client=client))
                 self.assertEqual(client.upload_calls, 0)
 
     def test_executor_snapshots_every_local_upload_before_network_io(self):
@@ -412,15 +410,13 @@ class JettyBoundaryIntegrationTests(unittest.TestCase):
                         }, files=files)
                         client = FakeJettyClient()
 
-                        record = next(iter(
-                            sb.execute_jetty_payloads([payload], client=client)))
-
                         if error is None:
+                            record = next(iter(sb.execute_jetty_payloads([payload], client=client)))
                             self.assertEqual(record["status"], "completed")
                             self.assertEqual(client.upload_calls, 1)
                         else:
-                            self.assertEqual(record["status"], "failed")
-                            self.assertIn(error, record["error"])
+                            with self.assertRaisesRegex(RuntimeError, error):
+                                list(sb.execute_jetty_payloads([payload], client=client))
                             self.assertEqual(client.upload_calls, 0)
 
     def test_failed_trajectory_cannot_promote_partial_events_to_complete_operations(self):

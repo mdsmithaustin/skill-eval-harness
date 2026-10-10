@@ -41,6 +41,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
@@ -188,6 +189,7 @@ from invocation_contracts import (
     RecoveryProcessState,
 )
 from jetty_contracts import (
+    JettyLifecycle,
     JettyObservation,
     ProtocolInvalid,
     lifecycle_from_record,
@@ -243,6 +245,7 @@ from manifest_contracts import (
 from observation_contracts import COST_SOURCES, USAGE_SOURCES, Availability
 from spend_contracts import (
     AnswerCall,
+    JettyCall,
     JudgeCall,
     NoModelSpend,
     Refused,
@@ -4377,7 +4380,7 @@ class JettyClient:
         with self._open_with_retries(req, timeout=120) as resp:
             return resp.read()
 
-    def poll(self, collection: str, task: str, trajectory_id: str, *, timeout_s: int = DEFAULT_RUNNER_TIMEOUT_S, poll_interval_s: float = 5) -> dict[str, Any]:
+    def poll(self, collection: str, task: str, trajectory_id: str, *, timeout_s: int = DEFAULT_RUNNER_TIMEOUT_S, poll_interval_s: float = 5, on_observation: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
         deadline = time.time() + timeout_s
         quoted = "/".join(urllib.parse.quote(part, safe="") for part in [collection, task, trajectory_id])
         path = f"/api/v1/db/trajectory/{quoted}"
@@ -4396,6 +4399,8 @@ class JettyClient:
                     time.sleep(poll_interval_s)
                     continue
                 raise
+            if on_observation is not None:
+                on_observation(last)
             lifecycle = lifecycle_from_record(last)
             if lifecycle.terminal:
                 last["provider_status"] = lifecycle.raw_status
@@ -4782,174 +4787,213 @@ class JettyAttemptJournalLock:
         self.release()
 
 
+class JettyJournalPersistenceError(OSError):
+    pass
+
+
 class JettyAttemptJournal:
-    """Atomic local ownership record for paid Jetty attempt boundaries."""
+    """One atomic owner for task uploads and ordered submission receipts."""
 
     def __init__(self, path: Path):
         self.path = canonical_jetty_journal_path(path)
-        if self.path.exists():
-            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raise ValueError(
-                    f"Jetty attempt journal {self.path} must be an object")
-            self.data = raw
-        else:
-            self.data = {"schema_version": 1, "attempts": {}}
+        raw = (strict_json_loads(self.path.read_text(encoding="utf-8"))
+               if self.path.exists() else {"schema_version": 2, "attempts": {}})
+        if not isinstance(raw, dict) or type(raw.get("schema_version")) is not int:
+            raise ValueError(f"unsupported Jetty attempt journal schema in {self.path}")
+        if raw["schema_version"] == 1:
+            raw = self._migrate(raw)
+        self.data: dict[str, Any] = raw
         self._validate()
+
+    def _migrate(self, raw: dict[str, Any]) -> dict[str, Any]:
+        tasks = raw.get("attempts")
+        if not isinstance(tasks, dict):
+            raise TypeError(f"Jetty attempt journal {self.path} needs attempts")
+        migrated = copy.deepcopy(raw)
+        migrated["schema_version"] = 2
+        migrated["attempts"] = {}
+        for digest, entry in tasks.items():
+            if not isinstance(entry, dict) or entry.get("state") not in JETTY_ATTEMPT_STATES:
+                raise ValueError(f"Jetty attempt {digest} has invalid legacy state")
+            count = entry.get("abandoned_unknown_submissions", 0)
+            if type(count) is not int or count < 0:
+                raise ValueError(f"Jetty attempt {digest} has invalid abandonment count")
+            submitted = entry["state"] not in {"prepared", "upload_completed"}
+            receipt = {k: copy.deepcopy(v) for k, v in entry.items()
+                       if k not in {"identity", "uploaded_bundle_path", "abandoned_unknown_submissions"}}
+            if submitted:
+                migrated_attempts = [{"ref": {"kind": "legacy_current", "task_contract_sha256": digest,
+                                              "scope": "schema1-current"}, "receipts": [receipt]}]
+            else:
+                migrated_attempts = []
+            migrated["attempts"][digest] = {
+                "identity": copy.deepcopy(entry.get("identity")),
+                "upload": {"state": "upload_completed" if entry["state"] != "prepared" else "prepared",
+                           **({"uploaded_bundle_path": entry["uploaded_bundle_path"]}
+                              if "uploaded_bundle_path" in entry else {})},
+                "submission_attempts": migrated_attempts,
+                "legacy_abandoned_unknown_submissions": count,
+                "legacy_metadata": copy.deepcopy(entry),
+            }
+        return migrated
 
     def _validate(self, data: dict[str, Any] | None = None) -> None:
         checked = self.data if data is None else data
-        if checked.get("schema_version") != 1:
-            raise ValueError(
-                f"unsupported Jetty attempt journal schema in {self.path}")
-        attempts = checked.get("attempts")
-        if not isinstance(attempts, dict):
+        if checked.get("schema_version") != 2:
+            raise ValueError(f"unsupported Jetty attempt journal schema in {self.path}")
+        tasks = checked.get("attempts")
+        if not isinstance(tasks, dict):
             raise TypeError(f"Jetty attempt journal {self.path} needs attempts")
-        for digest, raw_entry in attempts.items():
-            if (not isinstance(digest, str)
-                    or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None):
-                raise ValueError(
-                    f"Jetty attempt journal has invalid digest key: {digest!r}")
-            if not isinstance(raw_entry, dict):
-                raise TypeError(f"Jetty attempt {digest} must be an object")
-            if not isinstance(raw_entry.get("identity"), dict):
+        native_ids: set[str] = set()
+        for digest, task in tasks.items():
+            if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                raise ValueError(f"Jetty attempt journal has invalid digest key: {digest!r}")
+            if not isinstance(task, dict) or not isinstance(task.get("identity"), dict):
                 raise TypeError(f"Jetty attempt {digest} has no identity")
-            if raw_entry.get("state") not in JETTY_ATTEMPT_STATES:
-                raise ValueError(
-                    f"Jetty attempt {digest} has invalid state: "
-                    f"{raw_entry.get('state')!r}")
+            upload = task.get("upload")
+            if not isinstance(upload, dict) or upload.get("state") not in {"prepared", "upload_completed"}:
+                raise ValueError(f"Jetty attempt {digest} has invalid upload receipt")
+            count = task.get("legacy_abandoned_unknown_submissions", 0)
+            if type(count) is not int or count < 0:
+                raise ValueError(f"Jetty attempt {digest} has invalid abandonment count")
+            attempts = task.get("submission_attempts")
+            if not isinstance(attempts, list):
+                raise TypeError(f"Jetty attempt {digest} needs ordered submission attempts")
+            prior = None
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    raise TypeError("Jetty submission attempt must be an object")
+                ref = attempt.get("ref")
+                if isinstance(ref, str):
+                    JettyCall(digest, ref)
+                    if ref in native_ids:
+                        raise ValueError("duplicate Jetty submission attempt identity")
+                    native_ids.add(ref)
+                elif ref != {"kind": "legacy_current", "task_contract_sha256": digest, "scope": "schema1-current"} or prior is not None:
+                    raise ValueError("invalid scoped legacy Jetty attempt reference")
+                if "replaces_unknown" in attempt and (prior is None or attempt["replaces_unknown"] != prior["ref"] or prior["receipts"][-1]["state"] not in {"submitting", "submission_unknown"}):
+                    raise ValueError("Jetty replacement does not name its unknown predecessor")
+                receipts = attempt.get("receipts")
+                if not isinstance(receipts, list) or not receipts:
+                    raise ValueError("Jetty submission attempt needs receipts")
+                previous_state = None
+                bound_id = None
+                previous_floor = None
+                for receipt in receipts:
+                    if not isinstance(receipt, dict) or receipt.get("state") not in JETTY_ATTEMPT_STATES:
+                        raise ValueError("invalid Jetty submission receipt")
+                    state = receipt["state"]
+                    if previous_state is not None and state not in JETTY_ATTEMPT_TRANSITIONS[previous_state]:
+                        raise ValueError("invalid Jetty submission receipt sequence")
+                    trajectory_id = receipt.get("trajectory_id")
+                    if state in {"submission_acknowledged", "terminal_observed", "artifacts_downloaded", "result_committed"} and (not isinstance(trajectory_id, str) or not trajectory_id.strip()):
+                        raise ValueError("Jetty acknowledged receipt requires a trajectory identity")
+                    if bound_id is not None and trajectory_id != bound_id:
+                        raise ValueError("Jetty receipt changed its trajectory identity")
+                    bound_id = trajectory_id
+                    if receipt.get("dollar_floor_usd") is not None:
+                        floor = telemetry_domain.Money.from_raw(receipt["dollar_floor_usd"])
+                        if previous_floor is not None and floor.amount < previous_floor.amount:
+                            raise ValueError("Jetty receipt cannot lower independent dollar evidence")
+                        previous_floor = floor
+                    elif previous_floor is not None:
+                        raise ValueError("Jetty receipt cannot erase independent dollar evidence")
+                    previous_state = state
+                if isinstance(ref, str) and receipts[0]["state"] != "submitting":
+                    raise ValueError("native Jetty submission must begin submitting")
+                prior = attempt
 
     @property
     def attempts(self) -> dict[str, Any]:
-        attempts = self.data["attempts"]
-        assert isinstance(attempts, dict)
-        return attempts
+        return {digest: self.entry(digest) for digest in self.data["attempts"]}
 
     def _persist(self, data: dict[str, Any]) -> None:
         self._validate(data)
-        _atomic_write_text(
-            self.path,
-            json.dumps(
-                data, indent=2, ensure_ascii=False, allow_nan=False,
-            ) + "\n",
-        )
+        _atomic_write_text(self.path, json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+
+    def _write(self, candidate: dict[str, Any]) -> None:
+        if candidate == self.data:
+            return
+        try:
+            self._persist(candidate)
+        except OSError as exc:
+            raise JettyJournalPersistenceError(str(exc)) from exc
+        self.data = candidate
 
     def ensure(self, identity: dict[str, Any]) -> dict[str, Any]:
-        digest = identity.get("task_contract_sha256")
-        if (not isinstance(digest, str)
-                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None):
-            raise ValueError("Jetty attempt identity has no valid task contract digest")
-        current = self.attempts.get(digest)
-        if current is None:
-            current = {
-                "identity": copy.deepcopy(identity),
-                "state": "prepared",
-            }
-            candidate = copy.deepcopy(self.data)
-            candidate_attempts = candidate.get("attempts")
-            if not isinstance(candidate_attempts, dict):
-                raise TypeError(
-                    f"Jetty attempt journal {self.path} needs attempts")
-            candidate_attempts[digest] = current
-            self._persist(candidate)
-            self.data = candidate
-        elif current.get("identity") != identity:
-            raise RuntimeError(
-                "Jetty attempt journal identity conflict for task contract "
-                f"{digest}; refusing stale or mismatched receipt")
-        return copy.deepcopy(current)
+        digest = identity["task_contract_sha256"]
+        current = self.entry(digest)
+        if current is not None:
+            if current["identity"] != identity:
+                raise RuntimeError(f"Jetty attempt journal identity conflict for task contract {digest}; refusing stale or mismatched receipt")
+            return current
+        candidate = copy.deepcopy(self.data)
+        candidate["attempts"][digest] = {"identity": copy.deepcopy(identity), "upload": {"state": "prepared"},
+                                         "submission_attempts": [], "legacy_abandoned_unknown_submissions": 0}
+        self._write(candidate)
+        return self.entry(digest) or {}
 
     def entry(self, digest: str) -> dict[str, Any] | None:
-        value = self.attempts.get(digest)
-        return copy.deepcopy(value) if isinstance(value, dict) else None
+        task = self.data["attempts"].get(digest)
+        if task is None:
+            return None
+        attempts = task["submission_attempts"]
+        current = attempts[-1] if attempts else None
+        receipt = current["receipts"][-1] if current else task["upload"]
+        return copy.deepcopy({**task["upload"], **receipt, "identity": task["identity"],
+                              "attempt_ref": current["ref"] if current else None,
+                              "abandoned_unknown_submissions": task["legacy_abandoned_unknown_submissions"]
+                              + sum("replaces_unknown" in attempt for attempt in attempts)})
 
-    def checkpoint(
-        self, digest: str, state: str, **values: Any,
-    ) -> dict[str, Any]:
-        if state not in JETTY_ATTEMPT_STATES:
-            raise ValueError(f"invalid Jetty attempt state: {state}")
+    def begin(self, call: JettyCall, *, replaces_unknown: Any = None,
+              admission_origin: dict[str, str] | None = None) -> dict[str, Any]:
+        digest = call.task_contract_sha256
+        current = self.entry(digest)
+        if current is None or current["state"] not in {"upload_completed", "submitting", "submission_unknown"}:
+            raise RuntimeError("Jetty submission has no reusable upload receipt")
+        if current["state"] in {"submitting", "submission_unknown"}:
+            if replaces_unknown != current["attempt_ref"]:
+                raise RuntimeError("Jetty unknown submission requires an explicit replacement")
+        elif replaces_unknown is not None:
+            raise RuntimeError("Jetty replacement does not address an unknown attempt")
         candidate = copy.deepcopy(self.data)
-        attempts = candidate.get("attempts")
-        entry = attempts.get(digest) if isinstance(attempts, dict) else None
-        if not isinstance(entry, dict):
+        attempt = {"ref": call.journal_attempt_id, "receipts": [{"state": "submitting"}]}
+        if replaces_unknown is not None:
+            attempt["replaces_unknown"] = copy.deepcopy(replaces_unknown)
+        if admission_origin is not None:
+            attempt["admission_origin"] = admission_origin
+        candidate["attempts"][digest]["submission_attempts"].append(attempt)
+        self._write(candidate)
+        return self.entry(digest) or {}
+
+    def checkpoint(self, digest: str, state: str, *, attempt_ref: Any = None, **values: Any) -> dict[str, Any]:
+        current = self.entry(digest)
+        if current is None:
             raise TypeError(f"Jetty attempt {digest} is not registered")
-        current_state = entry.get("state")
-        if state not in JETTY_ATTEMPT_TRANSITIONS.get(str(current_state), set()):
-            raise RuntimeError(
-                f"invalid Jetty attempt transition for {digest}: "
-                f"{current_state!r} -> {state!r}")
-        entry.update(copy.deepcopy(values))
-        entry["state"] = state
-        self._persist(candidate)
-        self.data = candidate
-        return copy.deepcopy(entry)
-
-    def mark_submission_unknown(
-        self, digest: str, error: BaseException | str,
-    ) -> dict[str, Any]:
-        return self.checkpoint(
-            digest,
-            "submission_unknown",
-            submission_unknown_error=str(error),
-        )
-
-    def mark_submit_rejected(
-        self, digest: str, error: BaseException | str,
-    ) -> dict[str, Any]:
-        return self.checkpoint(
-            digest,
-            "upload_completed",
-            last_rejected_submission_error=str(error),
-        )
-
-    def abandon_unknown(self, digest: str) -> dict[str, Any]:
+        if state not in JETTY_ATTEMPT_TRANSITIONS.get(current["state"], set()):
+            raise RuntimeError(f"invalid Jetty attempt transition for {digest}: {current['state']!r} -> {state!r}")
         candidate = copy.deepcopy(self.data)
-        attempts = candidate.get("attempts")
-        entry = attempts.get(digest) if isinstance(attempts, dict) else None
-        if not isinstance(entry, dict) or entry.get("state") not in {
-            "submitting", "submission_unknown",
-        }:
-            raise RuntimeError(
-                f"Jetty attempt {digest} is not an unknown submission")
-        count = entry.get("abandoned_unknown_submissions", 0)
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-            raise ValueError(
-                f"Jetty attempt {digest} has invalid abandonment count")
-        for key in (
-            "trajectory_id", "submitted_storage_path", "submission_response",
-            "polled", "record",
-        ):
-            entry.pop(key, None)
-        entry["abandoned_unknown_submissions"] = count + 1
-        entry["state"] = "upload_completed"
-        self._persist(candidate)
-        self.data = candidate
-        return copy.deepcopy(entry)
+        task = candidate["attempts"][digest]
+        if task["submission_attempts"]:
+            attempt = task["submission_attempts"][-1]
+            if attempt_ref != attempt["ref"]:
+                raise RuntimeError("Jetty checkpoint does not address the current attempt")
+            receipt = {**attempt["receipts"][-1], **copy.deepcopy(values), "state": state}
+            if receipt != attempt["receipts"][-1]:
+                attempt["receipts"].append(receipt)
+        else:
+            task["upload"].update(copy.deepcopy(values))
+            task["upload"]["state"] = state
+        self._write(candidate)
+        return self.entry(digest) or {}
 
-    def mark_result_committed(
-        self, digest: str, record: dict[str, Any],
-    ) -> dict[str, Any]:
+    def mark_result_committed(self, digest: str, record: dict[str, Any]) -> dict[str, Any]:
         entry = self.entry(digest)
-        if not isinstance(entry, dict) or entry.get("state") not in {
-            "artifacts_downloaded", "result_committed",
-        }:
-            raise RuntimeError(
-                f"Jetty attempt {digest} has no downloaded result to commit")
-        saved_record = entry.get("record")
-        if (not isinstance(saved_record, dict)
-                or entry.get("record_sha256")
-                != canonical_json_sha256(saved_record)
-                or saved_record != record):
-            raise RuntimeError(
-                f"Jetty attempt {digest} result does not match its downloaded "
-                "artifact checkpoint")
-        if entry.get("state") == "result_committed":
-            return entry
-        return self.checkpoint(
-            digest,
-            "result_committed",
-        )
-
+        if entry is None or entry["state"] not in {"artifacts_downloaded", "result_committed"}:
+            raise RuntimeError(f"Jetty attempt {digest} has no downloaded result to commit")
+        if not isinstance(entry.get("record"), dict) or entry.get("record_sha256") != canonical_json_sha256(entry["record"]) or entry["record"] != record:
+            raise RuntimeError(f"Jetty attempt {digest} result does not match its downloaded artifact checkpoint")
+        return self.checkpoint(digest, "result_committed", attempt_ref=entry["attempt_ref"])
 
 def jetty_attempt_identity(
     *,
@@ -5061,6 +5105,8 @@ def jetty_poll_receipt(
         }
         and isinstance(value, (str, int, float, bool))
     }
+    if isinstance(polled.get("usage"), dict):
+        receipt["usage"] = {key: polled["usage"][key] for key in ("cost", "cost_usd") if key in polled["usage"]}
     receipt["trajectory_id"] = trajectory_id
     receipt["status"] = safe_lifecycle.status
     receipt["lifecycle"] = safe_lifecycle.to_dict()
@@ -5095,418 +5141,386 @@ def validated_jetty_saved_record(
     return copy.deepcopy(saved_record)
 
 
-def execute_jetty_payloads(
-    payloads: list[dict[str, Any]],
-    *,
-    client: Any,
-    timeout_s: int = DEFAULT_RUNNER_TIMEOUT_S,
-    poll_interval_s: float = 5,
-    journal: JettyAttemptJournal | None = None,
-    resubmit_unknown: bool = False,
-    fault_inject: Callable[[str], None] | None = None,
-) -> Any:
-    def inject(event: str) -> None:
-        if fault_inject is not None:
-            fault_inject(event)
+@_dataclass(frozen=True)
+class PreparedJettyItem:
+    row: dict[str, Any]
+    identity: dict[str, Any]
+    bundle_bytes: bytes | None
+    archive_name: str
+    bundle_placeholder: str
+    has_upload: bool
+    action: Literal["fresh", "reconcile", "replay", "preserve_unknown"]
+    call: JettyCall | None
+    prior: dict[str, Any] | None
 
+
+@_dataclass(frozen=True)
+class PreparedJettyExecution:
+    items: tuple[PreparedJettyItem, ...]
+    slots: tuple[dict[str, Any] | None, ...]
+
+    @property
+    def paid_plan(self) -> SpendPlan:
+        return SpendPlan(tuple(item.call for item in self.items if item.call is not None))
+
+
+@_dataclass(frozen=True)
+class JettyAttemptResult:
+    record: dict[str, Any] | None
+    dollar_floor: telemetry_domain.Money | None
+    deferred_exception: BaseException | None = None
+
+    @property
+    def cost(self) -> telemetry_domain.Measurement[telemetry_domain.Money]:
+        return telemetry_domain.Measurement.unavailable("jetty_billing_finality_unavailable")
+
+
+def prepare_jetty_execution(payloads: list[dict[str, Any]], journal: JettyAttemptJournal | None,
+                            *, resubmit_unknown: bool) -> PreparedJettyExecution:
+    slots = durable_jetty_result_slots(payloads, journal) if journal is not None else [None] * len(payloads)
+    items: list[PreparedJettyItem] = []
+    digests: set[str] = set()
+    destinations: set[str] = set()
+    output_identities: set[tuple[Any, ...]] = set()
+    submission_ids = {attempt["ref"] for task in journal.data["attempts"].values()
+                      for attempt in task["submission_attempts"] if isinstance(attempt["ref"], str)} if journal is not None else set()
     for row in payloads:
-        harness = row.get("harness", {})
-        if harness.get("executable") is False:
-            lifecycle = ProtocolInvalid("", "payload is non-executable; missing hidden prompt content or dry-run placeholder")
-            yield {
-                "harness": harness,
-                "status": lifecycle.status,
-                "lifecycle": lifecycle.to_dict(),
-                "trajectory_id": None,
-                "jetty": row.get("jetty_request", {}).get("jetty", {}),
-                "jetty_task_contract_sha256": harness.get(
-                    "jetty_task_contract_sha256"),
-                "error": lifecycle.reason,
-                "artifacts": [],
-            }
-            continue
-        request = copy.deepcopy(row.get("jetty_request", {}))
-        jetty = request.get("jetty", {})
-        collection = str(jetty.get("collection", ""))
-        task_name = str(jetty.get("task", ""))
-        trajectory_id = None
-        actual_task_contract_sha256: str | None = None
-        actual_task_contract: dict[str, Any] | None = None
-        attempt_entry: dict[str, Any] = {}
-        attempt_state = "prepared"
+        harness = string_keyed_dict(row.get("harness"), "Jetty payload harness")
+        if harness.get("executable") is not True:
+            raise ValueError("payload is non-executable; missing hidden prompt content or dry-run placeholder")
+        request = string_keyed_dict(row.get("jetty_request"), "Jetty payload request")
+        jetty = string_keyed_dict(request.get("jetty"), "Jetty payload routing")
+        for key in ("collection", "task", "agent"):
+            if not isinstance(jetty.get(key), str) or not jetty[key].strip():
+                raise ValueError(f"Jetty payload routing requires nonblank {key}")
+        model = request.get("model")
+        if model is not None and (not isinstance(model, str) or not model.strip()):
+            raise ValueError("Jetty payload model must be nonblank or null")
+        digest = harness.get("jetty_task_contract_sha256")
+        if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            raise RuntimeError("Jetty payload has no valid task contract digest")
+        if digest in digests:
+            raise ValueError(f"duplicate Jetty payload task contract digest: {digest}")
+        digests.add(digest)
+        output_identity = (harness.get("case_id"), model, harness.get("variant"), harness.get("run_number"))
+        if output_identity in output_identities:
+            raise ValueError("duplicate Jetty selected output identity")
+        output_identities.add(output_identity)
+        destination = harness.get("run_dir")
+        if not isinstance(destination, str) or not destination.strip():
+            raise ValueError("Jetty payload requires a nonblank run_dir")
+        relative = PurePosixPath(destination)
+        normalized_destination = relative.as_posix()
+        if relative.is_absolute() or ".." in relative.parts or normalized_destination in destinations:
+            raise ValueError("duplicate or unsafe Jetty selected output slot")
+        if any(relative in PurePosixPath(prior).parents or PurePosixPath(prior) in relative.parents for prior in destinations):
+            raise ValueError("overlapping Jetty selected output slots")
+        destinations.add(normalized_destination)
+        plan = string_keyed_dict(row.get("upload_plan"), "Jetty upload plan")
+        files = plan.get("files")
+        if not isinstance(files, list) or not all(isinstance(item, dict) for item in files):
+            raise TypeError("Jetty upload_plan.files must contain objects")
+        prior = journal.entry(digest) if journal is not None else None
+        uploaded = prior is not None and prior["state"] != "prepared"
+        if uploaded:
+            contract = validated_jetty_resume_contract(row, prior, digest)
+            bundle_bytes = None
+            if files and (not isinstance(prior.get("uploaded_bundle_path"), str) or not prior["uploaded_bundle_path"].strip()):
+                raise ValueError("Jetty upload checkpoint has no nonblank bundle path")
+        else:
+            upload_files = []
+            for item in files:
+                snapshot = copy.deepcopy(item)
+                snapshot["content"] = _jetty_upload_bytes(item)
+                snapshot.pop("local_path", None)
+                upload_files.append(snapshot)
+            execution_row = copy.deepcopy(row)
+            execution_row["upload_plan"]["files"] = upload_files
+            contract = jetty_task_contract(execution_row)
+            if canonical_json_sha256(contract) != digest:
+                raise RuntimeError("Jetty model-visible task/runbook/upload plan changed after attestation")
+            if "fixture_tree_hash" in harness and planned_file_surface_hash(upload_files, role="fixture", path_prefix="fixtures/") != harness["fixture_tree_hash"]:
+                raise RuntimeError("Jetty fixture bytes changed after payload attestation")
+            if harness.get("skill_tree_hash") is not None:
+                role = "old_skill" if harness.get("variant") == "old_skill" else "skill"
+                if planned_file_surface_hash(upload_files, role=role, path_prefix=f"skills/{harness.get('skill_name')}/") != harness["skill_tree_hash"]:
+                    raise RuntimeError("Jetty skill bytes changed after payload attestation")
+            bundle_bytes = build_jetty_bundle(upload_files) if upload_files else None
+        identity = jetty_attempt_identity(task_contract_sha256=digest, task_contract=contract,
+                                          collection=jetty["collection"], task=jetty["task"], model=model)
+        if prior is not None and prior["identity"] != identity:
+            raise RuntimeError(f"Jetty attempt journal identity conflict for task contract {digest}; refusing stale or mismatched receipt")
+        state = prior["state"] if prior is not None else "prepared"
+        action: Literal["fresh", "reconcile", "replay", "preserve_unknown"]
+        if state in {"artifacts_downloaded", "result_committed"}:
+            action = "replay"
+        elif state in {"submission_acknowledged", "terminal_observed"}:
+            action = "reconcile"
+        elif state in {"submitting", "submission_unknown"} and not resubmit_unknown:
+            action = "preserve_unknown"
+        else:
+            action = "fresh"
+        call = JettyCall(digest, uuid.uuid4().hex) if action == "fresh" else None
+        if call is not None:
+            if call.journal_attempt_id in submission_ids:
+                raise ValueError("duplicate Jetty prospective submission identity")
+            submission_ids.add(call.journal_attempt_id)
+        bundle = plan.get("bundle", {})
+        if not isinstance(bundle, dict):
+            raise TypeError("Jetty upload bundle must be an object")
+        items.append(PreparedJettyItem(copy.deepcopy(row), identity, bundle_bytes,
+                    str(bundle.get("archive_name") or f"{jetty['task']}.zip"),
+                    str(bundle.get("placeholder") or placeholder(jetty["task"], "bundle", "zip")),
+                    bool(files), action, call, prior))
+    return PreparedJettyExecution(tuple(items), tuple(slots))
+
+
+def jetty_dollar_measurement(response: dict[str, Any], *, detail: bool = False) -> telemetry_domain.Measurement[telemetry_domain.Money]:
+    envelopes = [response]
+    metadata = response.get("jetty_metadata")
+    if isinstance(metadata, dict):
+        envelopes.append(metadata)
+    if detail:
+        envelopes.append(jetty_runbook_outputs(response))
+    costs = []
+    for envelope in envelopes:
+        projected = {key: envelope[key] for key in ("cost", "cost_usd") if key in envelope}
+        usage = envelope.get("usage")
+        if isinstance(usage, dict):
+            projected["usage"] = {key: usage[key] for key in ("cost", "cost_usd") if key in usage}
         try:
-            expected_task_contract_sha256 = harness.get(
-                "jetty_task_contract_sha256")
-            if (not isinstance(expected_task_contract_sha256, str)
-                    or re.fullmatch(
-                        r"sha256:[0-9a-f]{64}", expected_task_contract_sha256) is None):
-                raise RuntimeError("Jetty payload has no valid task contract digest")
-            files = list(row.get("upload_plan", {}).get("files", []))
-            existing_entry = (
-                journal.entry(expected_task_contract_sha256)
-                if journal is not None else None
-            )
-            resume_uploaded_attempt = (
-                isinstance(existing_entry, dict)
-                and existing_entry.get("state") != "prepared"
-            )
-            if resume_uploaded_attempt:
-                # The receipt owns the already-uploaded bytes. Revalidate every
-                # non-byte causal field, but do not require local source files to
-                # survive after their attested snapshot reached Jetty.
-                upload_files = copy.deepcopy(files)
-                actual_task_contract = validated_jetty_resume_contract(
-                    row, existing_entry, expected_task_contract_sha256)
-                actual_task_contract_sha256 = expected_task_contract_sha256
-            else:
-                # Materialize every upload as immutable bytes before validating
-                # or performing network I/O. The snapshot that passes attestation
-                # is therefore the exact snapshot sent.
-                upload_files = []
-                for item in files:
-                    snapshotted = copy.deepcopy(item)
-                    snapshotted["content"] = _jetty_upload_bytes(item)
-                    snapshotted.pop("local_path", None)
-                    upload_files.append(snapshotted)
-                execution_row = copy.deepcopy(row)
-                execution_row["upload_plan"]["files"] = upload_files
-                actual_task_contract = jetty_task_contract(execution_row)
-                actual_task_contract_sha256 = canonical_json_sha256(
-                    actual_task_contract)
-                if actual_task_contract_sha256 != expected_task_contract_sha256:
-                    raise RuntimeError(
-                        "Jetty model-visible task/runbook/upload plan changed "
-                        "after attestation")
-                if "fixture_tree_hash" in harness:
-                    fixture_hash = planned_file_surface_hash(
-                        upload_files, role="fixture", path_prefix="fixtures/")
-                    if fixture_hash != harness.get("fixture_tree_hash"):
-                        raise RuntimeError(
-                            "Jetty fixture bytes changed after payload attestation")
-                if harness.get("skill_tree_hash") is not None:
-                    mounted_skill_role = (
-                        "old_skill" if harness.get("variant") == "old_skill"
-                        else "skill")
-                    mounted_hash = planned_file_surface_hash(
-                        upload_files, role=mounted_skill_role,
-                        path_prefix=f"skills/{harness.get('skill_name')}/",
-                    )
-                    if mounted_hash != harness.get("skill_tree_hash"):
-                        raise RuntimeError(
-                            "Jetty skill bytes changed after payload attestation")
-            identity = jetty_attempt_identity(
-                task_contract_sha256=actual_task_contract_sha256,
-                task_contract=actual_task_contract,
-                collection=collection,
-                task=task_name,
-                model=request.get("model"),
-            )
-            if journal is not None:
-                attempt_entry = journal.ensure(identity)
-                attempt_state = str(attempt_entry["state"])
-                if attempt_state == "submitting":
-                    attempt_entry = journal.mark_submission_unknown(
-                        actual_task_contract_sha256,
-                        "process stopped while the submission acknowledgement was pending",
-                    )
-                    attempt_state = "submission_unknown"
-                if attempt_state == "submission_unknown":
-                    if resubmit_unknown:
-                        attempt_entry = journal.abandon_unknown(
-                            actual_task_contract_sha256)
-                        attempt_state = "upload_completed"
-                    else:
-                        raise JettySubmissionUnknown(
-                            "Jetty submission outcome is unknown and this paid attempt "
-                            "must not be resubmitted automatically; reconcile provider "
-                            "state or rerun with --resubmit-unknown")
-                if attempt_state in {"artifacts_downloaded", "result_committed"}:
-                    yield validated_jetty_saved_record(
-                        attempt_entry,
-                        harness=harness,
-                        digest=actual_task_contract_sha256,
-                        task_contract=actual_task_contract,
-                    )
-                    continue
-            plan = row.get("upload_plan", {})
-            bundle = plan.get("bundle") if isinstance(plan.get("bundle"), dict) else {}
-            bundle_placeholder = str(bundle.get("placeholder") or placeholder(task_name, "bundle", "zip"))
-            archive_name = str(bundle.get("archive_name") or f"{task_name or 'skill-eval'}.zip")
-            mapping: dict[str, str] = {}
-            if attempt_state == "prepared":
-                inject("before_upload")
-                uploaded_bundle_path = None
-                if upload_files:
-                    uploaded_bundle_path = client.upload_bundle(
-                        archive_name, build_jetty_bundle(upload_files))
-                if journal is not None:
-                    attempt_entry = journal.checkpoint(
-                        actual_task_contract_sha256,
-                        "upload_completed",
-                        uploaded_bundle_path=uploaded_bundle_path,
-                    )
-                else:
-                    attempt_entry["uploaded_bundle_path"] = uploaded_bundle_path
-                    attempt_entry["state"] = "upload_completed"
-                attempt_state = "upload_completed"
-                inject("upload_completed")
-            uploaded_bundle_path = attempt_entry.get("uploaded_bundle_path")
-            if upload_files:
-                if (not isinstance(uploaded_bundle_path, str)
-                        or not uploaded_bundle_path.strip()):
-                    raise ValueError(
-                        "Jetty upload checkpoint has no nonblank bundle path")
-                mapping[bundle_placeholder] = uploaded_bundle_path
-            request = replace_placeholders(request, mapping)
-            if attempt_state == "upload_completed":
-                inject("before_submit")
-                if journal is not None:
-                    attempt_entry = journal.checkpoint(
-                        actual_task_contract_sha256, "submitting")
-                attempt_state = "submitting"
-                try:
-                    submission = client.submit(request)
-                except BaseException as exc:
-                    if journal is not None:
-                        if (isinstance(exc, urllib.error.HTTPError)
-                                and exc.code == 429):
-                            attempt_entry = journal.mark_submit_rejected(
-                                actual_task_contract_sha256, exc)
-                            attempt_state = "upload_completed"
-                        else:
-                            attempt_entry = journal.mark_submission_unknown(
-                                actual_task_contract_sha256, exc)
-                            attempt_state = "submission_unknown"
-                    raise
-                inject("after_submit_response")
-                try:
-                    trajectory_id, submitted_storage_path = validate_jetty_submission(
-                        submission, collection=collection, task=task_name)
-                except Exception as exc:
-                    if journal is not None:
-                        attempt_entry = journal.mark_submission_unknown(
-                            actual_task_contract_sha256,
-                            f"submission response could not be reconciled: {exc}",
-                        )
-                        attempt_state = "submission_unknown"
-                    raise JettySubmissionUnknown(
-                        "Jetty returned an unusable submission acknowledgement; "
-                        f"the provider may still have accepted the attempt: {exc}") from exc
-                submission = jetty_submission_receipt(
-                    trajectory_id, submitted_storage_path)
-                if journal is not None:
-                    attempt_entry = journal.checkpoint(
-                        actual_task_contract_sha256,
-                        "submission_acknowledged",
-                        trajectory_id=trajectory_id,
-                        submitted_storage_path=submitted_storage_path,
-                        submission_response=submission,
-                    )
-                else:
-                    attempt_entry.update({
-                        "trajectory_id": trajectory_id,
-                        "submitted_storage_path": submitted_storage_path,
-                        "submission_response": submission,
-                        "state": "submission_acknowledged",
-                    })
-                attempt_state = "submission_acknowledged"
-                inject("submission_acknowledged")
-            else:
-                raw_trajectory_id = attempt_entry.get("trajectory_id")
-                if not isinstance(raw_trajectory_id, str) or not raw_trajectory_id.strip():
-                    raise ValueError(
-                        f"Jetty {attempt_state} checkpoint has no trajectory_id")
-                trajectory_id = raw_trajectory_id.strip()
-                submitted_storage_path = attempt_entry.get("submitted_storage_path")
-                if (submitted_storage_path is not None
-                        and not isinstance(submitted_storage_path, str)):
-                    raise TypeError(
-                        "Jetty submission checkpoint storage_path must be a string or null")
-                submission = attempt_entry.get("submission_response")
-                if not isinstance(submission, dict):
-                    raise TypeError(
-                        "Jetty submission checkpoint has no response object")
+            block = jetty_telemetry_values({"trajectory": projected})["cost_normalized"]
+            cost = telemetry_domain.measurement_from_cost_block(block)
+        except (TypeError, ValueError) as exc:
+            return telemetry_domain.Measurement.unavailable(f"invalid_jetty_dollars: {exc}")
+        if cost.availability == telemetry_domain.AVAILABLE:
+            costs.append(cost)
+    if not costs:
+        return telemetry_domain.Measurement.unavailable("missing_jetty_dollars")
+    if any(cost.value != costs[0].value for cost in costs[1:]):
+        return telemetry_domain.Measurement.unavailable("conflicting_jetty_dollar_envelopes")
+    return costs[0]
 
-            if attempt_state == "submission_acknowledged":
-                inject("before_poll")
-                try:
-                    polled = client.poll(
-                        collection, task_name, trajectory_id,
-                        timeout_s=timeout_s, poll_interval_s=poll_interval_s,
-                    )
-                except JettyPollWaitExpired as exc:
-                    pending = string_keyed_dict(
-                        exc.last, "Jetty pending poll response")
-                    pending = jetty_poll_receipt(
-                        pending,
-                        trajectory_id=trajectory_id,
-                        require_trajectory_id=False,
-                    )
-                    lifecycle = lifecycle_from_record(pending)
-                    if lifecycle.terminal:
-                        raise RuntimeError(
-                            "local Jetty poll deadline carried a terminal state")
-                    yield {
-                        "harness": harness,
-                        "status": lifecycle.status,
-                        "lifecycle": lifecycle.to_dict(),
-                        "attempt_state": "submission_acknowledged",
-                        "trajectory_id": trajectory_id,
-                        "jetty_task_contract_sha256":
-                            actual_task_contract_sha256,
-                        "jetty_task_contract": actual_task_contract,
-                        "jetty": {
-                            "collection": collection,
-                            "task": task_name,
-                            "agent": jetty.get("agent"),
-                            "model": request.get("model"),
-                            "model_provider": jetty.get("model_provider"),
-                            "snapshot": jetty.get("snapshot"),
-                        },
-                        "submitted_request": request,
-                        "submission_response": submission,
-                        "trajectory": merged_jetty_trajectory(pending, {}),
-                        "error": str(exc),
-                        "artifacts": [],
-                    }
-                    continue
-                poll_record = string_keyed_dict(polled, "Jetty poll response")
-                lifecycle = lifecycle_from_record(poll_record)
-                if not lifecycle.terminal:
-                    raise RuntimeError(
-                        "Jetty poll returned before observing a terminal state")
-                poll_record = jetty_poll_receipt(
-                    poll_record, trajectory_id=trajectory_id)
-                lifecycle = lifecycle_from_record(poll_record)
-                if journal is not None:
-                    attempt_entry = journal.checkpoint(
-                        actual_task_contract_sha256,
-                        "terminal_observed",
-                        polled=poll_record,
-                    )
-                else:
-                    attempt_entry.update({
-                        "polled": poll_record,
-                        "state": "terminal_observed",
-                    })
-                attempt_state = "terminal_observed"
-                inject("terminal_observed")
-            else:
-                poll_record = string_keyed_dict(
-                    attempt_entry.get("polled"),
-                    "Jetty terminal checkpoint poll response",
-                )
-                lifecycle = lifecycle_from_record(poll_record)
-                if not lifecycle.terminal:
-                    raise ValueError(
-                        "Jetty terminal checkpoint is not terminal")
 
-            artifacts: list[dict[str, Any]] = []
-            if lifecycle.successful:
-                inject("before_download")
-                detail = client.fetch_trajectory(collection, task_name, trajectory_id)
-                poll_record, detail_record, _, run_outputs = (
-                    validate_jetty_completed_evidence(
-                        poll_record, detail,
-                        trajectory_id=trajectory_id,
-                        collection=collection,
-                        task=task_name,
-                        submitted_storage_path=submitted_storage_path,
-                    )
-                )
-                trajectory = merged_jetty_trajectory(
-                    poll_record, detail_record, run_outputs=run_outputs)
-                artifacts = fetch_jetty_artifacts(client, run_outputs)
-            else:
-                trajectory = merged_jetty_trajectory(poll_record, {})
-            record = {
-                "harness": harness,
-                "status": lifecycle.status,
-                "lifecycle": lifecycle.to_dict(),
-                "attempt_state": "artifacts_downloaded",
-                "trajectory_id": trajectory_id,
-                "jetty_task_contract_sha256": actual_task_contract_sha256,
-                "jetty_task_contract": actual_task_contract,
-                "jetty": {
-                    "collection": collection,
-                    "task": task_name,
-                    "agent": jetty.get("agent"),
-                    "model": request.get("model"),
-                    "model_provider": jetty.get("model_provider"),
-                    "snapshot": jetty.get("snapshot"),
-                },
-                "submitted_request": request,
-                "submission_response": submission,
-                "trajectory": trajectory,
-                "artifacts": artifacts,
-            }
-            if journal is not None:
-                attempt_entry = journal.checkpoint(
-                    actual_task_contract_sha256,
-                    "artifacts_downloaded",
-                    record=record,
-                    record_sha256=canonical_json_sha256(record),
-                )
-            attempt_state = "artifacts_downloaded"
-            inject("artifacts_downloaded")
-            yield record
-        except Exception as exc:
-            if journal is not None and actual_task_contract_sha256 is not None:
-                current = journal.entry(actual_task_contract_sha256)
-                if isinstance(current, dict):
-                    attempt_state = str(current.get("state", attempt_state))
-                if (isinstance(current, dict)
-                        and current.get("state") == "submission_unknown"):
-                    unknown_reason = current.get("submission_unknown_error")
-                    message = (
-                        "Jetty submission outcome is unknown and this paid attempt "
-                        "must not be resubmitted automatically; reconcile provider "
-                        "state or rerun with --resubmit-unknown"
-                    )
-                    if isinstance(unknown_reason, str) and unknown_reason:
-                        message += f" ({unknown_reason})"
-                    lifecycle = lifecycle_from_status("failed", error=message)
-                    yield {
-                        "harness": harness,
-                        "status": lifecycle.status,
-                        "lifecycle": lifecycle.to_dict(),
-                        "attempt_state": "submission_unknown",
-                        "trajectory_id": None,
-                        "jetty_task_contract_sha256": actual_task_contract_sha256,
-                        "jetty_task_contract": actual_task_contract,
-                        "jetty": {
-                            "collection": collection,
-                            "task": task_name,
-                            "agent": jetty.get("agent"),
-                            "model": request.get("model"),
-                            "model_provider": jetty.get("model_provider"),
-                            "snapshot": jetty.get("snapshot"),
-                        },
-                        "error": message,
-                        "artifacts": [],
-                    }
-                    continue
-            lifecycle = lifecycle_from_status("failed", error=exc)
-            yield {
-                "harness": harness,
-                "status": lifecycle.status,
-                "lifecycle": lifecycle.to_dict(),
-                "attempt_state": attempt_state,
-                "trajectory_id": trajectory_id,
-                "jetty_task_contract_sha256": actual_task_contract_sha256,
-                "jetty_task_contract": actual_task_contract,
-                "jetty": {
-                    "collection": collection,
-                    "task": task_name,
-                    "agent": jetty.get("agent"),
-                    "model": request.get("model"),
-                    "model_provider": jetty.get("model_provider"),
-                    "snapshot": jetty.get("snapshot"),
-                },
-                "error": str(exc),
-                "artifacts": [],
-            }
+class JettyAttemptExecution:
+    def __init__(self, item: PreparedJettyItem, client: Any, journal: JettyAttemptJournal | None,
+                 *, timeout_s: int, poll_interval_s: float, fault_inject: Callable[[str], None] | None,
+                 admission_origin: dict[str, str] | None = None):
+        self.item, self.client, self.journal = item, client, journal
+        self.timeout_s, self.poll_interval_s = timeout_s, poll_interval_s
+        self.fault_inject, self.admission_origin = fault_inject, admission_origin
+        self.digest = item.identity["task_contract_sha256"]
+        self.entry = copy.deepcopy(item.prior) if item.prior is not None else {"state": "prepared"}
+        floor = self.entry.get("dollar_floor_usd")
+        self.floor = None if item.action == "fresh" or floor is None else telemetry_domain.Money.from_raw(floor)
+        self.request = copy.deepcopy(item.row["jetty_request"])
+        self.jetty = self.request["jetty"]
+        self.trajectory_id: Any = self.entry.get("trajectory_id")
 
+    def inject(self, event: str) -> None:
+        if self.fault_inject is not None:
+            self.fault_inject(event)
+
+    def capture(self, response: dict[str, Any], *, submitted: bool = False, detail: bool = False) -> None:
+        if not submitted:
+            try:
+                if extract_trajectory_id(response) != self.trajectory_id:
+                    return
+            except (TypeError, ValueError):
+                return
+            for container in (response, response.get("jetty_metadata"), response.get("jetty")):
+                if not isinstance(container, dict):
+                    continue
+                for key in ("collection", "task"):
+                    if key in container and container[key] != self.jetty[key]:
+                        return
+                storage = container.get("storage_path")
+                if storage is not None:
+                    try:
+                        storage = jetty_remote_path(storage, "price evidence storage_path")
+                        prefix = jetty_remote_path(f"{self.jetty['collection']}/{self.jetty['task']}", "price evidence storage prefix") + "/"
+                    except (TypeError, ValueError):
+                        return
+                    bound_storage = self.entry.get("submitted_storage_path")
+                    if not storage.startswith(prefix) or bound_storage is not None and storage != bound_storage:
+                        return
+        cost = jetty_dollar_measurement(response, detail=detail)
+        if (cost.availability == telemetry_domain.AVAILABLE and cost.value is not None and cost.value.currency == "USD"
+                and (self.floor is None or cost.value.amount > self.floor.amount)):
+            self.floor = cost.value
+
+    def checkpoint(self, state: str, **values: Any) -> None:
+        if self.floor is not None:
+            values["dollar_floor_usd"] = format(self.floor.amount, "f")
+        if self.journal is not None:
+            self.entry = self.journal.checkpoint(self.digest, state, attempt_ref=self.entry.get("attempt_ref"), **values)
+        else:
+            self.entry.update(values, state=state)
+
+    def observe_poll(self, response: dict[str, Any]) -> None:
+        self.capture(response)
+        receipt = jetty_poll_receipt(response, trajectory_id=self.trajectory_id, require_trajectory_id=False)
+        self.checkpoint("submission_acknowledged", pending_poll=receipt)
+
+    def record(self, *, lifecycle: JettyLifecycle, trajectory: dict[str, Any] | None = None,
+               artifacts: list[dict[str, Any]] | None = None, error: str | None = None) -> dict[str, Any]:
+        record = {"harness": self.item.row["harness"], "status": lifecycle.status, "lifecycle": lifecycle.to_dict(),
+                  "attempt_state": self.entry["state"], "trajectory_id": self.trajectory_id,
+                  "jetty_task_contract_sha256": self.digest, "jetty_task_contract": self.item.identity["task_contract"],
+                  "jetty": {"collection": self.jetty["collection"], "task": self.jetty["task"],
+                            "agent": self.jetty.get("agent"), "model": self.request.get("model"),
+                            "model_provider": self.jetty.get("model_provider"), "snapshot": self.jetty.get("snapshot")},
+                  "artifacts": artifacts or [],
+                  "jetty_attempt_ref": self.entry.get("attempt_ref"),
+                  "jetty_price_evidence": {"complete_price": "unavailable", "reason": "jetty_billing_finality_unavailable",
+                                           "observed_subtotal_usd": None if self.floor is None else format(self.floor.amount, "f")}}
+        if self.admission_origin is not None:
+            record["admission_origin"] = self.admission_origin
+        if trajectory is not None:
+            record.update(trajectory=trajectory, submitted_request=self.request,
+                          submission_response=self.entry["submission_response"])
+        if error is not None:
+            record["error"] = error
+        return record
+
+    def invoke_priced(self) -> Priced[JettyAttemptResult]:
+        result = self.run()
+        return Priced(result, result.cost, observed_subtotal=result.dollar_floor)
+
+    def run(self) -> JettyAttemptResult:
+        try:
+            record = self._run()
+            return JettyAttemptResult(record, self.floor)
+        except BaseException as exc:
+            if not isinstance(exc, Exception) or isinstance(exc, JettyJournalPersistenceError):
+                return JettyAttemptResult(None, self.floor, exc)
+            message = str(exc)
+            if self.entry["state"] in {"submitting", "submission_unknown"}:
+                self.entry["state"] = "submission_unknown"
+                message = ("Jetty submission outcome is unknown and this paid attempt must not be resubmitted automatically; "
+                           "reconcile provider state or rerun with --resubmit-unknown (" + message + ")")
+            return JettyAttemptResult(self.record(lifecycle=lifecycle_from_status("failed", error=message), error=message), self.floor)
+
+    def _run(self) -> dict[str, Any]:
+        if self.item.action == "replay":
+            return validated_jetty_saved_record(self.entry, harness=self.item.row["harness"], digest=self.digest,
+                                                task_contract=self.item.identity["task_contract"])
+        if self.item.action == "preserve_unknown":
+            raise JettySubmissionUnknown(self.entry.get("submission_unknown_error") or "submission acknowledgement was not durably recorded")
+        if self.item.action == "fresh":
+            if self.journal is not None:
+                self.entry = self.journal.ensure(self.item.identity)
+            if self.entry["state"] == "prepared":
+                self.inject("before_upload")
+                uploaded = self.client.upload_bundle(self.item.archive_name, self.item.bundle_bytes) if self.item.bundle_bytes is not None else None
+                self.checkpoint("upload_completed", uploaded_bundle_path=uploaded)
+                self.inject("upload_completed")
+            if self.item.has_upload:
+                self.request = replace_placeholders(self.request, {self.item.bundle_placeholder: self.entry["uploaded_bundle_path"]})
+            self.inject("before_submit")
+            call = self.item.call
+            assert call is not None
+            replaces = self.entry.get("attempt_ref") if self.entry["state"] in {"submitting", "submission_unknown"} else None
+            self.floor = None
+            if self.journal is not None:
+                self.entry = self.journal.begin(call, replaces_unknown=replaces, admission_origin=self.admission_origin)
+            else:
+                self.entry = {**self.entry, "state": "submitting", "attempt_ref": call.journal_attempt_id}
+            try:
+                submission = self.client.submit(self.request)
+            except BaseException as exc:
+                self.checkpoint("upload_completed" if isinstance(exc, urllib.error.HTTPError) and exc.code == 429 else "submission_unknown",
+                                **({"last_rejected_submission_error": str(exc)} if isinstance(exc, urllib.error.HTTPError) and exc.code == 429
+                                   else {"submission_unknown_error": str(exc)}))
+                raise
+            self.capture(submission, submitted=True)
+            self.inject("after_submit_response")
+            try:
+                self.trajectory_id, storage = validate_jetty_submission(submission, collection=self.jetty["collection"], task=self.jetty["task"])
+            except Exception as exc:
+                self.checkpoint("submission_unknown", submission_unknown_error=f"submission response could not be reconciled: {exc}")
+                raise JettySubmissionUnknown(f"Jetty returned an unusable submission acknowledgement; the provider may still have accepted the attempt: {exc}") from exc
+            self.checkpoint("submission_acknowledged", trajectory_id=self.trajectory_id, submitted_storage_path=storage,
+                            submission_response=jetty_submission_receipt(self.trajectory_id, storage))
+            self.inject("submission_acknowledged")
+        elif self.item.has_upload:
+            self.request = replace_placeholders(self.request, {self.item.bundle_placeholder: self.entry["uploaded_bundle_path"]})
+        if self.entry["state"] == "submission_acknowledged":
+            self.inject("before_poll")
+            try:
+                polled = self.client.poll(self.jetty["collection"], self.jetty["task"], self.trajectory_id,
+                                          timeout_s=self.timeout_s, poll_interval_s=self.poll_interval_s,
+                                          on_observation=self.observe_poll)
+            except JettyPollWaitExpired as exc:
+                self.capture(exc.last)
+                pending = jetty_poll_receipt(exc.last, trajectory_id=self.trajectory_id, require_trajectory_id=False)
+                self.checkpoint("submission_acknowledged", pending_poll=pending)
+                lifecycle = lifecycle_from_record(pending)
+                if lifecycle.terminal:
+                    raise RuntimeError("local Jetty poll deadline carried a terminal state")
+                return self.record(lifecycle=lifecycle, trajectory=merged_jetty_trajectory(pending, {}), error=str(exc))
+            self.capture(polled)
+            poll_record = jetty_poll_receipt(string_keyed_dict(polled, "Jetty poll response"), trajectory_id=self.trajectory_id)
+            lifecycle = lifecycle_from_record(poll_record)
+            if not lifecycle.terminal:
+                raise RuntimeError("Jetty poll returned before observing a terminal state")
+            self.checkpoint("terminal_observed", polled=poll_record)
+            self.inject("terminal_observed")
+        else:
+            poll_record = string_keyed_dict(self.entry.get("polled"), "Jetty terminal checkpoint poll response")
+            self.capture(poll_record)
+            lifecycle = lifecycle_from_record(poll_record)
+            if not lifecycle.terminal:
+                raise ValueError("Jetty terminal checkpoint is not terminal")
+        artifacts: list[dict[str, Any]] = []
+        if lifecycle.successful:
+            self.inject("before_download")
+            detail = self.client.fetch_trajectory(self.jetty["collection"], self.jetty["task"], self.trajectory_id)
+            self.capture(detail, detail=True)
+            self.checkpoint("terminal_observed")
+            poll_record, detail_record, _, outputs = validate_jetty_completed_evidence(
+                poll_record, detail, trajectory_id=self.trajectory_id, collection=self.jetty["collection"], task=self.jetty["task"],
+                submitted_storage_path=self.entry.get("submitted_storage_path"))
+            trajectory = merged_jetty_trajectory(poll_record, detail_record, run_outputs=outputs)
+            artifacts = fetch_jetty_artifacts(self.client, outputs)
+        else:
+            trajectory = merged_jetty_trajectory(poll_record, {})
+        record = self.record(lifecycle=lifecycle, trajectory=trajectory, artifacts=artifacts)
+        record["attempt_state"] = "artifacts_downloaded"
+        self.checkpoint("artifacts_downloaded", record=record, record_sha256=canonical_json_sha256(record))
+        self.inject("artifacts_downloaded")
+        return record
+
+
+def execute_jetty_payloads(payloads: list[dict[str, Any]], *, client: Any,
+                           timeout_s: int = DEFAULT_RUNNER_TIMEOUT_S, poll_interval_s: float = 5,
+                           journal: JettyAttemptJournal | None = None, resubmit_unknown: bool = False,
+                           fault_inject: Callable[[str], None] | None = None,
+                           prepared: PreparedJettyExecution | None = None,
+                           admission: SpendAdmission | None = None) -> Iterator[dict[str, Any]]:
+    batch = prepared if prepared is not None else prepare_jetty_execution(payloads, journal, resubmit_unknown=resubmit_unknown)
+    admission = admission if admission is not None else SpendAdmission(None, None)
+    for item in batch.items:
+        origin = ({"invocation_id": admission.ledger.invocation_id, "call_id": item.call.call_id}
+                  if admission.ledger is not None and item.call is not None else None)
+        owner = JettyAttemptExecution(item, client, journal, timeout_s=timeout_s, poll_interval_s=poll_interval_s,
+                                      fault_inject=fault_inject, admission_origin=origin)
+        if item.call is not None:
+            execution = admission.run(item.call, owner.invoke_priced)
+            if isinstance(execution, NotStarted):
+                yield {"harness": item.row["harness"], "invocation_state": "not_started", "attempt_state": "not_started",
+                       "spend_refusal_reason": execution.reason.value, "spend_call": item.call.as_dict(),
+                       "jetty_task_contract_sha256": item.identity["task_contract_sha256"],
+                       "jetty_task_contract": item.identity["task_contract"], "requested_jetty": item.row["jetty_request"],
+                       "admission_origin": origin, "prior_attempt": item.prior, "artifacts": []}
+                continue
+            result = execution.value
+        else:
+            result = owner.run()
+        if result.deferred_exception is not None:
+            raise result.deferred_exception
+        assert result.record is not None
+        yield result.record
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [strict_json_loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -5637,36 +5651,32 @@ def run_jetty(args: argparse.Namespace) -> int:
         die(str(exc))
     try:
         journal = JettyAttemptJournal(journal_path)
-        result_slots = durable_jetty_result_slots(payloads, journal)
-        atomic_write_jsonl(
-            out, (record for record in result_slots if record is not None))
-        incomplete = False
-        for index, record in enumerate(execute_jetty_payloads(
-            payloads,
-            client=client,
-            timeout_s=getattr(args, "timeout", DEFAULT_RUNNER_TIMEOUT_S),
-            poll_interval_s=getattr(args, "poll_interval", 5),
-            journal=journal,
-            resubmit_unknown=getattr(args, "resubmit_unknown", False),
-        )):
-            result_slots[index] = record
-            atomic_write_jsonl(
-                out,
-                (item for item in result_slots if item is not None),
-            )
-            digest = record.get("jetty_task_contract_sha256")
-            entry = journal.entry(digest) if isinstance(digest, str) else None
-            if isinstance(entry, dict) and entry.get("state") in {
-                "artifacts_downloaded", "result_committed",
-            }:
-                journal.mark_result_committed(digest, record)
-            if record.get("attempt_state") not in {
-                "artifacts_downloaded", "result_committed",
-            }:
-                incomplete = True
+        prepared = prepare_jetty_execution(payloads, journal, resubmit_unknown=getattr(args, "resubmit_unknown", False))
+        result_slots = list(prepared.slots)
+        policy = native_spend_policy(args)
+        with SpendAdmission.open(policy, prepared.paid_plan, root=Path(str(out) + ".spend")) as admission:
+            atomic_write_jsonl(out, (record for record in result_slots if record is not None))
+            incomplete = False
+            refused = False
+            for index, record in enumerate(execute_jetty_payloads(
+                payloads, client=client, journal=journal, prepared=prepared, admission=admission,
+                timeout_s=getattr(args, "timeout", DEFAULT_RUNNER_TIMEOUT_S),
+                poll_interval_s=getattr(args, "poll_interval", 5),
+            )):
+                result_slots[index] = record
+                atomic_write_jsonl(out, (item for item in result_slots if item is not None))
+                if record.get("attempt_state") in {"artifacts_downloaded", "result_committed"}:
+                    journal.mark_result_committed(record["jetty_task_contract_sha256"], record)
+                else:
+                    incomplete = True
+                refused = refused or record.get("invocation_state") == "not_started"
+            partial = admission.ledger is not None and admission.ledger.partial
+            if admission.path is not None:
+                print(f"Spend receipt: {admission.path}")
+
     finally:
         lock.release()
-    return 1 if incomplete else 0
+    return 2 if refused or partial else 1 if incomplete else 0
 
 
 def artifact_content(artifact: dict[str, Any]) -> Any:
@@ -6035,6 +6045,17 @@ def normalized_jetty_metadata(record: dict[str, Any], *, success: bool) -> dict[
                    and jetty.get("model")) else {}),
         },
     }
+    evidence = record.get("jetty_price_evidence")
+    meta["jetty_billing_finality"] = "unavailable" if evidence is not None else "historical_unverified"
+    if evidence is not None:
+        if not isinstance(evidence, dict) or evidence.get("complete_price") != "unavailable" or evidence.get("reason") != "jetty_billing_finality_unavailable":
+            raise ValueError("invalid Jetty billing finality evidence")
+        floor = evidence.get("observed_subtotal_usd")
+        if floor is not None:
+            telemetry_domain.Money.from_raw(floor)
+        meta.update(cost_normalized={"source": "missing"}, cost_availability="partial" if floor is not None else "unavailable",
+                    cost_reason=evidence["reason"], observed_subtotal_usd=floor,
+                    jetty_attempt_ref=record.get("jetty_attempt_ref"))
     return {k: v for k, v in meta.items() if v is not None}
 
 
@@ -6081,6 +6102,23 @@ def _jetty_record_preflight(
     if (not isinstance(contract_harness, dict)
             or not _json_values_equal(contract_harness, current_harness)):
         raise ValueError("Jetty result harness identity changed after task attestation")
+    if record.get("invocation_state") == "not_started":
+        call_raw = string_keyed_dict(record.get("spend_call"), "Jetty refusal call")
+        call = JettyCall(call_raw["task_contract_sha256"], call_raw["journal_attempt_id"])
+        if call_raw != call.as_dict() or call.task_contract_sha256 != expected_task_contract_sha256:
+            raise ValueError("Jetty refusal call conflicts with task identity")
+        reason = SpendStopReason(record.get("spend_refusal_reason"))
+        if record.get("attempt_state") != "not_started" or any(key in record for key in ("status", "lifecycle", "returncode", "trajectory_id", "submission_response", "trajectory", "jetty")) or record.get("artifacts") != []:
+            raise ValueError("Jetty refusal cannot contain provider execution facts")
+        requested = string_keyed_dict(record.get("requested_jetty"), "Jetty refusal requested route")
+        metadata = {"provider": "jetty", "population": "answer", "case_id": harness["case_id"],
+                    "variant": harness["variant"], "run_number": harness["run_number"],
+                    "model": requested.get("model"), "invocation_state": "not_started",
+                    "spend_refusal_reason": reason.value, "spend_call_id": call.call_id,
+                    "jetty_task_contract_sha256": expected_task_contract_sha256,
+                    "observation_complete": False, "process_observation_complete": False,
+                    "provider_response_complete": False, "cost_normalized": {"source": "missing"}}
+        return {"record": record, "destination": destination, "metadata": metadata, "refused": True}
     artifacts = resolved_jetty_artifacts(record)
     observation = JettyObservation.from_record(
         record, has_output=find_output_artifact(artifacts) is not None)
@@ -6143,6 +6181,9 @@ def _jetty_record_preflight(
 def _stage_jetty_record(preflight: dict[str, Any], staged: Path) -> None:
     staged.mkdir(parents=True)
     write_json(staged / "jetty_raw.json", preflight["record"])
+    if preflight.get("refused"):
+        write_json(staged / "metadata.json", preflight["metadata"])
+        return
     if preflight["success"]:
         for artifact in preflight["artifacts"]:
             write_artifact(staged, artifact)
@@ -6269,7 +6310,7 @@ def import_jetty_results(args: argparse.Namespace) -> int:
     seen_destinations: set[Path] = set()
     for record in records:
         attempt_state = record.get("attempt_state")
-        if (attempt_state is not None
+        if (record.get("invocation_state") != "not_started" and attempt_state is not None
                 and attempt_state not in {
                     "artifacts_downloaded", "result_committed",
                 }):
@@ -6298,7 +6339,7 @@ def import_jetty_results(args: argparse.Namespace) -> int:
             die("invalid Jetty result: harness.variant is not an execution arm")
         if isinstance(run_number, bool) or not isinstance(run_number, int) or run_number < 1:
             die("invalid Jetty result: harness.run_number must be a positive integer")
-        jetty = record.get("jetty")
+        jetty = record.get("requested_jetty") if record.get("invocation_state") == "not_started" else record.get("jetty")
         model = jetty.get("model") if isinstance(jetty, dict) else None
         if model is not None and (not isinstance(model, str) or not model):
             die("invalid Jetty result: jetty.model must be null or a non-empty string")
@@ -7652,6 +7693,13 @@ def run_cost_facts(merged: dict[str, Any]) -> dict[str, Any]:
     else:
         cost_measurement = telemetry_domain.measurement_from_cost_block(
             merged.get("cost_normalized"), legacy_value=metric_number(merged, "cost_usd", "cost"), basis=basis)
+
+    if merged.get("provider") == "jetty" and merged.get("cost_reason") == "jetty_billing_finality_unavailable":
+        floor = merged.get("observed_subtotal_usd")
+        if floor is not None:
+            telemetry_domain.Money.from_raw(floor)
+        cost_measurement = telemetry_domain.Measurement.unavailable(
+            "jetty_billing_finality_unavailable", basis={**basis, "observed_subtotal_usd": floor})
 
     def value_of(measurement):
         return measurement.value if measurement.availability == telemetry_domain.AVAILABLE else None
@@ -23885,9 +23933,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--resubmit-unknown", action="store_true",
         help=(
-            "explicitly abandon submission_unknown receipts and submit again "
-            "(may duplicate a paid run)"),
+            "explicitly replace an unknown submission with a distinct attempt "
+            "while retaining prior evidence (may duplicate a paid run)"),
     )
+    p.add_argument("--max-cost-usd", type=float, help="per-invocation USD ceiling for fresh submissions; reconciliation remains available")
+    p.add_argument("--assumed-cost-per-run-usd", type=float, help="labeled charge for incomplete Jetty billing; cannot lower observed dollar floors")
     p.add_argument("--dry-run", action="store_true")
 
     p = sub.add_parser("import-jetty-results")

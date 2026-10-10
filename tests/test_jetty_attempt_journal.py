@@ -103,7 +103,7 @@ class JettyAttemptJournalTests(unittest.TestCase):
             raw_journal = json.loads(journal_path.read_text(encoding="utf-8"))
             digest = payload["harness"]["jetty_task_contract_sha256"]
             self.assertEqual(
-                raw_journal["attempts"][digest]["state"],
+                raw_journal["attempts"][digest]["submission_attempts"][-1]["receipts"][-1]["state"],
                 "submission_unknown",
             )
 
@@ -302,10 +302,8 @@ class JettyAttemptJournalTests(unittest.TestCase):
                 json.dumps(raw, ensure_ascii=False) + "\n", encoding="utf-8")
 
             client = FakeJettyClient()
-            [record] = self.execute(payload, client, journal_path)
-
-            self.assertEqual(record["status"], "failed")
-            self.assertIn("identity conflict", record["error"])
+            with self.assertRaisesRegex(RuntimeError, "identity conflict"):
+                self.execute(payload, client, journal_path)
             self.assertEqual(client.upload_calls, 0)
             self.assertEqual(client.submit_calls, 0)
 
@@ -336,15 +334,13 @@ class JettyAttemptJournalTests(unittest.TestCase):
             sb.JettyAttemptJournal(journal_path).mark_result_committed(
                 digest, record)
             raw = json.loads(journal_path.read_text(encoding="utf-8"))
-            raw["attempts"][digest]["record"]["status"] = "failed"
+            raw["attempts"][digest]["submission_attempts"][-1]["receipts"][-1]["record"]["status"] = "failed"
             journal_path.write_text(
                 json.dumps(raw) + "\n", encoding="utf-8")
 
             restarted = FakeJettyClient()
-            [blocked] = self.execute(payload, restarted, journal_path)
-
-            self.assertEqual(blocked["status"], "failed")
-            self.assertIn("corrupted receipt", blocked["error"])
+            with self.assertRaisesRegex(RuntimeError, "corrupted receipt"):
+                self.execute(payload, restarted, journal_path)
             self.assertEqual(restarted.submit_calls, 0)
 
     def test_atomic_jsonl_publication_survives_crashes_before_and_after_replace(self):
@@ -393,7 +389,7 @@ class JettyAttemptJournalTests(unittest.TestCase):
             digest = payload["harness"]["jetty_task_contract_sha256"]
             raw_journal = json.loads(journal_path.read_text(encoding="utf-8"))
             self.assertEqual(
-                raw_journal["attempts"][digest]["state"], "result_committed")
+                raw_journal["attempts"][digest]["submission_attempts"][-1]["receipts"][-1]["state"], "result_committed")
 
             restarted = FakeJettyClient()
             with (
@@ -503,9 +499,9 @@ class JettyAttemptJournalTests(unittest.TestCase):
             def fail_artifact_checkpoint_once(journal, data):
                 nonlocal failed_once
                 states = {
-                    entry.get("state")
+                    attempt["receipts"][-1]["state"]
                     for entry in data.get("attempts", {}).values()
-                    if isinstance(entry, dict)
+                    for attempt in entry["submission_attempts"]
                 }
                 if not failed_once and "artifacts_downloaded" in states:
                     failed_once = True
@@ -522,13 +518,13 @@ class JettyAttemptJournalTests(unittest.TestCase):
                     fail_artifact_checkpoint_once,
                 ),
             ):
-                self.assertEqual(run_cli(*cli)[0], 1)
+                with self.assertRaisesRegex(sb.JettyJournalPersistenceError, "injected journal write failure"):
+                    run_cli(*cli)
 
             digest = payload["harness"]["jetty_task_contract_sha256"]
             interrupted = sb.JettyAttemptJournal(journal_path).entry(digest)
             self.assertEqual(interrupted["state"], "terminal_observed")
-            [failed] = sb.load_jsonl(out)
-            self.assertEqual(failed["attempt_state"], "terminal_observed")
+            self.assertEqual(out.read_bytes(), b"")
 
             restarted = FakeJettyClient()
             with (

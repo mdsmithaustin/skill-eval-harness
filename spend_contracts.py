@@ -134,7 +134,28 @@ class JudgeCall:
                                          separators=(",", ":")).encode()).hexdigest()
 
 
-SpendCall = AnswerCall | SubagentTurnCall | JudgeCall
+@dataclass(frozen=True)
+class JettyCall:
+    task_contract_sha256: str
+    journal_attempt_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_contract_sha256, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", self.task_contract_sha256) is None:
+            raise ValueError("Jetty call requires a task contract SHA-256")
+        if not isinstance(self.journal_attempt_id, str) or re.fullmatch(r"[0-9a-f]{32}", self.journal_attempt_id) is None:
+            raise ValueError("Jetty call requires a UUID hex submission identity")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"kind": "jetty", "task_contract_sha256": self.task_contract_sha256,
+                "journal_attempt_id": self.journal_attempt_id}
+
+    @property
+    def call_id(self) -> str:
+        return hashlib.sha256(json.dumps(self.as_dict(), sort_keys=True,
+                                         separators=(",", ":")).encode()).hexdigest()
+
+
+SpendCall = AnswerCall | SubagentTurnCall | JudgeCall | JettyCall
 
 
 @dataclass(frozen=True)
@@ -142,7 +163,7 @@ class SpendPlan:
     calls: tuple[SpendCall, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.calls, tuple) or not all(isinstance(call, (AnswerCall, SubagentTurnCall, JudgeCall)) for call in self.calls):
+        if not isinstance(self.calls, tuple) or not all(isinstance(call, (AnswerCall, SubagentTurnCall, JudgeCall, JettyCall)) for call in self.calls):
             raise TypeError("spend plan requires a tuple of spend calls")
         if len({call.call_id for call in self.calls}) != len(self.calls):
             raise ValueError("spend plan contains duplicate call identities")
@@ -360,6 +381,8 @@ class SpendLedger:
                 call = JudgeCall(call_raw.get("judge_task_id"), call_raw.get("judge_input_sha256"),
                                  call_raw.get("backend"), call_raw.get("requested_model"),
                                  call_raw.get("repeat"))
+            elif call_raw.get("kind") == "jetty":
+                call = JettyCall(call_raw.get("task_contract_sha256"), call_raw.get("journal_attempt_id"))
             else:
                 raise ValueError("unsupported spend call kind")
             if call.call_id in states or row.get("call_id") != call.call_id:
