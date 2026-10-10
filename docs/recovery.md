@@ -82,6 +82,7 @@ If adapter preflight returns before reaching the task subprocess boundary, the p
 Setup, spawn, or capture failures can leave partial artifacts or prevent a phase directory from being created.
 Snapshot manifests map relative paths to content-addressed raw blobs. Symlinks are recorded without following them.
 When capture succeeds, raw stdout and stderr are saved before decoding, redaction, or stderr capping. Their hashes identify the captured bytes.
+Capture failure can precede a child's first write, so retained streams can be empty.
 Failures retain the artifacts that could be written and block later phases. A failed artifact write does not erase the other evidence.
 When present, `process.json` separates the actual OS return code from compatibility timeout status 124.
 It records signal delivery, leader reaping, pipe draining, and process-group observation.
@@ -104,4 +105,5 @@ The refusal phase records its raw output and forbidden-path presence. Absence al
 The consumer must establish the prescribed attempted write, enforcing denial, and absent forbidden file for its own eligibility decision.
 
 The model-free public-command checks are in `tests/test_recovery.py`.
+The pipe-capture fault test injects its error after observing the fixture's checkpoint, which the fixture writes after both streams.
 Fake identities and denials prove plumbing only. Live provider eligibility remains a separate consumer integration task.

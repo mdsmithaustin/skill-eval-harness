@@ -28,6 +28,12 @@ The [recovery reference](recovery.md) defines their separate lifecycle and consu
 
 This is intentionally a **control-plane abstraction**, not a lowest-common-denominator CLI wrapper. Prompt transport, tool controls, schema enforcement, config isolation, and telemetry differ per CLI and stay in thin provider adapters.
 
+The process owner polls for leader exit separately from capture-pipe completion.
+A routine polling timeout does not replace captured stderr, including an empty stream, after a natural exit.
+The outcome keeps the actual exit code and reports no task timeout.
+Actual deadline termination retains timeout diagnostics and compatibility return code 124.
+Process-group cleanup and held-pipe warnings can still appear in stderr and cleanup metadata.
+
 ## Provider control surfaces
 
 | Concern | Claude Code | Codex CLI | Gemini CLI | Mistral Vibe |
