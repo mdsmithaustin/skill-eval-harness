@@ -399,6 +399,45 @@ class GradedScoringSeverityTests(unittest.TestCase):
             complete_judge_fixtures(case, "text", Path("out.md"),
                                     {jid: {"passed": False, "score": 1, "threshold": 1}})
 
+    def test_complete_judge_fixture_rejects_both_supplied_polarity_contradictions(self):
+        plain = {"name": "q", "type": "judge", "rubric": ["good"]}
+        dimensions = {"name": "q", "type": "judge", "graded_dimensions": [{"name": "clarity", "rubric": "clear"}]}
+        dynamic = {"name": "q", "type": "judge", "dynamic_rubric": {"instruction": "clear", "minimum_criteria": 1}}
+        for assertion, rows, reason in (
+            (plain, ({"passed": True, "score": 0, "threshold": 1},
+                     {"passed": False, "score": 1, "threshold": 1}), "contradict"),
+            (dimensions, ({"passed": False, "score": 1, "threshold": 0.75, "dimension_scores": {"clarity": 5}},
+                          {"passed": True, "score": 0, "threshold": 0.75, "dimension_scores": {"clarity": 1}}), "contradict"),
+            (dynamic, ({"passed": True, "score": 0, "criteria": [{"name": "clear", "met": False}]},
+                       {"passed": False, "score": 1, "criteria": [{"name": "clear", "met": True}]}), "contradict"),
+            (plain, ({"passed": True, "score": 0}, {"passed": False, "score": 1}), "stored scored verdict requires threshold"),
+            ({**plain, "threshold": 4}, ({"passed": True, "score": 1},), "contradict"),
+        ):
+            case = self.behavior_case([assertion])
+            jid = sb.judge_task_id("case-x", "with_skill", 1, assertion)
+            for row in rows:
+                with self.subTest(assertion=assertion, row=row), self.assertRaisesRegex(ValueError, reason):
+                    complete_judge_fixtures(case, "text", Path("out.md"), {jid: row})
+
+    def test_complete_judge_fixture_derives_missing_canonical_fields_with_supplied_polarity(self):
+        for assertion, row, expected in (
+            ({"name": "q", "type": "judge", "graded_dimensions": [{"name": "clarity", "rubric": "clear"}], "threshold": 4},
+             {"passed": True, "dimension_scores": {"clarity": 4}},
+             {"passed": True, "score": 0.75, "threshold": 0.75, "dimension_scores": {"clarity": 4.0}}),
+            ({"name": "q", "type": "judge", "dynamic_rubric": {"instruction": "clear", "minimum_criteria": 2}},
+             {"passed": False, "criteria": [{"name": "clear", "met": True}, {"name": "correct", "met": False}]},
+             {"passed": False, "score": 0.5, "minimum_criteria": 2}),
+            ({"name": "q", "type": "judge", "threshold": 4, "rubric": ["good"]},
+             {"score": 1}, {"passed": False, "score": 1.0, "threshold": 4.0}),
+        ):
+            case = self.behavior_case([assertion])
+            jid = sb.judge_task_id("case-x", "with_skill", 1, assertion)
+            with self.subTest(assertion=assertion):
+                verdict = complete_judge_fixtures(case, "text", Path("out.md"), {jid: row})[jid]
+                self.assertEqual({key: verdict[key] for key in expected}, expected)
+                self.assertTrue(verdict["judge_observation_complete"])
+                self.assertIsNone(sb.judge_observation_incomplete_reason(verdict))
+
     def test_graded_dimensions_below_threshold_fail(self):
         assertion = {"name": "q", "type": "judge", "graded_dimensions": [{"name": "d", "rubric": "anchored"}]}
         case = self.behavior_case([assertion])

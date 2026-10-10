@@ -164,6 +164,103 @@ class JudgeObservationTests(unittest.TestCase):
         forged["agreement"]["concur"] = 0
         assert_dies(self, lambda: self.load(forged), "consensus contradicts")
 
+    def test_saved_parent_validation_failures_reject_fresh_complete_groups(self):
+        repeats = sb.merge_repeated_judge_rows([self.leaf(), self.leaf(repeat=2)])
+        panel = sb.merge_cross_judge_rows([self.leaf(), self.leaf(model="b")])
+        nested = sb.merge_cross_judge_rows([repeats, sb.merge_repeated_judge_rows([
+            self.leaf(model="b"), self.leaf(model="b", repeat=2)])])
+        for group in (repeats, panel, nested):
+            for field, diagnostic in (("schema_errors", ["invalid parent schema"]),
+                                      ("verdict_validation_error", "invalid parent verdict")):
+                for target_nested in (False, True) if group is nested else (False,):
+                    with self.subTest(field=field, nested=target_nested, keys=list(group)):
+                        forged = copy.deepcopy(group)
+                        target = forged["judge_panel"][0] if target_nested else forged
+                        target[field] = diagnostic
+                        assert_dies(self, lambda: self.load(forged), "judge verdict failed validation")
+
+    def test_saved_parent_validation_failures_remain_unavailable_with_all_members(self):
+        for panel in (False, True):
+            merge = sb.merge_cross_judge_rows if panel else sb.merge_repeated_judge_rows
+            key = "judge_panel" if panel else "judge_runs"
+            for historical in (False, True):
+                for field, diagnostic in (("schema_errors", ["invalid parent schema"]),
+                                          ("verdict_validation_error", "invalid parent verdict")):
+                    with self.subTest(panel=panel, historical=historical, field=field):
+                        group = merge([self.leaf(), self.leaf(model="b" if panel else "a", repeat=2)])
+                        group[field] = diagnostic
+                        if historical:
+                            del group["judge_observation_kind"]
+                        else:
+                            group.update(passed=False, judge_observation_kind="missing",
+                                         judge_observation_complete=False, availability="partial", returncode=1)
+                            group.pop("agreement")
+                        loaded = self.load(group)
+                        self.assertEqual(loaded[field], diagnostic)
+                        self.assertEqual([child["passed"] for child in loaded[key]], [True, True])
+                        self.assertEqual(sb.judge_observation_incomplete_reason(loaded), "judge verdict failed validation")
+                        self.assertFalse(loaded["judge_observation_complete"])
+                        self.assertNotIn("score", loaded)
+                        self.assertNotIn("agreement", loaded)
+                        self.assertEqual(self.load(loaded), loaded)
+                        outer = sb.merge_cross_judge_rows([loaded, self.leaf(model="c")])
+                        self.assertEqual(sb.judge_observation_incomplete_reason(self.load(outer)), "judge verdict failed validation")
+
+    def test_empty_parent_diagnostics_preserve_complete_true_and_false_verdicts(self):
+        for passed in (False, True):
+            rows = [{**self.leaf(repeat=repeat), "passed": passed} for repeat in (1, 2)]
+            group = sb.merge_repeated_judge_rows(rows)
+            group.update(schema_errors=[], verdict_validation_error="")
+            loaded = self.load(group)
+            self.assertEqual((loaded["passed"], loaded["judge_observation_complete"]), (passed, True))
+            self.assertIsNone(sb.judge_observation_incomplete_reason(loaded))
+
+    def test_saved_repeat_parent_requested_model_rejects_standalone_and_nested_contradictions(self):
+        for incomplete in (False, True):
+            repeat = sb.merge_repeated_judge_rows([self.leaf(), self.leaf(repeat=2, missing=incomplete)])
+            for nested in (False, True):
+                with self.subTest(incomplete=incomplete, nested=nested):
+                    group = (sb.merge_cross_judge_rows([repeat, sb.merge_repeated_judge_rows([
+                        self.leaf(model="b"), self.leaf(model="b", repeat=2)])])
+                             if nested else copy.deepcopy(repeat))
+                    target = group["judge_panel"][0] if nested else group
+                    target["judge_requested_model"] = "forged"
+                    assert_dies(self, lambda: self.load(group), "judge parent requested model contradicts members")
+
+    def test_repeat_parent_request_checks_all_declared_members_and_explicit_null(self):
+        for requested, forged in ((None, "a"), ("a", None)):
+            group = sb.merge_repeated_judge_rows([self.leaf(model=requested), self.leaf(model=requested, repeat=2)])
+            group["judge_requested_model"] = forged
+            assert_dies(self, lambda: self.load(group), "judge parent requested model contradicts members")
+        group = sb.merge_repeated_judge_rows([self.leaf(), self.leaf(repeat=2)])
+        del group["judge_observation_kind"]
+        for child in group["judge_runs"]:
+            del child["judge_observation_kind"]
+            del child["judge_requested_model"]
+        group["judge_runs"][1]["judge_requested_model"] = "late mutation"
+        assert_dies(self, lambda: self.load(group), "judge parent requested model contradicts members")
+
+    def test_repeat_requests_preserve_historical_absence_and_served_model_difference(self):
+        rows = [self.leaf(repeat=repeat) for repeat in (1, 2)]
+        for row in rows:
+            row["judge_served_model"] = "served-other"
+        group = sb.merge_repeated_judge_rows(rows)
+        self.assertEqual(self.load(group), group)
+        self.assertEqual(group["judge_requested_model"], "a")
+        del group["judge_observation_kind"]
+        for row in group["judge_runs"]:
+            del row["judge_observation_kind"]
+            del row["judge_requested_model"]
+        loaded = self.load(group)
+        self.assertEqual(loaded["judge_requested_model"], "a")
+        self.assertTrue(all("judge_requested_model" not in row for row in loaded["judge_runs"]))
+        del group["judge_requested_model"]
+        loaded = self.load(group)
+        self.assertNotIn("judge_requested_model", loaded)
+        self.assertIsNone(sb.judge_observation_incomplete_reason(loaded))
+        panel = sb.merge_cross_judge_rows([self.leaf(), self.leaf(model="b")])
+        self.assertEqual(self.load(panel)["judge_models"], ["a", "b"])
+
     def test_removed_duplicate_and_wrong_panel_members_reject(self):
         out = sb.merge_cross_judge_rows([self.leaf(), self.leaf(model="b")])
         removed = copy.deepcopy(out)
