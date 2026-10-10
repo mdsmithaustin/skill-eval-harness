@@ -238,10 +238,10 @@ hashed paths are the paths an agent lists. The judge's explore-surface digest fr
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract for ordinary rows. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11719`), Claude (`run_claude:11997`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11788`), Claude (`run_claude:12066`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:14886`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4269` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:15160`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:4278` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -255,7 +255,11 @@ independently set timeout, return code, answer, and failure into a contradictory
 calls no model during default grading; it reads what the runner left behind. The explicit
 `--allow-scripts` and `--embed-cmd` modes may invoke caller-supplied external oracle subprocesses.
 
-`spend_contracts.py` owns an immutable native `AnswerCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` owns serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. Native runners retain workspace, subprocess, artifact, and recovery policy. Reports read each ledger without changing the immutable answer design. The [native spend walkthrough](limit-native-spend.md) describes the operator contract.
+`spend_contracts.py` owns an immutable `AnswerCall | SubagentTurnCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` owns serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. Native runners retain workspace, subprocess, artifact, and recovery policy. Reports read each ledger without changing the immutable answer design. The [native spend walkthrough](limit-native-spend.md) describes the operator contract.
+
+Subagent admission binds each required external callback turn to its prepared task digest, `RunCoordinate`, and positive turn number. The immutable plan uses the scripted `turns` list, or turn 1 for a single call. Provider-internal turn limits do not add calls. Built-in backends capture immutable reported dollars, scope, and actual process evidence before response validation. Accepted responses freeze recursively and thaw at the existing dictionary validators. Rejected responses retain safe dollars and raw envelopes in diagnostics. Multi-turn prices require explicit `turn_delta`. Cumulative or unspecified counters remain provider diagnostics. Assumptions remain in the ledger.
+
+`run_subagent_tasks` retains conversation, workspace, replay, and turn-artifact ownership. Settlement precedes artifact publication and final workspace capture. Each remaining refusal passes through `SpendAdmission.run` without invoking its callback, adding history, or writing a provider turn. The private subagent terminal types live beside the common transactional `write_runner_outcome` publisher. They bind refused or rejected call identities to the root and derive null return codes, absent process lifecycle, and false provider completeness. The process outcome union stays closed. Committed inventory completeness remains a separate reader observation. An invocation that starts no call preserves all prior destination content. A new started conversation replaces the root with its own incomplete result and current sidecars when required turns cannot run.
 
 The native answer loop lazily enters `captured_workspace` through an `ExitStack` inside the admitted callback. It returns the priced outcome and actual `WorkspaceAttestation` before workspace exit. `SpendAdmission.run` persists settlement before capture and cleanup, so later local errors preserve the charge. The writer consumes captured sidecars after workspace exit and before the changes directory closes. Exceptions from setup, invocation, pricing, or settlement skip capture while the workspace context cleans up. Returned failure, timeout, and spawn-failure outcomes still capture evidence.
 
@@ -438,7 +442,7 @@ by domain, difficulty, trigger type, and success goal. Case flags mark saturated
 flaky, and with-skill-failed cases, and `effect_estimates.ceiling_or_floor` separates the two
 ways a case stops discriminating: both arms always pass (ceiling) or both always fail (floor, which
 `suggest-cases` never offers for hardening). These flags, the leakage lint
-(`prompt_assertion_leakage_findings:963`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:972`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as

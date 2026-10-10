@@ -76,12 +76,39 @@ class AnswerCall:
 
 
 @dataclass(frozen=True)
-class SpendPlan:
-    calls: tuple[AnswerCall, ...]
+class SubagentTurnCall:
+    task_sha256: str
+    coordinate: RunCoordinate
+    external_turn: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.calls, tuple) or not all(isinstance(call, AnswerCall) for call in self.calls):
-            raise TypeError("spend plan requires a tuple of answer calls")
+        if not isinstance(self.task_sha256, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", self.task_sha256) is None:
+            raise ValueError("subagent turn requires a task SHA-256")
+        if not isinstance(self.coordinate, RunCoordinate):
+            raise TypeError("subagent turn requires a RunCoordinate")
+        if type(self.external_turn) is not int or self.external_turn <= 0:
+            raise ValueError("external turn must be a positive integer")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"kind": "subagent_turn", "task_sha256": self.task_sha256,
+                "coordinate": self.coordinate.as_dict(), "external_turn": self.external_turn}
+
+    @property
+    def call_id(self) -> str:
+        return hashlib.sha256(json.dumps(self.as_dict(), sort_keys=True,
+                                         separators=(",", ":")).encode()).hexdigest()
+
+
+SpendCall = AnswerCall | SubagentTurnCall
+
+
+@dataclass(frozen=True)
+class SpendPlan:
+    calls: tuple[SpendCall, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.calls, tuple) or not all(isinstance(call, (AnswerCall, SubagentTurnCall)) for call in self.calls):
+            raise TypeError("spend plan requires a tuple of spend calls")
         if len({call.call_id for call in self.calls}) != len(self.calls):
             raise ValueError("spend plan contains duplicate call identities")
 
@@ -161,23 +188,23 @@ def price_measurement(policy: SpendPolicy, cost: Measurement[Money], *,
 
 @dataclass(frozen=True)
 class Planned:
-    call: AnswerCall
+    call: SpendCall
 
 
 @dataclass(frozen=True)
 class InFlight:
-    call: AnswerCall
+    call: SpendCall
 
 
 @dataclass(frozen=True)
 class Settled:
-    call: AnswerCall
+    call: SpendCall
     charge: Charge
 
 
 @dataclass(frozen=True)
 class Refused:
-    call: AnswerCall
+    call: SpendCall
     reason: SpendStopReason
 
 
@@ -287,9 +314,15 @@ class SpendLedger:
             if not isinstance(row, dict) or not isinstance(row.get("call"), dict):
                 raise TypeError("spend call must be an object")
             call_raw = row["call"]
-            if call_raw.get("kind") != "answer":
+            call: SpendCall
+            if call_raw.get("kind") == "answer":
+                call = AnswerCall(call_raw.get("task_sha256"), RunCoordinate.from_row(call_raw.get("coordinate")))
+            elif call_raw.get("kind") == "subagent_turn":
+                call = SubagentTurnCall(call_raw.get("task_sha256"),
+                                        RunCoordinate.from_row(call_raw.get("coordinate")),
+                                        call_raw.get("external_turn"))
+            else:
                 raise ValueError("unsupported spend call kind")
-            call = AnswerCall(call_raw.get("task_sha256"), RunCoordinate.from_row(call_raw.get("coordinate")))
             if call.call_id in states or row.get("call_id") != call.call_id:
                 raise ValueError("duplicate or mismatched spend call identity")
             state: CallState

@@ -39,4 +39,30 @@ The harness publishes `in_flight` before dispatch and publishes the charge befor
 
 Each publication flushes and syncs the file before atomic replacement, then syncs the directory where the platform supports it. File publication failures stop dispatch. An abrupt process kill or failed settlement publication can leave unresolved `in_flight` evidence. The ledger then reports partial spend. A raised callback exception retains an attempted, unpriced receipt, or a labeled assumption if one was supplied. Raised setup, provider, or pricing exceptions skip workspace capture. A settlement publication error also skips capture. Returned failure and timeout outcomes still capture workspace evidence before deletion.
 
-For capped batches, every selected task must be an ordinary native answer task. A recovery row anywhere in the batch rejects the command before provider calls or writes to the runs root. Uncapped recovery keeps its existing phase behavior. These flags apply only to the native serial answer commands. Subagent turns, judges, Jetty submissions, trigger matrices, and Pi trigger evaluations have their existing execution policies.
+For capped batches, every selected task must be an ordinary native answer task. A recovery row anywhere in the batch rejects the command before provider calls or writes to the runs root. Uncapped recovery keeps its existing phase behavior. The native rules above apply to the serial native answer commands. `run-subagent` has the external-turn rules below. Judges, Jetty submissions, trigger matrices, and Pi trigger evaluations keep their existing execution policies.
+
+## Subagent external turns
+
+`run-subagent` accepts the same ceiling and assumption flags. It admits each external backend callback, including each scripted turn. A provider's internal maximum turn setting stays within one callback.
+
+Use the prepared demo tasks above and create an offline JSON backend:
+
+```sh
+cat > /tmp/subagent-spend-demo.py <<'PYTHON'
+import json
+import sys
+
+json.load(sys.stdin)
+print(json.dumps({"answer": "demo answer", "usage": {"cost_usd": 0.03},
+                  "telemetry_scope": "turn_delta"}))
+PYTHON
+skill-benchmark run-subagent --tasks /tmp/spend-demo-tasks.jsonl \
+  --runs /tmp/subagent-spend-demo-runs \
+  --agent-cmd "python3 /tmp/subagent-spend-demo.py" --max-cost-usd 0.02
+```
+
+The first callback starts and records an observed $0.03 charge. Later required calls are refused, and the command exits 2. Each newly refused root has a failure body and false provider completeness. Refused calls have no process return code or provider turn directory. Inspect `spend_invocations` with `benchmark` or `cost-summary` as above, using `/tmp/subagent-spend-demo-runs`.
+
+For a scripted multi-turn task, the runner retains started turn artifacts, safe partial delta totals, replay data when recorded, and workspace edits. It publishes an incomplete conversation root when later required turns are refused. Multi-turn pricing requires explicit `turn_delta` scope. Cumulative or unspecified dollars remain diagnostic evidence and close later admission unless you supply an assumption. Assumptions do not become provider telemetry. Safe dollars survive failed process exits and rejected response schemas, and rejection diagnostics retain the raw envelope.
+
+A zero ceiling starts no callback. With no prior destination content, the runner publishes an incomplete terminal root. With any prior destination content, it preserves every existing file and records this invocation's refusals only in its new ledger. A new invocation does not claim the preserved old output as its own result. Capped recovery anywhere in the selected population rejects the whole batch before runs-root writes.

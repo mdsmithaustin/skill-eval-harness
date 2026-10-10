@@ -14,6 +14,8 @@ from spend_contracts import (
     Planned,
     Refused,
     Settled,
+    SpendCall,
+    SubagentTurnCall,
     UnpricedCall,
 )
 from spend_runtime import NotStarted, Priced, SpendAdmission, Started
@@ -36,7 +38,7 @@ def charge_precision(charge: Charge) -> None:
 
 
 def state_precision(state: CallState) -> None:
-    assert_type(state.call, AnswerCall)
+    assert_type(state.call, SpendCall)
     if isinstance(state, (Planned, InFlight, Refused)):
         return
     if isinstance(state, Settled):
@@ -45,12 +47,21 @@ def state_precision(state: CallState) -> None:
     unreachable(state)
 
 
-def admission_precision(admission: SpendAdmission, call: AnswerCall,
+def admission_precision(admission: SpendAdmission, call: SpendCall,
                         invoke: Callable[[], Priced[str]]) -> None:
     result = admission.run(call, invoke)
     assert_type(result, Started[str] | NotStarted)
     if isinstance(result, NotStarted):
-        assert_type(result.call, AnswerCall)
+        assert_type(result.call, SpendCall)
     else:
         assert_type(result.value, str)
     assert_type(invoke().cost, Measurement[Money])
+
+
+def call_precision(call: SpendCall) -> None:
+    if isinstance(call, SubagentTurnCall):
+        assert_type(call.external_turn, int)
+    elif isinstance(call, AnswerCall):
+        assert_type(call.task_sha256, str)
+    else:
+        unreachable(call)

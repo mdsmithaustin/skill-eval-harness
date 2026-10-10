@@ -121,7 +121,8 @@ class SubagentRunnerTests(unittest.TestCase):
             base = root / "runs" / "case-1" / "with_skill"
             self.assertIn(str(sb.CLAUDE_FAILURE), (base / "output.md").read_text(encoding="utf-8"))
             meta = json.loads((base / "metadata.json").read_text(encoding="utf-8"))
-            self.assertEqual(meta["returncode"], 1)
+            self.assertIsNone(meta["returncode"])
+            self.assertEqual(meta["artifact_terminal_state"], "response_rejected")
 
     def test_multiturn_commits_each_turn_and_sums_explicit_deltas(self):
         with tempfile.TemporaryDirectory() as td:

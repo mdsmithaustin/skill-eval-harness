@@ -115,6 +115,26 @@ def metadata_lifecycle_error(metadata: dict[str, Any] | None) -> str | None:
     timed_out = metadata.get("timed_out") is True or metadata.get("timeout") is True
     if timed_out and rc is not None and rc != 124:
         return "timed-out metadata must use returncode 124"
+    terminal = metadata.get("artifact_terminal_state")
+    if terminal is not None:
+        if terminal not in {"budget_stopped", "response_rejected"} or metadata.get("provider") != "subagent":
+            return "unsupported subagent terminal artifact"
+        if (rc is not None or timed_out or metadata.get("invocation_state") is not None
+                or metadata.get("process_observation_complete") is not False
+                or metadata.get("provider_response_complete") is not False
+                or metadata.get("observation_complete") is not False):
+            return "subagent terminal artifact contradicts process or provider evidence"
+        if terminal == "budget_stopped":
+            refused = metadata.get("subagent_refusals")
+            if not isinstance(refused, list) or not refused or any(
+                    not isinstance(row, dict) or row.get("state") != "not_started"
+                    for row in refused):
+                return "subagent budget terminal requires refused calls"
+            if metadata.get("subagent_rejection") is not None:
+                return "subagent budget terminal cannot claim an attempted rejection"
+        elif (not isinstance(metadata.get("subagent_rejection"), dict)
+              or metadata.get("subagent_refusals") is not None):
+            return "subagent rejected terminal requires attempted rejection evidence"
     return None
 
 

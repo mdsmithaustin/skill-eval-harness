@@ -394,7 +394,7 @@ runs/<case_id>/<variant>/run-1/workspace-changes.json  # what the model added, m
 runs/<case_id>/<variant>/run-1/candidate.patch         # text edits as one git patch, only when there are any
 runs/<case_id>/<variant>/run-1/candidate-files/<sha256> # content copies the patch cannot carry
 runs/answer-design.json                          # exact expected answer experiment and eval-contract digest
-runs/spend/<invocation-id>/spend-ceiling.json     # runtime admission ledger when a native answer ceiling is set
+runs/spend/<invocation-id>/spend-ceiling.json     # runtime admission ledger when a native answer or subagent ceiling is set
 ```
 
 Prepared `run-agent` rows can optionally carry a fixed [recovery case](docs/recovery.md).
@@ -402,7 +402,7 @@ Those rows retain one fixture across an intentional checkpoint stop, fresh recov
 They write `recovery.json` and raw process evidence rather than an ordinary answer grade.
 Completed phases establish runner capability, not provider eligibility or permission enforcement.
 
-Native answer commands accept `--max-cost-usd` and `--assumed-cost-per-run-usd` for a per-invocation admission ceiling. A zero ceiling starts no calls. Missing prices close later admission unless an explicit assumption applies. Capped batches reject every recovery row before any run starts. See [the native spend walkthrough](docs/limit-native-spend.md) for an offline example, refusal records, and report references.
+`run-agent`, `run-codex`, `run-claude`, and `run-subagent` accept `--max-cost-usd` and `--assumed-cost-per-run-usd` for a per-invocation admission ceiling. A zero ceiling starts no calls. Missing prices close later admission unless an explicit assumption applies. Capped batches reject every recovery row before any run starts. See [the native spend walkthrough](docs/limit-native-spend.md) for offline examples, refusal records, and report references. Subagent admission prices each external callback turn. A refused conversation root is incomplete. An invocation that starts no turn preserves any prior destination content.
 
 Ordinary answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
 temporary workspace and delete it afterwards. Before deletion they diff it against a copy taken
