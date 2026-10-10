@@ -1,4 +1,3 @@
-"""One invocation's immutable spend plan, receipts, and admission state."""
 from __future__ import annotations
 
 import hashlib

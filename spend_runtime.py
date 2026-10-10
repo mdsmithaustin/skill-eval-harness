@@ -1,4 +1,3 @@
-"""Serial admission and atomic snapshots for one exclusive invocation."""
 from __future__ import annotations
 
 import json

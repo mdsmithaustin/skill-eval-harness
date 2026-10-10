@@ -1,4 +1,3 @@
-"""Static precision checks for serial native spend admission."""
 from collections.abc import Callable
 from typing import Literal, NoReturn
 
