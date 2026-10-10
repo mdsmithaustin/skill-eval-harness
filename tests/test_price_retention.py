@@ -14,18 +14,23 @@ import skill_benchmark as sb
 
 class CapturedPriceTests(unittest.TestCase):
     def test_shared_claude_timeout_names_the_floor_and_judge_retains_it(self):
-        raw = b'{"type":"result","result":"candidate","total_cost_usd":0.06}'
-        with mock.patch("skill_benchmark.subprocess.run", side_effect=
-                        subprocess.TimeoutExpired("claude", 1, output=raw)):
+        process = sb.InvocationResult(
+            stdout='{"type":"result","result":"candidate","total_cost_usd":0.06}',
+            stderr="", returncode=124, elapsed_ms=1000,
+            stdout_utf8_valid=True, stderr_utf8_valid=True,
+            invocation_state=sb.InvocationState.TIMED_OUT, timed_out=True)
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(
+                sb, "run_argv_capture", return_value=process):
+            fixture_bin = str(Path(td) / "missing-fixture")
             result = sb.claude_cli_invoke("prompt", isolation=sb.ContextIsolation.SEALED,
-                                          timeout=1)
+                                          timeout=1, claude_bin=fixture_bin)
         self.assertIsNone(result["cost_usd"])
         self.assertEqual(result["observed_subtotal_usd"], 0.06)
         self.assertEqual(result["returncode"], 124)
         self.assertTrue(result["timed_out"])
         with mock.patch.object(sb, "claude_cli_invoke", return_value=result):
             invocation = sb.claude_judge_invoke(
-                "prompt", judge_model="fixture", claude_bin="claude",
+                "prompt", judge_model="fixture", claude_bin=fixture_bin,
                 assertion_schema={"type": "object"}, extra_args=None, explore_hint=None)
         self.assertIsNone(invocation.cost_usd)
         self.assertEqual(invocation.observed_subtotal_usd, 0.06)

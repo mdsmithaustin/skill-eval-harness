@@ -12,7 +12,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from helpers import attest_answer_design, make_eval_repo, result_row, run_cli, write_run
+from helpers import (
+    assert_dies,
+    attest_answer_design,
+    make_eval_repo,
+    result_row,
+    run_cli,
+    write_run,
+)
 
 import skill_benchmark as sb
 
@@ -830,7 +837,7 @@ class JudgePriceTests(unittest.TestCase):
         self.assertIsNone(report["total_cost_usd"])
 
     def test_zero_floor_is_evidence_and_missing_floor_is_not_zero(self):
-        row = sb.merge_repeated_judge_rows([self.floor(0), self.floor(0)])
+        row = sb.merge_repeated_judge_rows([self.floor(0.0), self.floor(0.0)])
         self.assert_partial(row, "0.0", 0, 2)
         absent = self.floor()
         absent.pop("observed_subtotal_usd")
@@ -856,35 +863,38 @@ class JudgePriceTests(unittest.TestCase):
         v3 = sb.telemetry_domain.Measurement.available(
             sb.telemetry_domain.Money.from_raw(0.06), provenance="provider_reported").to_dict()
         invalid = (
-            {"cost_usd": 0.06}, {"cost_usd": 0},
-            {"cost_normalized": {"source": "provider_reported", "total_cost": 0.06}},
-            {"telemetry": {"schema_version": 3, "measurements": {"cost": v3}}},
-            {"invocation_state": "process_failed"}, {"returncode": 0},
-            {"timed_out": False}, {"observed_subtotal_usd": True},
-            {"observed_subtotal_usd": 10 ** 400}, {"cost_availability": "complete"},
+            ({"cost_usd": 0.06}, "judge cost channels contradict"),
+            ({"cost_usd": 0}, "judge cost channels contradict"),
+            ({"cost_normalized": {"source": "provider_reported", "total_cost": 0.06}}, "judge full cost requires"),
+            ({"telemetry": {"schema_version": 3, "measurements": {"cost": v3}}}, "judge cost channels contradict"),
+            ({"invocation_state": "process_failed"}, "judge observed subtotal requires an actual timeout"),
+            ({"returncode": 0}, "judge observed subtotal requires an actual timeout"),
+            ({"timed_out": False}, "judge observed subtotal requires an actual timeout"),
+            ({"observed_subtotal_usd": True}, "judge observed subtotal must be finite"),
+            ({"observed_subtotal_usd": 10 ** 400}, "judge observed subtotal must be finite"),
+            ({"cost_availability": "complete"}, "judge observed subtotal requires partial"),
         )
-        for override in invalid:
+        for override, message in invalid:
             with self.subTest(override=override), tempfile.TemporaryDirectory() as td:
                 path = Path(td) / "judge.jsonl"
                 path.write_text(json.dumps({**self.floor(), **override}) + "\n")
-                with self.assertRaisesRegex(SystemExit, "judge.*cost|judge.*price|judge.*subtotal"):
-                    sb.load_judge_results(str(path))
+                assert_dies(self, lambda path=path: sb.load_judge_results(str(path)), message)
 
     def test_saved_parents_reject_stale_or_competing_price_projections(self):
         members = [self.floor(), self.floor(model="b")]
         parent = {"judge_task_id": members[0]["judge_task_id"], "passed": False,
                   "judge_runs": members}
         invalid = (
-            {"cost_usd": 0.12}, {"observed_subtotal_usd": 0.06},
-            {"cost_aggregate": {"USD": {"availability": "complete", "value": "0.12"}}},
-            {"judge_panel": members},
+            ({"cost_usd": 0.12}, "judge parent cost contradicts"),
+            ({"observed_subtotal_usd": 0.06}, "judge parent price cannot retain a member subtotal"),
+            ({"cost_aggregate": {"USD": {"availability": "complete", "value": "0.12"}}}, "judge parent cost aggregate contradicts"),
+            ({"judge_panel": members}, "judge price has competing membership"),
         )
-        for override in invalid:
+        for override, message in invalid:
             with self.subTest(override=override), tempfile.TemporaryDirectory() as td:
                 path = Path(td) / "judge.jsonl"
                 path.write_text(json.dumps({**parent, **override}) + "\n")
-                with self.assertRaisesRegex(SystemExit, "judge.*cost|judge.*price|judge.*membership"):
-                    sb.load_judge_results(str(path))
+                assert_dies(self, lambda path=path: sb.load_judge_results(str(path)), message)
         report = sb.judge_cost_block({"j": parent})
         self.assertEqual(report["known_total_cost_usd"], 0.12)
 
@@ -907,6 +917,71 @@ class JudgePriceTests(unittest.TestCase):
         self.assertEqual(report["total_cost_usd_availability"], "partial")
         self.assertEqual(report["known_total_cost_usd"], 0.06)
         self.assertEqual(report["total_cost_usd_aggregate"]["reason_counts"]["currency_mismatch"], 1)
+
+    def test_nested_diagnostics_do_not_supply_process_or_price_facts(self):
+        row = self.whole()
+        row["diagnostic"] = {"timed_out": True, "returncode": 124,
+                             "invocation_state": "timed_out", "observed_subtotal_usd": 99}
+        report = sb.judge_cost_block({"j": row})
+        self.assertEqual(report["total_cost_usd"], 0.03)
+        self.assertEqual(report["verdicts_with_cost"], 1)
+
+    def test_whole_scalar_normalized_and_v3_conflicts_are_rejected(self):
+        available = sb.telemetry_domain.Measurement.available(
+            sb.telemetry_domain.Money.from_raw(0.04), provenance="provider_reported").to_dict()
+        for override in (
+            {"cost_usd": 0.04},
+            {"cost_normalized": {"source": "missing"}},
+            {"telemetry": {"schema_version": 3, "measurements": {"cost": available}}},
+            {"invocation_state": "timed_out", "returncode": 124, "timed_out": True},
+            {"invocation_state": "spawn_failed", "returncode": 127},
+        ):
+            with self.subTest(override=override), self.assertRaisesRegex(ValueError, "judge.*cost"):
+                sb.judge_cost_block({"j": {**self.whole(), **override}})
+
+    def test_aggregate_overflow_is_rejected_before_numeric_projection(self):
+        for members in ([self.whole(1e308), self.whole(1e308, model="b")],
+                        [self.floor(1e308), self.floor(1e308, model="b")]):
+            with self.subTest(members=members), self.assertRaisesRegex(ValueError, "finite float"):
+                sb.merge_cross_judge_rows(members)
+
+    def test_incompatible_floor_basis_cannot_contribute_dollars(self):
+        row = self.floor()
+        row["billing_scope"] = "conversation"
+        report = sb.judge_cost_block({"j": row})
+        self.assertEqual(report["total_cost_usd_availability"], "unavailable")
+        self.assertNotIn("known_total_cost_usd", report)
+        self.assertEqual(report["total_cost_usd_aggregate"]["reason_counts"]["basis_mismatch"], 1)
+
+    def test_benchmark_and_cost_summary_commands_keep_saved_floor_totals(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = cost_repo(root, cases=[{
+                **ALPHA_CASE, "assertions": [{"type": "judge", "name": "j", "severity": "gate",
+                                             "rubric": ["The answer is useful."]}]}])
+            runs = root / "runs"
+            for variant in ("with_skill", "without_skill"):
+                write_run(runs / "c1" / variant, "alpha", metadata={"returncode": 0})
+            attest_answer_design(manifest, runs)
+            saved = root / "judge.jsonl"
+            saved.write_text(json.dumps(sb.merge_repeated_judge_rows([self.floor(), self.floor()])) + "\n")
+            benchmark = root / "benchmark.json"
+            summary = root / "summary.json"
+            code, _, stderr = run_cli("benchmark", manifest, "--runs", runs,
+                                      "--judge-results", saved, "--out", benchmark)
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(json.loads(benchmark.read_text())["availability"], "partial")
+            code, _, stderr = run_cli("cost-summary", "--manifest", manifest, "--runs", runs,
+                                      "--judge-results", saved, "--out", summary)
+            self.assertEqual(code, 0, stderr)
+            blocks = [json.loads(benchmark.read_text())["cost_summary"]["judge"],
+                      json.loads(summary.read_text())["judge"]]
+        for block in blocks:
+            self.assertEqual(block["billed_calls"], 2)
+            self.assertEqual(block["verdicts_with_cost"], 0)
+            self.assertEqual(block["total_cost_usd_availability"], "partial")
+            self.assertEqual(block["known_total_cost_usd"], 0.12)
+            self.assertIsNone(block["total_cost_usd"])
 
 
 if __name__ == "__main__":
