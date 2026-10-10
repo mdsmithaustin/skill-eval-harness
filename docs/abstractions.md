@@ -219,7 +219,7 @@ records the patch's SHA-256. Binary or non-UTF-8 content, paths git would have t
 modified text file whose before side exceeds 1 MiB are copied to `candidate-files/<sha256>`, and
 those content-addressed names keep model basenames such as `metadata.json` out of the run
 directory. Content past the 1 MiB per-file or 32 MiB per-run cap is `Omitted`. The capture runs
-for every outcome, including `TimedOut`, and never raises: a failure writes a `captured: false`
+for every returned outcome, including `TimedOut`. Handled I/O failures write a `captured: false`
 manifest with `capture_error` and the receipt still commits. Readers derive
 `workspace_changes_captured` and `workspace_changes_state` (`captured | partial | failed |
 invalid`) next to `artifact_set_complete`. The claim holds only for a complete artifact set whose
@@ -238,10 +238,10 @@ hashed paths are the paths an agent lists. The judge's explore-surface digest fr
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract for ordinary rows. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11661`), Claude (`run_claude:11938`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11719`), Claude (`run_claude:11997`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:14826`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4264` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:14886`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:4269` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -254,6 +254,10 @@ Recovery rows use the separate lifecycle described above. A backend therefore ca
 independently set timeout, return code, answer, and failure into a contradictory bag. The harness
 calls no model during default grading; it reads what the runner left behind. The explicit
 `--allow-scripts` and `--embed-cmd` modes may invoke caller-supplied external oracle subprocesses.
+
+`spend_contracts.py` owns an immutable native `AnswerCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` owns serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. Native runners retain workspace, subprocess, artifact, and recovery policy. Reports read each ledger without changing the immutable answer design. The [native spend walkthrough](limit-native-spend.md) describes the operator contract.
+
+The native answer loop lazily enters `captured_workspace` through an `ExitStack` inside the admitted callback. It returns the priced outcome and actual `WorkspaceAttestation` before workspace exit. `SpendAdmission.run` persists settlement before capture and cleanup, so later local errors preserve the charge. The writer consumes captured sidecars after workspace exit and before the changes directory closes. Exceptions from setup, invocation, pricing, or settlement skip capture while the workspace context cleans up. Returned failure, timeout, and spawn-failure outcomes still capture evidence.
 
 Before a native provider subprocess starts, `invocation_contracts.py` constructs one
 `ProcessInvocationPlan`: immutable argv, stdin, working directory, environment, a positive
@@ -434,7 +438,7 @@ by domain, difficulty, trigger type, and success goal. Case flags mark saturated
 flaky, and with-skill-failed cases, and `effect_estimates.ceiling_or_floor` separates the two
 ways a case stops discriminating: both arms always pass (ceiling) or both always fail (floor, which
 `suggest-cases` never offers for hardening). These flags, the leakage lint
-(`prompt_assertion_leakage_findings:958`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:963`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as
