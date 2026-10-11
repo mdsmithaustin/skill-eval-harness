@@ -7445,8 +7445,10 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                              "error": errno.errorcode.get(getattr(cleanup_exc, "errno", None), type(cleanup_exc).__name__)}
         if not leader_exited and group_cleanup.get("status") in {"unsupported", "warning"}:
             proc.kill()
+        drain_complete = False
         try:
             out, err = proc.communicate(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+            drain_complete = True
         except subprocess.TimeoutExpired as drain_exc:
             # A detached child can outlive the original group and keep the pipe
             # write ends open forever. Preserve the partial capture, close our
@@ -7473,7 +7475,8 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
             )
             group_cleanup = {**group_cleanup, "pipe_drain": pipe_action, "warning": pipe_warning}
         retain_raw(out or exc.stdout, err if err is not None else exc.stderr,
-                   proc.returncode, timed_out=not leader_exited)
+                   proc.returncode, timed_out=not leader_exited,
+                   communication_complete=drain_complete)
         stdout, stdout_utf8_valid = _wire_text(out or exc.stdout, redact_stdout)
         captured_stderr = err if err is not None else exc.stderr
         if not leader_exited:

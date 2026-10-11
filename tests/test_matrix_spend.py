@@ -128,7 +128,9 @@ class BoundedAdmissionTests(unittest.TestCase):
                         unknown_settled.set()
                 with mock.patch.object(admission, "_persist", side_effect=publish_settlement):
                     results = admission.bounded_map(population, invoke, workers=2)
-                self.assertEqual(started, ["0", "1", "4"])
+                self.assertEqual(sorted(started[:2]), ["0", "1"])
+                self.assertEqual(started[2:], ["4"])
+                self.assertEqual([value.call.query_id for value in results], ["0", "1", "2", "3", "4"])
                 self.assertEqual([type(value) for value in results],
                                  [Started, Started, NotStarted, NotStarted, Started])
                 self.assertEqual(admission.ledger.spent.amount, Money.from_raw("0.2").amount)
@@ -181,6 +183,30 @@ class BoundedAdmissionTests(unittest.TestCase):
 
 
 class RetainedEvidenceTests(unittest.TestCase):
+    def test_successful_final_pipe_drain_retains_complete_billing(self):
+        import subprocess
+
+        import skill_benchmark as benchmark
+        from invocation_contracts import ProcessInvocationPlan, RawProcessCapture
+        capture = RawProcessCapture()
+        stream = b'{"type":"result","total_cost_usd":0.6}\n'
+        process = mock.Mock(pid=12345, returncode=0)
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(["fixture"], 0.05, output=stream, stderr=b""),
+            (stream, b""),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            plan = ProcessInvocationPlan.from_values(
+                ["fixture"], input_text=None, cwd=td, timeout_s=5, raw_capture=capture)
+            with mock.patch.object(benchmark.subprocess, "Popen", return_value=process), \
+                    mock.patch.object(benchmark.os, "killpg", create=True):
+                benchmark.invoke_argv_with_timeout(plan)
+        self.assertTrue(capture.facts.communication_complete)
+        self.assertFalse(capture.facts.timed_out)
+        cost, floor = matrix._matrix_dollars("claude", matrix._raw_invocation(matrix._CellCapture(capture)))
+        self.assertEqual(str(cost.value.amount), "0.6")
+        self.assertIsNone(floor)
+
     def test_redactor_failure_retains_original_process_and_dollars(self):
         import sys
 
