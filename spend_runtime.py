@@ -5,7 +5,13 @@ import json
 import os
 import uuid
 from collections.abc import Callable, Iterator
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    CancelledError,
+    Future,
+    ThreadPoolExecutor,
+    wait,
+)
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -165,58 +171,79 @@ class SpendAdmission:
         results: dict[int, Started[T] | NotStarted | MatrixNotStarted | WorkerRaised] = {}
         active: dict[int, Future[Priced[T]]] = {}
         cursor = 0
-        fatal: BaseException | None = None
+        first_fatal: BaseException | None = None
         executor = ThreadPoolExecutor(max_workers=workers)
 
         def settle_ready(*, drain: bool = False) -> None:
-            nonlocal fatal
+            nonlocal first_fatal
             while True:
                 ready = [index for index, future in active.items() if drain or future.done()]
                 if not ready:
                     return
-                retained: list[tuple[int, T]] = []
+                outcomes: list[tuple[int, Priced[T] | BaseException]] = []
                 for index in sorted(ready):
                     cell = population.cells[index]
-                    future = active.pop(index)
+                    future = active[index]
                     try:
-                        priced = future.result()
-                    except Exception as exc:  # noqa: BLE001
-                        results[index] = WorkerRaised(cell.call, exc)
-                        priced = Priced(None, Measurement.unavailable("invocation_raised"))
-                    except BaseException as exc:  # noqa: BLE001
-                        fatal = fatal or exc
-                        results[index] = WorkerRaised(cell.call, exc)
-                        continue
+                        error = future.exception()
+                    except CancelledError as cancelled:
+                        error = cancelled
+                    if error is not None:
+                        active.pop(index)
+                        results[index] = WorkerRaised(cell.call, error)
+                        outcomes.append((index, error))
+                        if not isinstance(error, Exception) and first_fatal is None:
+                            first_fatal = error
                     else:
-                        fatal = fatal or priced.interruption
+                        priced = future.result()
+                        active.pop(index)
                         results[index] = Started(cell.call, priced.value)
-                        retained.append((index, priced.value))
-                    if self.ledger is not None and not cell.offline:
-                        charge = price_measurement(self.ledger.policy, priced.cost,
-                                                   observed_subtotal=priced.observed_subtotal,
-                                                   no_model_spend=priced.no_model_spend)
-                        self.ledger = self.ledger.transition(Settled(cell.call, charge))
-                if fatal is None:
+                        outcomes.append((index, priced))
+                        if first_fatal is None:
+                            first_fatal = priced.interruption
+                for index, outcome in outcomes:
+                    cell = population.cells[index]
+                    if self.ledger is None or cell.offline:
+                        continue
+                    if isinstance(outcome, Priced):
+                        charge = price_measurement(self.ledger.policy, outcome.cost,
+                                                   observed_subtotal=outcome.observed_subtotal,
+                                                   no_model_spend=outcome.no_model_spend)
+                    elif isinstance(outcome, Exception):
+                        charge = price_measurement(
+                            self.ledger.policy, Measurement.unavailable("invocation_raised"))
+                    else:
+                        continue
+                    self.ledger = self.ledger.transition(Settled(cell.call, charge))
+                if first_fatal is None:
                     self._persist()
                     if publish is not None:
-                        for index, value in retained:
-                            results[index] = Started(population.cells[index].call, publish(value))
+                        for index, outcome in outcomes:
+                            if isinstance(outcome, Priced):
+                                results[index] = Started(population.cells[index].call, publish(outcome.value))
                 if drain:
                     return
+
+        def partial_executions() -> tuple[Started[T] | NotStarted | MatrixNotStarted | WorkerRaised, ...]:
+            reason = (MatrixStopReason.INTERRUPTED if isinstance(first_fatal, KeyboardInterrupt)
+                      else MatrixStopReason.INFRASTRUCTURE_FAILED)
+            for index, cell in enumerate(population.cells):
+                results.setdefault(index, MatrixNotStarted(cell.call, reason))
+            return tuple(results[index] for index in range(len(population.cells)))
 
         try:
             while cursor < len(population.cells) or active:
                 if stopped():
                     raise KeyboardInterrupt
                 settle_ready()
-                if fatal is not None:
-                    raise fatal
+                if first_fatal is not None:
+                    raise first_fatal
                 while cursor < len(population.cells) and len(active) < workers:
                     settle_ready()
                     if stopped():
                         raise KeyboardInterrupt
-                    if fatal is not None:
-                        raise fatal
+                    if first_fatal is not None:
+                        raise first_fatal
                     cell = population.cells[cursor]
                     refusal = (self.ledger.settled_refusal
                                if self.ledger is not None and not cell.offline else None)
@@ -241,22 +268,24 @@ class SpendAdmission:
                     cursor += 1
                 if active:
                     wait(tuple(active.values()), timeout=0.05, return_when=FIRST_COMPLETED)
-        except BaseException as exc:  # noqa: BLE001
-            fatal = fatal or exc
+        except BaseException as controller_error:
+            cause = first_fatal if first_fatal is not None else controller_error
+            first_fatal = cause
             try:
                 settle_ready(drain=True)
-                if isinstance(fatal, KeyboardInterrupt):
+                if isinstance(cause, KeyboardInterrupt):
                     self._persist()
-            except BaseException as drain_error:  # noqa: BLE001
-                exc.__context__ = drain_error
+            except BaseException as drain_error:
+                if drain_error is not cause:
+                    if drain_error.__context__ is cause:
+                        drain_error.__context__ = None
+                    if drain_error.__cause__ is cause:
+                        drain_error.__cause__ = None
+                    cause.__context__ = drain_error
+                raise BoundedRunError(cause, partial_executions()) from drain_error
+            raise BoundedRunError(cause, partial_executions()) from controller_error
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
-        if fatal is not None:
-            reason = (MatrixStopReason.INTERRUPTED if isinstance(fatal, KeyboardInterrupt)
-                      else MatrixStopReason.INFRASTRUCTURE_FAILED)
-            for index, cell in enumerate(population.cells):
-                results.setdefault(index, MatrixNotStarted(cell.call, reason))
-            raise BoundedRunError(fatal, tuple(results[index] for index in range(len(population.cells))))
         return tuple(results[index] for index in range(len(population.cells)))
 
 

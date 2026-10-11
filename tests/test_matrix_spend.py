@@ -281,6 +281,56 @@ class BoundedAdmissionTests(unittest.TestCase):
                                  [InFlight, InFlight, InFlight])
                 published.assert_not_called()
 
+    def test_interrupted_future_inspection_keeps_the_paid_result_for_drain(self):
+        from concurrent.futures import Future
+
+        from spend_runtime import (
+            BoundedRunError,
+            MatrixNotStarted,
+            MatrixStopReason,
+            Priced,
+            SpendAdmission,
+            Started,
+        )
+        from telemetry import Measurement, Money
+        population = self.population()
+        interruption = KeyboardInterrupt("future inspection interrupted")
+        future = Future()
+        future.set_result(Priced("completed paid value", Measurement.available(
+            Money.from_raw("0.2"), provenance="provider_reported")))
+        with tempfile.TemporaryDirectory() as td:
+            with SpendAdmission.open(SpendPolicy.from_raw(1), population.paid_plan,
+                                     root=Path(td)) as admission:
+                with mock.patch("spend_runtime.ThreadPoolExecutor") as executor, \
+                        mock.patch.object(future, "exception", side_effect=[interruption, None]):
+                    executor.return_value.submit.return_value = future
+                    with self.assertRaises(BoundedRunError) as caught:
+                        admission.bounded_map(population, mock.Mock(), workers=1)
+                self.assertIs(caught.exception.cause, interruption)
+                self.assertIs(caught.exception.__cause__, interruption)
+                self.assertEqual(caught.exception.executions[0],
+                                 Started(population.cells[0].call, "completed paid value"))
+                self.assertEqual(caught.exception.executions[1:], tuple(
+                    MatrixNotStarted(cell.call, MatrixStopReason.INTERRUPTED) for cell in population.cells[1:]))
+                self.assertEqual(str(admission.ledger.spent.amount), "0.2")
+
+    def test_worker_cancellation_retains_its_error_and_settles_assumed_price(self):
+        from concurrent.futures import CancelledError
+
+        from spend_contracts import MatrixPopulation
+        from spend_runtime import Priced, SpendAdmission, WorkerRaised
+        population = MatrixPopulation(self.population().cells[:1])
+        worker_error = CancelledError("worker raised cancellation")
+        def invoke(call) -> Priced[str]:
+            raise worker_error
+        with tempfile.TemporaryDirectory() as td:
+            with SpendAdmission.open(SpendPolicy.from_raw(1, "0.2"), population.paid_plan,
+                                     root=Path(td)) as admission:
+                executions = admission.bounded_map(population, invoke, workers=1)
+                self.assertEqual(executions, (WorkerRaised(population.cells[0].call, worker_error),))
+                self.assertIs(executions[0].error, worker_error)
+                self.assertEqual(str(admission.ledger.spent.amount), "0.2")
+
     @unittest.skipIf(os.name == "nt", "requires supported POSIX directory sync")
     def test_supported_directory_sync_failure_is_fatal_but_unsupported_is_allowed(self):
         import errno
