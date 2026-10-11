@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from helpers import FakeJettyClient, jetty_payload, jetty_task_upload, run_cli
+from helpers import FakeJettyClient, attest_jetty_payload, jetty_payload, jetty_task_upload, run_cli
 
 import skill_benchmark as sb
 
@@ -32,6 +32,45 @@ class JettySpendTests(unittest.TestCase):
             self.assertEqual((client.upload_calls, client.submit_calls, client.poll_calls), (0, 0, 0))
             self.assertFalse(Path(str(out) + ".attempts.json").exists())
             self.assertFalse(Path(str(out) + ".spend").exists())
+
+    def test_attested_invalid_later_coordinate_or_path_prevents_remote_work(self):
+        cases = [
+            {"case_id": None},
+            {"case_id": ""},
+            {"variant": "bogus"},
+            {"run_number": 0},
+            {"run_number": True},
+            {"run_number": 1.0},
+            {"run_dir": "case-2/\x00"},
+            {"run_dir": "case-2/\nwith_skill"},
+            {"run_dir": "case-2/\x7fwith_skill"},
+        ]
+        for fields in cases:
+            with self.subTest(fields=fields), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                valid = jetty_payload(files=[jetty_task_upload()])
+                invalid = jetty_payload(harness={"case_id": "case-2", "run_dir": "case-2/with_skill", **fields})
+                out = root / "results.jsonl"
+                out.write_bytes(b"previous output\n")
+                client = FakeJettyClient()
+                with self.assertRaisesRegex(ValueError, "Jetty payload"):
+                    self.invoke(root, [valid, invalid], client)
+                self.assertEqual(out.read_bytes(), b"previous output\n")
+                self.assertEqual((client.upload_calls, client.submit_calls, client.poll_calls), (0, 0, 0))
+                self.assertFalse(Path(str(out) + ".attempts.json").exists())
+                self.assertFalse(Path(str(out) + ".spend").exists())
+
+    def test_null_model_and_normalized_output_path_remain_supported(self):
+        with tempfile.TemporaryDirectory() as td:
+            row = jetty_payload(harness={"run_dir": "case-1/./with_skill"})
+            row["jetty_request"]["model"] = None
+            attest_jetty_payload(row)
+            (code, _, stderr), out = self.invoke(Path(td), [row], FakeJettyClient())
+            self.assertEqual(code, 0, stderr)
+            [record] = sb.load_jsonl(out)
+            self.assertEqual(record["status"], "completed")
+            self.assertIsNone(record["jetty"]["model"])
+            self.assertEqual(record["harness"]["run_dir"], "case-1/./with_skill")
 
     def invoke(self, root, rows, client, *flags):
         payloads = root / "payloads.jsonl"
