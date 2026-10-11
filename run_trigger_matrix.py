@@ -1362,7 +1362,16 @@ def _matrix_dollars(agent: str, invocation: InvocationOutcome | None) -> tuple[M
     if invocation.metadata.get("stdout_utf8_valid") is False:
         return missing, None
     try:
-        records = [strict_json_loads(line) for line in invocation.stdout.splitlines() if line.strip()]
+        records = []
+        malformed = False
+        for line in invocation.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                records.append(strict_json_loads(line))
+            except (ValueError, TypeError):
+                malformed = True
+                break
         if not records or not all(isinstance(record, dict) for record in records):
             return missing, None
         final = False
@@ -1372,7 +1381,8 @@ def _matrix_dollars(agent: str, invocation: InvocationOutcome | None) -> tuple[M
             if terminal is None:
                 return missing, None
             amount = records[terminal].get("total_cost_usd")
-            final = not invocation.timed_out and invocation.metadata.get("billing_complete", True)
+            final = (not malformed and not invocation.timed_out
+                     and invocation.metadata.get("billing_complete", True))
         else:
             ends = [record for record in records if record.get("type") == "agent_end"]
             terminal = ends[-1] if ends else next((record for record in reversed(records)
@@ -1387,7 +1397,7 @@ def _matrix_dollars(agent: str, invocation: InvocationOutcome | None) -> tuple[M
             usage = message.get("usage")
             cost = usage.get("cost") if isinstance(usage, dict) else None
             amount = cost.get("total") if isinstance(cost, dict) else cost
-            final = (len(ends) == 1 and not invocation.timed_out
+            final = (not malformed and len(ends) == 1 and not invocation.timed_out
                      and invocation.metadata.get("billing_complete", True)
                      and message.get("stopReason") in {"stop", "length"})
             if ends and any(record.get("type") in {"agent_start", "message_start", "message_end", "turn_end", "agent_end"}

@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -104,18 +105,29 @@ class BoundedAdmissionTests(unittest.TestCase):
         from telemetry import Measurement, Money
         population = self.population(offline=(4,))
         started = []
+        unknown_settled = threading.Event()
         barrier = threading.Barrier(2, timeout=5)
         def invoke(call):
             started.append(call.query_id)
             if call.query_id in {"0", "1"}:
                 barrier.wait()
+            if call.query_id == "1" and not unknown_settled.wait(5):
+                raise TimeoutError("unknown settlement was not published")
             cost = (Measurement.unavailable("missing") if call.query_id == "0"
                     else Measurement.available(Money.from_raw("0.2"), provenance="provider_reported"))
             return Priced(call.query_id, cost)
         with tempfile.TemporaryDirectory() as td:
             with SpendAdmission.open(SpendPolicy.from_raw(1), population.paid_plan,
                                      root=Path(td)) as admission:
-                results = admission.bounded_map(population, invoke, workers=2)
+                persist = admission._persist
+                def publish_settlement():
+                    from spend_contracts import Settled, UnpricedCall
+                    persist()
+                    if any(isinstance(state, Settled) and isinstance(state.charge, UnpricedCall)
+                           for state in admission.ledger.states.values()):
+                        unknown_settled.set()
+                with mock.patch.object(admission, "_persist", side_effect=publish_settlement):
+                    results = admission.bounded_map(population, invoke, workers=2)
                 self.assertEqual(started, ["0", "1", "4"])
                 self.assertEqual([type(value) for value in results],
                                  [Started, Started, NotStarted, NotStarted, Started])
@@ -137,6 +149,7 @@ class BoundedAdmissionTests(unittest.TestCase):
                     self.assertIsInstance(caught.exception.cause, OSError)
                     invoke.assert_not_called()
 
+    @unittest.skipIf(os.name == "nt", "requires supported POSIX directory sync")
     def test_supported_directory_sync_failure_is_fatal_but_unsupported_is_allowed(self):
         import errno
         import os
@@ -199,6 +212,15 @@ class RetainedEvidenceTests(unittest.TestCase):
         cost, floor = matrix._matrix_dollars("codex", invocation)
         self.assertIsNone(cost.value)
         self.assertIsNone(floor)
+
+    def test_timeout_keeps_a_safe_prefix_floor_before_a_truncated_record(self):
+        from trigger_contracts import InvocationOutcome
+        invocation = InvocationOutcome.from_timeout(
+            stdout='{"type":"result","total_cost_usd":0.6}\n{"type":',
+            stderr="", elapsed_ms=1)
+        cost, floor = matrix._matrix_dollars("claude", invocation)
+        self.assertIsNone(cost.value)
+        self.assertEqual(str(floor.amount), "0.6")
 
     def test_not_started_and_failure_rows_round_trip_with_full_denominator(self):
         from trigger_contracts import (
