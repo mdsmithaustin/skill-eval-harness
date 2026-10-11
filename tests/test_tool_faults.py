@@ -56,6 +56,44 @@ class ToolFaultPreparationTests(unittest.TestCase):
             self.assertEqual(sb.ToolReplayStore.call_key("search", {"q": "alpha"}), "248fdf6c9c2e1efc704cd7525d030943")
 
 
+class LegacyToolAssertionTests(unittest.TestCase):
+    def test_saved_count_accepts_value_alias(self):
+        import skill_benchmark as sb
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            sb.write_json(base / "events.json", {"schema_version": 2, "events": [{
+                "type": "tool_call", "name": "search", "status": "completed",
+            }]})
+            self.assertEqual(sb.process_or_efficiency_assertion_result(
+                {"type": "tool_count_le", "max": 1}, base, {})[0], True)
+            self.assertEqual(sb.process_or_efficiency_assertion_result(
+                {"type": "tool_count_le", "value": 1}, base, {})[0], True)
+
+    def test_error_filter_requires_all_selected_named_and_command_errors(self):
+        import skill_benchmark as sb
+        for tool, event_type, event_name in (("search", "tool_call", "search"),
+                                           ("bash", "command", "")):
+            with self.subTest(tool=tool), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                known = {"type": event_type, "status": "completed", "command": "known",
+                         "is_error": False}
+                rejected = {**known, "command": "rejected", "is_error": True}
+                unknown = {"type": event_type, "status": "completed", "command": "unknown"}
+                if event_name:
+                    known["name"] = rejected["name"] = unknown["name"] = event_name
+                assertion = {"type": "tool_call", "tool": tool, "is_error": False,
+                             "min_count": 1, "max_count": 1}
+                sb.write_json(base / "events.json", {"schema_version": 2, "events": [known, rejected]})
+                self.assertEqual(sb.process_or_efficiency_assertion_result(assertion, base, {})[0], True)
+                sb.write_json(base / "events.json", {"schema_version": 2, "events": [known, unknown]})
+                self.assertEqual(sb.process_or_efficiency_assertion_result(assertion, base, {}),
+                                 (None, "delivered_error_unavailable"))
+                sb.write_json(base / "events.json", {"schema_version": 2, "events": [known, {
+                    "type": "tool_call", "name": "other", "status": "completed",
+                }]})
+                self.assertEqual(sb.process_or_efficiency_assertion_result(assertion, base, {})[0], True)
+
+
 class DirectCallableFaultTests(unittest.TestCase):
     def prepare(self, root, *, faults=None, turns=False, repeats=1):
         import skill_benchmark as sb
@@ -69,6 +107,27 @@ class DirectCallableFaultTests(unittest.TestCase):
         manifest = make_eval_repo(root, cases=[case])
         rows = sb.prepared_task_rows(manifest, sb.validate_manifest(manifest), runs_per_variant=repeats, models=["fixture"])
         return manifest, rows
+
+    def test_saved_closed_count_accepts_validated_value_alias(self):
+        import skill_benchmark as sb
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = make_eval_repo(root, cases=[{
+                "id": "c", "split": "tune", "prompt": "Return alpha.",
+                "assertions": [{"name": "limit", "type": "tool_count_le", "value": 1}],
+                "tool_faults": [{"tool": "search", "output": "found"}],
+            }])
+            rows = sb.prepared_task_rows(manifest, sb.validate_manifest(manifest))
+            def callback(*, tool_executor, **kwargs):
+                self.assertEqual(tool_executor("search", {}), "found")
+                return {"answer": "alpha"}
+            runs = root / "runs"
+            self.assertEqual(sb.run_subagent_tasks(rows, runs, callback, replay_mode="strict"), 0)
+            base = runs / rows[0]["run_dir"]
+            self.assertEqual(sb.process_or_efficiency_assertion_result(
+                {"type": "tool_count_le", "max": 1}, base, {})[0], True)
+            self.assertEqual(sb.process_or_efficiency_assertion_result(
+                {"type": "tool_count_le", "value": 1}, base, {})[0], True)
 
     def test_direct_callback_budgets_reset_and_saved_error_is_unavailable(self):
         import skill_benchmark as sb
