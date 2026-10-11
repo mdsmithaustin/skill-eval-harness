@@ -44,6 +44,32 @@ class BridgeCliBoundaryTests(unittest.TestCase):
 
 
 class BridgeObservationTests(unittest.TestCase):
+    def test_direct_unreaped_handoff_retains_price_floor_and_interruption(self):
+        from unittest import mock
+
+        identity = {"task_sha256": "sha256:" + "a" * 64, "case_input_sha256": "sha256:" + "b" * 64,
+                    "run": {"case_id": "c", "variant": "with_skill", "run_number": 1,
+                            "model": None, "population": "answer"},
+                    "faults": [], "expected_turns": 1, "route": "offline_bridge"}
+        interruption = KeyboardInterrupt()
+        facts = sb._BridgeProcessFacts(123, None, False, False, "fixture_unresolved", True,
+                                       False, False, True, 0, 0)
+        attempt = sb._BridgeStoppedAttempt(sb.InvocationOutcome.harness_failed("fixture unreaped"),
+            {"type": "final", "protocol_version": 1, "answer": "alpha", "usage": {"cost_usd": 0.02},
+             "telemetry_scope": "turn_delta"}, "fixture unreaped", interruption, facts)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            journal = sb._ToolReceiptJournal(root / "observations" / "journal.jsonl", identity,
+                sb.ToolReplayStore(root / "replay.json", "strict"), {})
+            backend = sb._ToolBridgeBackend((sys.executable,), 1, sb._BridgeLimits())
+            with mock.patch("skill_benchmark._invoke_tool_dialogue", return_value=attempt):
+                priced = sb._invoke_paid_subagent(backend, requires_delta=True, journal=journal,
+                    prompt="alpha", workspace=root, model=None, tool_executor=None)
+            self.assertIs(priced.value.evidence.bridge_process, facts)
+            self.assertIs(journal.interruption, interruption)
+            self.assertIsNone(priced.cost.value)
+            self.assertEqual(str(priced.observed_subtotal.amount), "0.02")
+
     def test_over_frame_scalar_is_rejected_before_encoder_entry(self):
         from unittest import mock
 
