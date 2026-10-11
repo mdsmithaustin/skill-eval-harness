@@ -264,6 +264,8 @@ from text_contracts import (
     ComparisonProfile,
     ComparisonText,
     LiteralKind,
+    LiteralPresentationHypothesis,
+    LiteralPresentationUnavailable,
     LiteralTextAssertion,
     MatchObservation,
     RegexEvaluationUnavailable,
@@ -17215,7 +17217,8 @@ def first_failure(result: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def error_analysis_report(report: dict[str, Any], *, limit: int = 100,
-                          feedback: list[HumanJudgement] | None = None) -> dict[str, Any]:
+                          feedback: list[HumanJudgement] | None = None,
+                          review_diagnostics: bool = False) -> dict[str, Any]:
     """Feature 8: open-coding review queue + axial failure taxonomy over a
     benchmark report (model-free). The queue is one row per failing/errored run
     anchored on its first failure (the 'look at your data' substrate); the
@@ -17281,7 +17284,7 @@ def error_analysis_report(report: dict[str, Any], *, limit: int = 100,
         "review_queue_truncated": max(0, total - limit),
     }
     if report.get("availability") != "complete" or blocked:
-        return {
+        out = {
             "availability": "partial",
             "reason": "source benchmark or grading evidence is incomplete",
             "summary": {"failing_or_errored_runs": None,
@@ -17291,7 +17294,11 @@ def error_analysis_report(report: dict[str, Any], *, limit: int = 100,
             "blocked_runs": blocked,
             "observed": observed,
         }
-    return {"availability": "complete", **observed}
+    else:
+        out = {"availability": "complete", **observed}
+    if review_diagnostics:
+        out["diagnostic_review"] = _diagnostic_review_queue(report, limit)
+    return out
 
 
 def error_analysis_command(args: argparse.Namespace) -> int:
@@ -17301,7 +17308,7 @@ def error_analysis_command(args: argparse.Namespace) -> int:
         feedback = read_feedback(Path(feedback_path)) if feedback_path else None
     except ValueError as exc:
         die(str(exc))
-    out = error_analysis_report(report, limit=int(getattr(args, "limit", 100)), feedback=feedback)
+    out = error_analysis_report(report, limit=int(getattr(args, "limit", 100)), feedback=feedback, review_diagnostics=args.review_diagnostics)
     emit_report(out, getattr(args, "out", None))
     return 0
 
@@ -20132,7 +20139,13 @@ def variant_summary_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def answer_design_coverage(
+@_dataclass(frozen=True)
+class _AnswerDesignCoverage:
+    summary: dict[str, Any]
+    planned: tuple[str, ...] = ()
+
+
+def _answer_design_coverage(
     runs: Path,
     results: list[dict[str, Any]],
     *,
@@ -20140,16 +20153,16 @@ def answer_design_coverage(
     manifest_path: Path | None = None,
     case_ids: Iterable[str] | None = None,
     variants: Iterable[str] | None = None,
-) -> dict[str, Any]:
+) -> _AnswerDesignCoverage:
     path = runs / ANSWER_DESIGN_NAME
     if not path.is_file():
-        return {"availability": "unverified", "complete": False,
-                "reason": f"missing {ANSWER_DESIGN_NAME}"}
+        return _AnswerDesignCoverage({"availability": "unverified", "complete": False,
+                "reason": f"missing {ANSWER_DESIGN_NAME}"})
     try:
         design = validate_answer_design(strict_json_loads(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        return {"availability": "invalid", "complete": False,
-                "reason": str(exc)}
+        return _AnswerDesignCoverage({"availability": "invalid", "complete": False,
+                "reason": str(exc)})
     requested_cases = set(case_ids) if case_ids is not None else None
     requested_variants = set(variants) if variants is not None else None
     scoped_identities = [
@@ -20321,13 +20334,23 @@ def answer_design_coverage(
     extra = sorted(set(observed) - set(expected))
     errors = [*design_errors, *errors]
     complete = not missing and not extra and not errors
-    return {
+    return _AnswerDesignCoverage({
         "availability": "complete" if complete else "partial",
         "complete": complete, "design_sha256": design["design_sha256"],
         "expected_runs": len(expected), "observed_runs": len(observed),
         "missing_run_dirs": missing, "extra_run_dirs": extra,
         "attestation_errors": errors,
-    }
+    }, tuple(json.dumps(row, sort_keys=True) for row in scoped_identities))
+
+
+def answer_design_coverage(
+    runs: Path, results: list[dict[str, Any]], *,
+    manifest: dict[str, Any] | None = None, manifest_path: Path | None = None,
+    case_ids: Iterable[str] | None = None, variants: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    return _answer_design_coverage(
+        runs, results, manifest=manifest, manifest_path=manifest_path,
+        case_ids=case_ids, variants=variants).summary
 
 
 def invalidate_report_pairing(block: dict[str, Any], reason: str, *,
@@ -20535,6 +20558,490 @@ def grading_options(args: argparse.Namespace) -> dict[str, Any]:
             "embed_cmd": getattr(args, "embed_cmd", None)}
 
 
+@_dataclass(frozen=True)
+class _ReviewAssertion:
+    case_id: str
+    turn: int | None
+    ordinal: int
+    definition_json: str
+    name: str
+    assertion_type: str
+    severity: str
+    oracle: str
+
+    @property
+    def identity(self) -> str:
+        return canonical_json_sha256(self.to_row())
+
+    def to_row(self) -> dict[str, Any]:
+        return {"case_id": self.case_id, "turn": self.turn, "ordinal": self.ordinal,
+                "definition": json.loads(self.definition_json),
+                "definition_sha256": canonical_json_sha256(json.loads(self.definition_json)),
+                "name": self.name, "type": self.assertion_type,
+                "severity": self.severity, "oracle": self.oracle}
+
+
+@_dataclass(frozen=True)
+class _ReviewRun:
+    coordinate: RunCoordinate
+    run_dir: str
+    run_base: str
+    treatment: str | None
+    task_sha256: str
+    source_sha256: str | None
+
+    @property
+    def identity(self) -> str:
+        return _report_attempt_identity(self.to_row())
+
+    def to_row(self) -> dict[str, Any]:
+        return {"case_id": str(self.coordinate.case_id),
+                "model": None if self.coordinate.model is None else str(self.coordinate.model),
+                "variant": str(self.coordinate.variant), "run_number": int(self.coordinate.run_number),
+                "run_dir": self.run_dir, "run_base": self.run_base,
+                "treatment": self.treatment, "task_sha256": self.task_sha256,
+                "source_sha256": self.source_sha256}
+
+
+@_dataclass(frozen=True)
+class _NeverPasses:
+    assertion: _ReviewAssertion
+    runs: tuple[_ReviewRun, ...]
+    effort_verified: bool
+
+
+@_dataclass(frozen=True)
+class _FormatNearMiss:
+    assertion: _ReviewAssertion
+    run: _ReviewRun
+    hypothesis: LiteralPresentationHypothesis
+
+
+@_dataclass(frozen=True)
+class _OracleDisagreement:
+    assertion: _ReviewAssertion
+    run: _ReviewRun
+    judge: _ReviewAssertion
+    judge_task_id: str
+
+
+_ReviewLead = _NeverPasses | _FormatNearMiss | _OracleDisagreement
+
+
+@_dataclass(frozen=True)
+class _ReviewComplete:
+    leads: tuple[_ReviewLead, ...]
+
+
+@_dataclass(frozen=True)
+class _ReviewUnavailable:
+    reasons: tuple[str, ...]
+    observed: tuple[_ReviewLead, ...] = ()
+
+
+@_dataclass(frozen=True)
+class _ReviewNotApplicable:
+    reason: str
+
+
+_ReviewState = _ReviewComplete | _ReviewUnavailable | _ReviewNotApplicable
+
+
+@_dataclass(frozen=True)
+class _ReviewPopulation:
+    planned: tuple[_ReviewRun, ...]
+    admitted: tuple[str, ...]
+    missing: tuple[str, ...]
+    extra: tuple[str, ...]
+    duplicates: tuple[str, ...]
+
+    def to_row(self) -> dict[str, Any]:
+        return {"evidence_class": "diagnostic", "planned": [run.to_row() for run in self.planned],
+                "admitted": list(self.admitted), "missing": list(self.missing),
+                "extra": list(self.extra), "duplicates": list(self.duplicates)}
+
+
+def _review_basis(report: Mapping[str, Any]) -> str:
+    fields = ("case_id", "model", "variant", "run_number", "run_base", "missing_output",
+              "execution_valid", "grading_availability", "stop_class", "unscorable_reason",
+              "effort", "metadata", "turns", "assertions", "qualitative_assertions", "deferred_judge_tasks")
+    return canonical_json_sha256({
+        "availability": report.get("availability"), "population": report.get("population"),
+        "answer_design": report.get("answer_design"),
+        "results": [{key: row.get(key) for key in fields} for row in report.get("results", [])]})
+
+
+def _review_assertions(case: dict[str, Any], variant: str, strict: bool) -> tuple[_ReviewAssertion, ...]:
+    refs = []
+    units = [(None, case.get("assertions", []))] + [
+        (turn, spec.get("assertions", [])) for turn, spec in enumerate(case.get("turns") or [], 1)]
+    for turn, declarations in units:
+        for ordinal, assertion in enumerate(declarations):
+            if not assertion_applies_to_variant(assertion, variant):
+                continue
+            expanded = expand_judge_preset(assertion) if assertion["type"] in QUALITATIVE_ASSERTIONS else assertion
+            name = assertion_label(expanded)
+            if turn is not None:
+                name = f"turn-{turn}: {name}"
+            severity = assertion_severity(assertion, strict=strict)
+            tier = oracle_tier(assertion)
+            definition = {"declared": assertion, "expanded": expanded,
+                          "resolved_severity": severity, "resolved_oracle": tier}
+            refs.append(_ReviewAssertion(case["id"], turn, ordinal,
+                                         json.dumps(definition, sort_keys=True), name,
+                                         assertion["type"], severity, tier))
+    return tuple(refs)
+
+
+def _review_matching_row(ref: _ReviewAssertion, result: Mapping[str, Any]) -> dict[str, Any] | None:
+    rows = result.get("qualitative_assertions" if ref.assertion_type in QUALITATIVE_ASSERTIONS else "assertions", [])
+    matches = [row for row in rows if row.get("name") == ref.name
+               and row.get("type") == ref.assertion_type and row.get("turn") == ref.turn
+               and row.get("severity") == ref.severity and row.get("oracle") == ref.oracle]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _review_eligible(result: Mapping[str, Any]) -> bool:
+    return _report_row_eligibility(result)[0] is True and result.get("stop_class") != StopClass.REFUSED.value
+
+
+def _review_lead_row(lead: _ReviewLead) -> dict[str, Any]:
+    row: dict[str, Any] = {"evidence_class": "diagnostic", "assertion": lead.assertion.identity}
+    if isinstance(lead, _NeverPasses):
+        return {**row, "signal": "never_passes", "runs": [run.identity for run in lead.runs],
+                "effort_verified": lead.effort_verified, "observational": True}
+    row["runs"] = [lead.run.identity]
+    if isinstance(lead, _OracleDisagreement):
+        return {**row, "signal": "oracle_disagreement", "judge_assertion": lead.judge.identity,
+                "judge_task_id": lead.judge_task_id}
+    hypothesis = lead.hypothesis
+    return {**row, "signal": "format_near_miss", "hypothesis": {
+        "evidence_class": "diagnostic", "transform": hypothesis.transform,
+        "original_passed": hypothesis.original_passed, "hypothetical_passed": hypothesis.hypothetical_passed,
+        "candidate_before_sha256": hypothesis.candidate_before_sha256,
+        "candidate_after_sha256": hypothesis.candidate_after_sha256,
+        "original_operands": list(hypothesis.original_operands),
+        "hypothetical_operands": list(hypothesis.hypothetical_operands),
+        "case_insensitive": hypothesis.case_insensitive, "comparison": hypothesis.comparison.value}}
+
+
+def _review_state_row(state: _ReviewState) -> dict[str, Any]:
+    row: dict[str, Any] = {"evidence_class": "diagnostic"}
+    if isinstance(state, _ReviewNotApplicable):
+        return {**row, "availability": "not_applicable", "reason": state.reason}
+    if isinstance(state, _ReviewUnavailable):
+        return {**row, "availability": "unavailable", "reasons": list(state.reasons),
+                "observed": {"evidence_class": "diagnostic", "leads": [_review_lead_row(lead) for lead in state.observed]}}
+    return {**row, "availability": "complete", "leads": [_review_lead_row(lead) for lead in state.leads]}
+
+
+def _verifier_review(report: dict[str, Any], cases: list[dict[str, Any]],
+                     plan: tuple[str, ...], runs: Path,
+                     sources: Mapping[RunCoordinate, str | None], strict: bool) -> dict[str, Any]:
+    results = report["results"]
+    by_identity: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        by_identity.setdefault(_report_attempt_identity(result), []).append(result)
+    planned = tuple(sorted((
+        _ReviewRun(RunCoordinate.from_row(row), row["run_dir"], str(runs / row["run_dir"]),
+                   row["planned_skill_tree_hash"], row["task_sha256"],
+                   None if sources.get(RunCoordinate.from_row(row)) is None else
+                   "sha256:" + hashlib.sha256(str(sources[RunCoordinate.from_row(row)]).encode("utf-8")).hexdigest())
+        for row in (json.loads(value) for value in plan)), key=lambda run: run.coordinate.key))
+    expected = {run.identity: run for run in planned}
+    coverage = report["answer_design"]
+    errors = coverage.get("attestation_errors", [])
+    design_blocked = any("run_dir" not in error for error in errors)
+    bad_paths = {error.get("run_dir") for error in errors}
+    admitted = tuple(run.identity for run in planned
+                     if not design_blocked and run.run_dir not in bad_paths
+                     and len(by_identity.get(run.identity, [])) == 1
+                     and by_identity[run.identity][0].get("run_base") == run.run_base
+                     and _review_eligible(by_identity[run.identity][0]))
+    population = _ReviewPopulation(planned, admitted,
+        tuple(sorted(set(expected) - set(by_identity))), tuple(sorted(set(by_identity) - set(expected))),
+        tuple(sorted(key for key, rows in by_identity.items() if len(rows) != 1)))
+    reasons = [] if report["availability"] == "complete" else ["source_report_incomplete"]
+    if not plan:
+        reasons.append("answer_design_unverified")
+    if len(admitted) != len(planned) or population.extra or population.duplicates:
+        reasons.append("population_incomplete")
+    case_lookup = {case["id"]: case for case in cases}
+    definitions: dict[str, _ReviewAssertion] = {}
+    leads: list[_ReviewLead] = []
+    cohorts: dict[tuple[str, str, str, str | None, str], list[_ReviewRun]] = {}
+    for run in planned:
+        case = case_lookup[str(run.coordinate.case_id)]
+        refs = _review_assertions(case, str(run.coordinate.variant), strict)
+        join_counts = collections.Counter((ref.name, ref.assertion_type, ref.turn) for ref in refs)
+        for ref in refs:
+            definitions[ref.identity] = ref
+            cohorts.setdefault((ref.case_id, str(run.coordinate.model or ""), str(run.coordinate.variant),
+                                run.treatment, ref.identity), []).append(run)
+            if run.identity not in admitted:
+                continue
+            result = by_identity[run.identity][0]
+            row = _review_matching_row(ref, result)
+            if join_counts[(ref.name, ref.assertion_type, ref.turn)] != 1 or row is None:
+                reasons.append("assertion_identity_unavailable")
+                continue
+            observation = assertion_observation_from_row(row)
+            if not isinstance(observation, FailedAssertion):
+                continue
+            if ref.assertion_type in {"contains", "contains_any", "contains_all"}:
+                source = sources.get(run.coordinate)
+                if case.get("turns") or source is None:
+                    reasons.append("source_text_unavailable")
+                else:
+                    literal = LiteralTextAssertion.from_wire(json.loads(ref.definition_json)["declared"])
+                    hypothesis = literal.presentation_hypothesis(source)
+                    if isinstance(hypothesis, LiteralPresentationUnavailable):
+                        reasons.append(hypothesis.reason)
+                    elif hypothesis is not None:
+                        leads.append(_FormatNearMiss(ref, run, hypothesis))
+            if ((ref.assertion_type not in QUALITATIVE_ASSERTIONS and ref.severity == "gate")
+                    or ref.severity == "critical"):
+                for judge in refs:
+                    if judge.assertion_type not in QUALITATIVE_ASSERTIONS or judge.turn != ref.turn:
+                        continue
+                    judged = _review_matching_row(judge, result)
+                    if (join_counts[(judge.name, judge.assertion_type, judge.turn)] == 1
+                            and judged is not None and isinstance(assertion_observation_from_row(judged), SatisfiedAssertion)
+                            and judged.get("judge_task_id") == run.coordinate.judge_task_id(judge.name)):
+                        leads.append(_OracleDisagreement(ref, run, judge, judged["judge_task_id"]))
+    for key, cohort in cohorts.items():
+        ref = definitions[key[-1]]
+        if ref.assertion_type in QUALITATIVE_ASSERTIONS:
+            continue
+        if any(run.identity not in admitted for run in cohort):
+            continue
+        rows = [by_identity[run.identity][0] for run in cohort]
+        providers = {row.get("metadata", {}).get("provider") for row in rows}
+        efforts = {effort_identity(row) for row in rows}
+        if len(providers) != 1 or len(efforts - {None, "backend_default"}) > 1:
+            reasons.append("cohort_settings_mismatch")
+            continue
+        observations = [_review_matching_row(ref, row) for row in rows]
+        if any(row is None or not isinstance(assertion_observation_from_row(row), (SatisfiedAssertion, FailedAssertion)) for row in observations):
+            reasons.append("assertion_observation_incomplete")
+            continue
+        if (report["availability"] == "complete" and len(cohort) >= 2
+                and all(isinstance(assertion_observation_from_row(row), FailedAssertion) for row in observations if row is not None)
+                and not any(reason == "assertion_identity_unavailable" for reason in reasons)):
+            leads.append(_NeverPasses(ref, tuple(cohort), len(efforts) == 1 and not bool(efforts & {None, "backend_default"})))
+    state: _ReviewState = (_ReviewUnavailable(tuple(sorted(set(reasons))),
+                             tuple(lead for lead in leads if not isinstance(lead, _NeverPasses))) if reasons
+                          else _ReviewComplete(tuple(leads)))
+    return {**_review_state_row(state), "schema_version": 1, "basis_sha256": _review_basis(report),
+            "design_sha256": coverage.get("design_sha256"),
+            "assertions": {key: ref.to_row() for key, ref in sorted(definitions.items())},
+            "population": population.to_row()}
+
+
+def _read_verifier_review(report: dict[str, Any]) -> dict[str, Any]:
+    raw = report.get("verifier_review")
+    if raw is None:
+        return _review_state_row(_ReviewNotApplicable("diagnostics_not_requested"))
+    try:
+        if not isinstance(raw, dict):
+            raise TypeError("diagnostics must be an object")
+        availability = raw.get("availability")
+        state_fields = {"leads"} if availability == "complete" else {"reasons", "observed"}
+        if (set(raw) != {"evidence_class", "availability", "schema_version", "basis_sha256",
+                         "design_sha256", "assertions", "population"} | state_fields
+                or raw["evidence_class"] != "diagnostic" or type(raw["schema_version"]) is not int
+                or raw["schema_version"] != 1 or availability not in {"complete", "unavailable"}
+                or raw["basis_sha256"] != _review_basis(report)
+                or raw["design_sha256"] != report.get("answer_design", {}).get("design_sha256")):
+            raise ValueError("invalid diagnostic envelope or stale source basis")
+        refs: dict[str, _ReviewAssertion] = {}
+        for identity, value in string_keyed_dict(raw["assertions"], "diagnostic assertions").items():
+            if (not isinstance(value, dict) or set(value) != {"case_id", "turn", "ordinal", "definition",
+                    "definition_sha256", "name", "type", "severity", "oracle"}
+                    or type(value["ordinal"]) is not int or value["ordinal"] < 0
+                    or value["turn"] is not None and (type(value["turn"]) is not int or value["turn"] < 1)):
+                raise ValueError("invalid assertion reference")
+            definition = value["definition"]
+            if (not isinstance(definition, dict) or set(definition) != {"declared", "expanded", "resolved_severity", "resolved_oracle"}
+                    or definition["declared"].get("type") != value["type"]
+                    or definition["resolved_severity"] != value["severity"]
+                    or definition["resolved_oracle"] != value["oracle"]
+                    or value["definition_sha256"] != canonical_json_sha256(definition)):
+                raise ValueError("invalid assertion definition")
+            declared = definition["declared"]
+            expanded = expand_judge_preset(declared) if value["type"] in QUALITATIVE_ASSERTIONS else declared
+            name = assertion_label(expanded)
+            if value["turn"] is not None:
+                name = f"turn-{value['turn']}: {name}"
+            if (definition["expanded"] != expanded or value["name"] != name
+                    or value["severity"] not in {assertion_severity(declared), assertion_severity(declared, strict=True)}
+                    or value["oracle"] != oracle_tier(declared)):
+                raise ValueError("assertion policy or label mismatch")
+            ref = _ReviewAssertion(str(CaseId.parse(value["case_id"])), value["turn"], value["ordinal"],
+                                   json.dumps(definition, sort_keys=True), name,
+                                   value["type"], value["severity"], value["oracle"])
+            if identity != ref.identity:
+                raise ValueError("assertion identity mismatch")
+            refs[identity] = ref
+        population = raw["population"]
+        if (not isinstance(population, dict) or set(population) != {"evidence_class", "planned", "admitted", "missing", "extra", "duplicates"}
+                or population["evidence_class"] != "diagnostic" or not isinstance(population["planned"], list)):
+            raise ValueError("invalid diagnostic population")
+        planned: dict[str, _ReviewRun] = {}
+        for value in population["planned"]:
+            if (not isinstance(value, dict) or set(value) != {"case_id", "model", "variant", "run_number",
+                    "run_dir", "run_base", "treatment", "task_sha256", "source_sha256"}
+                    or not isinstance(value["run_dir"], str) or not value["run_dir"]
+                    or PurePosixPath(value["run_dir"]).is_absolute() or ".." in PurePosixPath(value["run_dir"]).parts
+                    or not isinstance(value["run_base"], str) or not value["run_base"]
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", value["task_sha256"]) is None
+                    or value["source_sha256"] is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", value["source_sha256"]) is None):
+                raise ValueError("invalid planned run")
+            run = _ReviewRun(RunCoordinate.from_row(value), value["run_dir"], value["run_base"],
+                             value["treatment"], value["task_sha256"], value["source_sha256"])
+            if run.identity in planned or any(run.run_dir == other.run_dir for other in planned.values()):
+                raise ValueError("duplicate planned run")
+            planned[run.identity] = run
+        by_identity: dict[str, list[dict[str, Any]]] = {}
+        for result in report["results"]:
+            by_identity.setdefault(_report_attempt_identity(result), []).append(result)
+        coverage = report["answer_design"]
+        errors = coverage.get("attestation_errors", [])
+        design_blocked = any("run_dir" not in error for error in errors)
+        bad_paths = {error.get("run_dir") for error in errors}
+        admitted = [run.identity for run in planned.values()
+                    if not design_blocked and run.run_dir not in bad_paths
+                    and len(by_identity.get(run.identity, [])) == 1
+                    and by_identity[run.identity][0].get("run_base") == run.run_base
+                    and _review_eligible(by_identity[run.identity][0])]
+        for key, expected in (("admitted", admitted), ("missing", sorted(set(planned) - set(by_identity))),
+                              ("extra", sorted(set(by_identity) - set(planned))),
+                              ("duplicates", sorted(key for key, rows in by_identity.items() if len(rows) != 1))):
+            if population[key] != expected:
+                raise ValueError(f"diagnostic {key} population mismatch")
+        if len(planned) != coverage.get("expected_runs", 0):
+            raise ValueError("diagnostic denominator differs from answer design")
+        for identity in admitted:
+            run = planned[identity]
+            metadata = by_identity[identity][0].get("metadata", {})
+            if (metadata.get("answer_design_sha256") != raw["design_sha256"]
+                    or metadata.get("answer_task_sha256") != run.task_sha256
+                    or metadata.get("skill_tree_hash") != run.treatment):
+                raise ValueError("diagnostic planned identity mismatch")
+        if availability == "complete":
+            if (report.get("availability") != "complete" or not coverage.get("complete")
+                    or len(admitted) != len(planned) or population["extra"] or population["duplicates"]):
+                raise ValueError("complete diagnostics lack population closure")
+            lead_rows = raw["leads"]
+        else:
+            if (not isinstance(raw["reasons"], list) or not raw["reasons"]
+                    or any(reason not in {"source_report_incomplete", "answer_design_unverified", "population_incomplete",
+                         "assertion_identity_unavailable", "source_text_unavailable", "empty_transformed_operand",
+                         "cohort_settings_mismatch", "assertion_observation_incomplete"} for reason in raw["reasons"])
+                    or not isinstance(raw["observed"], dict) or set(raw["observed"]) != {"evidence_class", "leads"}
+                    or raw["observed"]["evidence_class"] != "diagnostic"):
+                raise ValueError("invalid diagnostic observed block")
+            lead_rows = raw["observed"]["leads"]
+        if not isinstance(lead_rows, list):
+            raise TypeError("diagnostic leads must be a list")
+        seen: set[str] = set()
+        for lead in lead_rows:
+            if not isinstance(lead, dict):
+                raise TypeError("diagnostic lead must be an object")
+            signal = lead.get("signal")
+            signal_fields = {"never_passes": {"effort_verified", "observational"},
+                             "format_near_miss": {"hypothesis"},
+                             "oracle_disagreement": {"judge_assertion", "judge_task_id"}}
+            if (signal not in signal_fields or set(lead) != {"evidence_class", "assertion", "signal", "runs"} | signal_fields[signal]
+                    or lead["evidence_class"] != "diagnostic" or lead["assertion"] not in refs
+                    or not isinstance(lead["runs"], list) or not lead["runs"]
+                    or len(set(lead["runs"])) != len(lead["runs"])
+                    or any(identity not in admitted for identity in lead["runs"])):
+                raise ValueError("invalid diagnostic lead references")
+            digest = canonical_json_sha256(lead)
+            if digest in seen:
+                raise ValueError("duplicate diagnostic lead")
+            seen.add(digest)
+            ref = refs[lead["assertion"]]
+            lead_runs = [planned[identity] for identity in lead["runs"]]
+            rows = [by_identity[run.identity][0] for run in lead_runs]
+            for run, result in zip(lead_runs, rows):
+                row = _review_matching_row(ref, result)
+                ambiguous = sum(other.name == ref.name and other.assertion_type == ref.assertion_type
+                                and other.turn == ref.turn and other.case_id == ref.case_id for other in refs.values()) > 1
+                if (str(run.coordinate.case_id) != ref.case_id or row is None or ambiguous
+                        or not assertion_applies_to_variant(json.loads(ref.definition_json)["declared"], str(run.coordinate.variant))
+                        or not isinstance(assertion_observation_from_row(row), FailedAssertion)):
+                    raise ValueError("diagnostic failure evidence mismatch")
+            if signal == "never_passes":
+                first = lead_runs[0]
+                cohort = [run.identity for run in planned.values() if run.coordinate.case_id == first.coordinate.case_id
+                          and run.coordinate.model == first.coordinate.model and run.coordinate.variant == first.coordinate.variant
+                          and run.treatment == first.treatment]
+                efforts = {effort_identity(row) for row in rows}
+                if (availability != "complete" or ref.assertion_type in QUALITATIVE_ASSERTIONS
+                        or lead["runs"] != cohort or len(cohort) < 2 or lead["observational"] is not True
+                        or len({row.get("metadata", {}).get("provider") for row in rows}) != 1
+                        or len(efforts - {None, "backend_default"}) > 1 or type(lead["effort_verified"]) is not bool
+                        or lead["effort_verified"] != (len(efforts) == 1 and not bool(efforts & {None, "backend_default"}))):
+                    raise ValueError("never-passes cohort is not complete")
+            elif len(lead_runs) != 1:
+                raise ValueError("row-local diagnostic requires exactly one run")
+            elif signal == "format_near_miss":
+                hypothesis = lead["hypothesis"]
+                if (not isinstance(hypothesis, dict) or set(hypothesis) != {"evidence_class", "transform", "original_passed",
+                        "hypothetical_passed", "candidate_before_sha256", "candidate_after_sha256", "original_operands",
+                        "hypothetical_operands", "case_insensitive", "comparison"}
+                        or hypothesis["evidence_class"] != "diagnostic" or hypothesis["transform"] != "ascii-asterisk-removal-v1"
+                        or hypothesis["original_passed"] is not False or hypothesis["hypothetical_passed"] is not True
+                        or hypothesis["candidate_before_sha256"] != lead_runs[0].source_sha256
+                        or ref.turn is not None or rows[0].get("turns") or ref.assertion_type not in {"contains", "contains_any", "contains_all"}):
+                    raise ValueError("invalid literal hypothesis")
+                literal = LiteralTextAssertion.from_wire(json.loads(ref.definition_json)["declared"])
+                literal.validate_presentation_hypothesis(LiteralPresentationHypothesis(
+                    hypothesis["candidate_before_sha256"], hypothesis["candidate_after_sha256"],
+                    tuple(hypothesis["original_operands"]), tuple(hypothesis["hypothetical_operands"]),
+                    hypothesis["case_insensitive"], ComparisonProfile(hypothesis["comparison"])))
+            elif signal == "oracle_disagreement":
+                judge = refs.get(lead["judge_assertion"])
+                if judge is None:
+                    raise ValueError("unknown qualitative assertion")
+                judged = _review_matching_row(judge, rows[0])
+                if (not ((ref.assertion_type not in QUALITATIVE_ASSERTIONS and ref.severity == "gate") or ref.severity == "critical")
+                        or judge.assertion_type not in QUALITATIVE_ASSERTIONS or judge.case_id != ref.case_id or judge.turn != ref.turn
+                        or judged is None or not isinstance(assertion_observation_from_row(judged), SatisfiedAssertion)
+                        or lead["judge_task_id"] != lead_runs[0].coordinate.judge_task_id(judge.name)
+                        or judged.get("judge_task_id") != lead["judge_task_id"]):
+                    raise ValueError("accepted judgment identity mismatch")
+        return raw
+    except (KeyError, AttributeError, TypeError, ValueError):
+        return _review_state_row(_ReviewUnavailable(("invalid_saved_diagnostics",)))
+
+
+def _diagnostic_review_queue(report: dict[str, Any], limit: int) -> dict[str, Any]:
+    review = _read_verifier_review(report)
+    leads = review.get("leads", review.get("observed", {}).get("leads", []))
+    results = sorted(report.get("results", []), key=lambda row: RunCoordinate.from_row(row).key)
+    queue = []
+    seen: set[str] = set()
+    for result in results:
+        identity = _report_attempt_identity(result)
+        references = [index for index, lead in enumerate(leads) if identity in lead["runs"]]
+        if references and identity not in seen:
+            seen.add(identity)
+            queue.append({"evidence_class": "diagnostic", "run": identity,
+                          "case_id": result["case_id"], "model": result.get("model"),
+                          "variant": result["variant"], "run_number": result.get("run_number", 1),
+                          "run_base": result.get("run_base"), "lead_indices": references})
+    out = {"evidence_class": "diagnostic", "availability": review["availability"], "verifier_review": review,
+           "review_queue": queue[:limit] if review["availability"] == "complete" else [],
+           "review_queue_truncated": max(0, len(queue) - limit) if review["availability"] == "complete" else None}
+    if review["availability"] == "unavailable":
+        out["observed"] = {"evidence_class": "diagnostic", "review_queue": queue[:limit],
+                           "review_queue_truncated": max(0, len(queue) - limit)}
+    return out
+
+
 def build_benchmark_report(
     path: Path,
     runs: Path,
@@ -20545,6 +21052,7 @@ def build_benchmark_report(
     strict: bool = False,
     embed_cmd: str | None = None,
     min_lift: float | None = None,
+    *, review_diagnostics: bool = False,
 ) -> dict[str, Any]:
     manifest = validate_manifest(path)
     variants = variants_arg or manifest.get("variants", DEFAULT_VARIANTS)
@@ -20552,6 +21060,7 @@ def build_benchmark_report(
     results = []
     deferred_judge_tasks: list[dict[str, Any]] = []
     skipped_trigger_cases = []
+    review_sources: dict[RunCoordinate, str | None] = {}
     selected_cases = list(iter_cases(manifest, split))
     for case in selected_cases:
         # Trigger/discovery cases belong to the autonomous-trigger adapter, whose
@@ -20567,6 +21076,9 @@ def build_benchmark_report(
         for model_name, variant, run_number, base, text, output_path, meta in discovered_run_units(runs, case, variants):
             result, pending = grade_case_variant(case, variant, text, output_path, meta, run_number=run_number, run_base=base, judge_results=judge_lookup, allow_scripts=allow_scripts, manifest_dir=path.parent, model=model_name, strict=strict, embed_cmd=embed_cmd)
             results.append(result)
+            if review_diagnostics:
+                coordinate = RunCoordinate.from_row(result)
+                review_sources[coordinate] = text if coordinate not in review_sources and not case.get("turns") else None
             deferred_judge_tasks.extend(pending)
 
     by_variant: dict[str, list[dict[str, Any]]] = {v: [] for v in variants}
@@ -20677,9 +21189,10 @@ def build_benchmark_report(
         }
 
     answer_case_ids = [case["id"] for case in selected_cases if not is_trigger_case(case)]
-    design_coverage = answer_design_coverage(
+    coverage = _answer_design_coverage(
         runs, results, manifest=manifest, manifest_path=path,
         case_ids=answer_case_ids, variants=variants)
+    design_coverage = coverage.summary
     paired_summary = build_paired_summary(results, min_lift=min_lift)
     # The edit's own effect when the run carries an old_skill arm.
     edit_summary = paired_edit_summary(results, min_lift=min_lift)
@@ -20792,7 +21305,7 @@ def build_benchmark_report(
         case_flags_surface = []
     if judge_lookup:
         cost_surface["judge"] = judge_cost_block(judge_lookup)
-    return {
+    report = {
         "manifest": str(path),
         "skill_name": manifest["skill_name"],
         "generated_at": int(time.time()),
@@ -20842,9 +21355,14 @@ def build_benchmark_report(
         "results": results,
     }
 
+    if review_diagnostics:
+        report["verifier_review"] = _verifier_review(
+            report, selected_cases, coverage.planned, runs, review_sources, strict)
+    return report
+
 
 def benchmark(args: argparse.Namespace) -> int:
-    report = build_benchmark_report(Path(args.manifest), Path(args.runs), args.split, args.variant, getattr(args, "judge_results", None), **grading_options(args), min_lift=getattr(args, "min_lift", None))
+    report = build_benchmark_report(Path(args.manifest), Path(args.runs), args.split, args.variant, getattr(args, "judge_results", None), **grading_options(args), min_lift=getattr(args, "min_lift", None), review_diagnostics=args.review_diagnostics)
     emit_report(report, args.out)
     return 0
 
@@ -21101,7 +21619,7 @@ def md_table(headers: Sequence[str], rows: Iterable[Sequence[Any]], *, align: st
     return lines
 
 
-def github_summary_from_report(report: dict[str, Any]) -> str:
+def github_summary_from_report(report: dict[str, Any], *, review_diagnostics: bool = False) -> str:
     """GitHub job-summary markdown plus ::warning annotations keyed to case_id.
     Pipe to $GITHUB_STEP_SUMMARY; the annotation lines act on plain stdout."""
     skill = str(report.get("skill_name") or "skill")
@@ -21150,7 +21668,18 @@ def github_summary_from_report(report: dict[str, Any]) -> str:
     if report.get("availability") != "complete":
         annotations.append(
             f"::error title=skill-eval {skill}::incomplete experiment evidence")
-    return "\n".join(lines + ([""] + annotations if annotations else [])) + "\n"
+    rendered = "\n".join(lines + ([""] + annotations if annotations else [])) + "\n"
+    if review_diagnostics:
+        review = _read_verifier_review(report)
+        rendered += "\n## Diagnostic verifier review\n\n"
+        rendered += f"Diagnostic availability is `{review['availability']}`. These are authoring leads.\n"
+        for reason in review.get("reasons", [review["reason"]] if "reason" in review else []):
+            rendered += f"\nDiagnostic reason `{reason}`.\n"
+        leads = review.get("leads", review.get("observed", {}).get("leads", []))
+        for lead in leads:
+            ref = review["assertions"][lead["assertion"]]
+            rendered += f"\n- Diagnostic `{lead['signal']}` for `{md_cell(ref['case_id'])}` / `{md_cell(ref['name'])}` in {len(lead['runs'])} run(s).\n"
+    return rendered
 
 
 def report_command(args: argparse.Namespace) -> int:
@@ -21170,7 +21699,7 @@ def report_command(args: argparse.Namespace) -> int:
         if args.format == "junit":
             rendered = junit_xml_from_report(report)
         else:
-            rendered = github_summary_from_report(report)
+            rendered = github_summary_from_report(report, review_diagnostics=args.review_diagnostics)
     except (AttributeError, TypeError, ValueError) as exc:
         if not gate_enabled:
             raise
@@ -24978,6 +25507,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-lift", type=float, help="smallest pass-rate lift you would act on (e.g. 0.1); the noise check reports whether the eval can resolve it")
     p.add_argument("--out")
 
+    p.add_argument("--review-diagnostics", action="store_true", help="include optional diagnostic verifier authoring leads; grades and gates are unchanged")
+
     p = sub.add_parser("report", help="serialize a benchmark.json for CI: JUnit XML or GitHub job-summary markdown + annotations")
     p.add_argument("--benchmark", required=True, help="benchmark.json produced by `skill-benchmark benchmark --out`")
     p.add_argument("--format", choices=["junit", "github"], required=True)
@@ -24987,6 +25518,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="exit 1 for incomplete evidence or failing selected variants")
     p.add_argument("--gate-variant", action="append",
                    help="variant checked by --fail-on-failures (repeatable; default: with_skill)")
+
+    p.add_argument("--review-diagnostics", action="store_true", help="include optional diagnostic verifier authoring leads; grades and gates are unchanged")
 
     p = sub.add_parser("compare-judges", help="flag judge-sensitivity across judged benchmark reports")
     p.add_argument("--report", action="append", metavar="NAME=PATH", help="judge label = judged benchmark report JSON (repeatable)")
@@ -25004,6 +25537,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=100, help="max review-queue rows to emit")
     p.add_argument("--feedback", help="the served review's feedback.json; run-level notes fill the queue's note slot")
     p.add_argument("--out")
+
+    p.add_argument("--review-diagnostics", action="store_true", help="include optional diagnostic verifier authoring leads; grades and gates are unchanged")
 
     p = sub.add_parser("contamination", help="output-side contamination perimeter: canary tripwire, output<->answer n-gram overlap, released_at/cutoff gate (model-free)")
     p.add_argument("manifest")

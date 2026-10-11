@@ -686,7 +686,6 @@ class LiteralPresentationHypothesisTests(unittest.TestCase):
     def test_probe_preserves_case_profile_and_rejects_empty_or_negative_operands(self):
         for wire, text in (
             ({"type": "contains", "value": "Blocking", "ci": False}, "**blocking**"),
-            ({"type": "contains", "value": "*", "comparison": "exact"}, "none"),
             ({"type": "excludes_any", "values": ["Blocking"]}, "Blocking"),
             ({"type": "contains", "value": "Severity: Blocking"}, "Severity:\t Blocking"),
             ({"type": "contains", "value": "Blocking"}, "Blocking"),
@@ -694,6 +693,8 @@ class LiteralPresentationHypothesisTests(unittest.TestCase):
             with self.subTest(wire=wire, text=text):
                 self.assertIsNone(LiteralTextAssertion.from_wire(wire).presentation_hypothesis(text))
         exact = LiteralTextAssertion.from_wire({"type": "contains", "value": "AB", "comparison": "exact"})
+        empty = LiteralTextAssertion.from_wire({"type": "contains", "value": "*", "comparison": "exact"})
+        self.assertEqual(empty.presentation_hypothesis("none").reason, "empty_transformed_operand")
         self.assertIsNone(exact.presentation_hypothesis("A*\u200bB"))
         rendered = LiteralTextAssertion.from_wire({"type": "contains", "value": "AB"})
         self.assertEqual(rendered.presentation_hypothesis("A*\u200bB").comparison, ComparisonProfile.RENDERED_V1)

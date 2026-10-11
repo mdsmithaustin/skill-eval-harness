@@ -276,6 +276,11 @@ def _non_empty_string(value: Any, label: str) -> str:
 
 
 @dataclass(frozen=True)
+class LiteralPresentationUnavailable:
+    reason: Literal["empty_transformed_operand"] = field(default="empty_transformed_operand", init=False)
+
+
+@dataclass(frozen=True)
 class LiteralPresentationHypothesis:
     candidate_before_sha256: str
     candidate_after_sha256: str
@@ -372,12 +377,12 @@ class LiteralTextAssertion:
             evidence = "none present" if passed else f"found banned {hit!r}"
         return MatchObservation(matched, raw_matched, negated, evidence, candidate, operands)
 
-    def presentation_hypothesis(self, text: str) -> LiteralPresentationHypothesis | None:
+    def presentation_hypothesis(self, text: str) -> LiteralPresentationHypothesis | LiteralPresentationUnavailable | None:
         if self.kind is LiteralKind.EXCLUDES_ANY or self.evaluate(text).passed:
             return None
         values = tuple(value.replace("*", "") for value in self.values)
         if any(not ComparisonText.from_text(value, self.profile).value for value in values):
-            return None
+            return LiteralPresentationUnavailable()
         candidate = text.replace("*", "")
         transformed = LiteralTextAssertion(self.kind, values, self.case_insensitive, self.profile)
         if not transformed.evaluate(candidate).passed:
@@ -386,6 +391,17 @@ class LiteralTextAssertion:
             "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "sha256:" + hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
             self.values, values, self.case_insensitive, self.profile)
+
+    def validate_presentation_hypothesis(self, hypothesis: LiteralPresentationHypothesis) -> None:
+        values = tuple(value.replace("*", "") for value in self.values)
+        if (self.kind is LiteralKind.EXCLUDES_ANY or hypothesis.original_operands != self.values
+                or hypothesis.hypothetical_operands != values
+                or any(not ComparisonText.from_text(value, self.profile).value for value in values)
+                or hypothesis.case_insensitive is not self.case_insensitive
+                or hypothesis.comparison is not self.profile
+                or any(re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None for digest in (
+                    hypothesis.candidate_before_sha256, hypothesis.candidate_after_sha256))):
+            raise ValueError("incompatible literal presentation hypothesis")
 
 
 @dataclass(frozen=True)
