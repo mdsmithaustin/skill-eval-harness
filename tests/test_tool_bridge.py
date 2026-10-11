@@ -44,6 +44,84 @@ class BridgeCliBoundaryTests(unittest.TestCase):
 
 
 class BridgeObservationTests(unittest.TestCase):
+    def test_bridge_offer_rejects_oversized_output_before_receipt_serialization(self):
+        from unittest import mock
+
+        identity = {"task_sha256": "sha256:" + "a" * 64, "case_input_sha256": "sha256:" + "b" * 64,
+                    "run": {"case_id": "c", "variant": "with_skill", "run_number": 1,
+                            "model": None, "population": "answer"},
+                    "faults": [], "expected_turns": 1, "route": "offline_bridge"}
+        frame = {"type": "call", "protocol_version": 1, "id": 1, "tool": "search", "input": {"q": "alpha"}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            replay = root / "replay.json"
+            replay.write_text(json.dumps({"version": 1, "records": [
+                {"tool": "search", "key": sb.ToolReplayStore.call_key("search", frame["input"]), "output": output}
+                for output in ("x" * 100000, "x" * 65000)]}))
+            journal = sb._ToolReceiptJournal(root / "evidence" / "journal.jsonl", identity,
+                                            sb.ToolReplayStore(replay, "strict"), {})
+            journal.turn = 1
+            journal._commit({"type": "turn_opened", "turn": 1})
+            prefix = journal.path.read_bytes()
+            original = json.dumps
+            serialized = []
+            def dumps(value, *args, **kwargs):
+                result = original(value, *args, **kwargs)
+                if "x" * 100000 in result:
+                    serialized.append(len(result))
+                return result
+            with mock.patch.object(json, "dumps", dumps):
+                with self.assertRaisesRegex(ValueError, "outbound frame exceeds"):
+                    journal.offer_bridge(frame)
+            self.assertEqual(serialized, [])
+            self.assertEqual(journal.path.read_bytes(), prefix)
+            self.assertIsNone(journal.pending)
+            response = journal.offer_bridge({**frame, "id": 2})
+            encoded = sb._bridge_frame_bytes(response, 65536)
+            self.assertEqual(json.loads(encoded)["output"], "x" * 65000)
+            self.assertEqual([row["type"] for row in journal.rows], ["opened", "turn_opened", "offered"])
+            with self.assertRaisesRegex(sb.ToolReplayMiss, "unrecorded tool call"):
+                journal.store.resolve("search", frame["input"])
+
+    def test_error_claim_selects_matching_inputs_before_error_availability(self):
+        import tool_fault_contracts as domain
+
+        identity = {"task_sha256": "sha256:" + "a" * 64, "case_input_sha256": "sha256:" + "b" * 64,
+                    "run": {"case_id": "c", "variant": "with_skill", "run_number": 1,
+                            "model": None, "population": "answer"},
+                    "faults": [{"tool": "search", "match": "alpha", "output": "alpha", "is_error": True}],
+                    "expected_turns": 1, "route": "offline_bridge"}
+        rows = []
+        def append(transition):
+            rows.append(domain.journal_record(rows, transition))
+        append({"type": "opened", "identity": identity})
+        append({"type": "turn_opened", "turn": 1})
+        for number, query in enumerate(("alpha", "beta"), 1):
+            resolution = domain._Resolution("fault", domain.fault_identity(identity["case_input_sha256"], 1),
+                query, {"availability": "known", "value": True}) if number == 1 else domain._Resolution(
+                "recorded", None, query, {"availability": "unavailable", "reason": "legacy_error_unavailable"})
+            append(domain.bridge_offer(identity, 1, number, "search", {"q": query}, resolution, number))
+            offer = rows[-1]
+            append({"type": "acknowledged", "turn": 1, "exchange": number,
+                    "offered_sha256": offer["record_sha256"], "ack": {"type": "ack", "protocol_version": 1,
+                    "id": number, "turn_number": 1, "exchange_number": number,
+                    "payload_sha256": offer["payload"]["response"]["payload_sha256"]}})
+        assertion = {"type": "tool_call", "tool": "search", "pattern": "alpha", "is_error": True}
+        prefix = domain.ToolObservation(identity, tuple(rows))
+        assessed = prefix.assess(domain.ToolClaim(assertion))
+        self.assertIsInstance(assessed, domain.Observed)
+        self.assertEqual(assessed.value[0], True)
+        self.assertIsInstance(prefix.assess(domain.ToolClaim({**assertion, "max_count": 1})), domain.Unavailable)
+        append({"type": "turn_closed", "turn": 1})
+        append({"type": "closed"})
+        observation = domain.ToolObservation(identity, tuple(rows))
+        self.assertEqual(observation.assess(domain.ToolClaim(assertion)).value[0], True)
+        self.assertEqual(observation.assess(domain.ToolClaim({**assertion, "is_error": False})).value[0], False)
+        self.assertEqual(observation.assess(domain.ToolClaim({**assertion, "pattern": "alpha|beta"})).reason,
+                         "legacy_error_unavailable")
+        self.assertEqual(observation.assess(domain.Count("errors", "search")).reason, "legacy_error_unavailable")
+        self.assertEqual(observation.assess(domain.Count("errors")).reason, "legacy_error_unavailable")
+
     def test_direct_unreaped_handoff_retains_price_floor_and_interruption(self):
         from unittest import mock
 
