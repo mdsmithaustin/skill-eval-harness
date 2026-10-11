@@ -1,0 +1,3645 @@
+[
+  {
+    "name": "_construct_unique_yaml_mapping",
+    "owner": "skill_inputs",
+    "sha256": "ce94c0a4da5df61d61b2a4b8c64ad877cc04b84dbb155ad1d56a2b092b5139de",
+    "globals": [
+      "Any",
+      "ConstructorError",
+      "UniqueKeySafeLoader",
+      "bool",
+      "dict",
+      "yaml"
+    ],
+    "ast_sha256": "d7f998eeeb27f4e85249ebb4ee78ba93865911982df9179d2315f82f9ce75e88",
+    "moved_ast_sha256": "d7f998eeeb27f4e85249ebb4ee78ba93865911982df9179d2315f82f9ce75e88"
+  },
+  {
+    "name": "VALID_SPLITS",
+    "owner": "skill_inputs",
+    "sha256": "bf14711790c79b8115a2cf53d334375c8863c1f6e8020de0b1e568fa14a92dc7",
+    "globals": [
+      "Split",
+      "frozenset"
+    ],
+    "ast_sha256": "444b535f60ba68fd1d2b55659e7288bd58e20378fd32763176bd81f7b97a19d1",
+    "moved_ast_sha256": "444b535f60ba68fd1d2b55659e7288bd58e20378fd32763176bd81f7b97a19d1"
+  },
+  {
+    "name": "iter_cases",
+    "owner": "skill_inputs",
+    "sha256": "c8f60f66086b37cb1513fdf89e9c092403c1823a4bb07cf7e8c46394c5c45bd7",
+    "globals": [
+      "Any",
+      "dict",
+      "list",
+      "materialize_dataset_cases",
+      "str"
+    ],
+    "ast_sha256": "327ad8a8c041cac19fe6b28f2df6a17b6096adea1a7217afe330047c893fa7ce",
+    "moved_ast_sha256": "327ad8a8c041cac19fe6b28f2df6a17b6096adea1a7217afe330047c893fa7ce"
+  },
+  {
+    "name": "is_trigger_case",
+    "owner": "skill_inputs",
+    "sha256": "a25c9c90ffac2a2b15a43f76a374ec6bca15d17ba600703fa6b144ab095ba07c",
+    "globals": [
+      "Any",
+      "CaseKind",
+      "CasePopulation",
+      "ValueError",
+      "bool",
+      "dict",
+      "str"
+    ],
+    "ast_sha256": "c627ececdaa34ff551086cb1563ef26a3c5b645aa2f192fbade678aa8f10f43a",
+    "moved_ast_sha256": "c627ececdaa34ff551086cb1563ef26a3c5b645aa2f192fbade678aa8f10f43a"
+  },
+  {
+    "name": "repo_root_for_manifest",
+    "owner": "skill_inputs",
+    "sha256": "562a09ffaa267e3f7fbd0b01b6de8f54fd4723074378a6ff8f9b88a5ed1e8929",
+    "globals": [
+      "Path"
+    ],
+    "ast_sha256": "ab95e854fa715b3a6cef59d2b54db017ffb0daa087da6669fca162338f2b1c31",
+    "moved_ast_sha256": "ab95e854fa715b3a6cef59d2b54db017ffb0daa087da6669fca162338f2b1c31"
+  },
+  {
+    "name": "load_manifest_source",
+    "owner": "skill_inputs",
+    "sha256": "3b7dc5c6b2b176e20382ace056445f9bf4c96ccf5e06d7957b124d030491637a",
+    "globals": [
+      "Any",
+      "FileNotFoundError",
+      "Path",
+      "SkillId",
+      "TypeError",
+      "UniqueKeySafeLoader",
+      "ValueError",
+      "all",
+      "dict",
+      "die",
+      "enumerate",
+      "expected_trigger_polarity",
+      "frozenset",
+      "is_trigger_case",
+      "isinstance",
+      "iter_cases",
+      "json",
+      "list",
+      "load_json",
+      "parse_skill_constraints",
+      "reject_nonfinite_numbers",
+      "str",
+      "strict_json_loads",
+      "yaml"
+    ],
+    "ast_sha256": "67d87c53f182290dfbe8b1220a824de4face8725b22473e93220d37637d8eee4",
+    "moved_ast_sha256": "67d87c53f182290dfbe8b1220a824de4face8725b22473e93220d37637d8eee4"
+  },
+  {
+    "name": "AblationError",
+    "owner": "skill_inputs",
+    "sha256": "504dbb1599ce03bbabefafcd5488acf311406553ff76e384485eacf61a6b7a8a",
+    "globals": [
+      "Exception"
+    ],
+    "ast_sha256": "93fa268fab8c110929ffa2216b52454da9c961f73a0400c6bcf4bb9e62c5ac54",
+    "moved_ast_sha256": "93fa268fab8c110929ffa2216b52454da9c961f73a0400c6bcf4bb9e62c5ac54"
+  },
+  {
+    "name": "skill_root_keys_for",
+    "owner": "skill_inputs",
+    "sha256": "53761b5d7b7738c29f0941b49ae9e6b6a6cc194b776bf9d25017a718b2ff0984",
+    "globals": [
+      "AblationError",
+      "Path",
+      "Sequence",
+      "dict",
+      "list",
+      "skill_root_key",
+      "str"
+    ],
+    "ast_sha256": "e8271580a3ade458ea46ede0a66ac2c90ef7135c4ae48a23dd2cac048b7ba6b2",
+    "moved_ast_sha256": "e8271580a3ade458ea46ede0a66ac2c90ef7135c4ae48a23dd2cac048b7ba6b2"
+  },
+  {
+    "name": "mounted_skills_by_id",
+    "owner": "skill_inputs",
+    "sha256": "c9ec39cb1f665ad7e4a9eea0da941f0415f5e68e6bc64d909d07003fc83106d3",
+    "globals": [
+      "Mapping",
+      "Path",
+      "Sequence",
+      "SkillId",
+      "ValueError",
+      "dict",
+      "len",
+      "set",
+      "str"
+    ],
+    "ast_sha256": "28dd017759b6b98a2bfa39e736e73d91bf9de040f8ebe4d274407275436d61ad",
+    "moved_ast_sha256": "28dd017759b6b98a2bfa39e736e73d91bf9de040f8ebe4d274407275436d61ad"
+  },
+  {
+    "name": "frontmatter_value",
+    "owner": "skill_inputs",
+    "sha256": "ab987f2236da8386d43776abff7d64073a0dcea904acb8fccd08cc0cad66169e",
+    "globals": [
+      "Any",
+      "parse_frontmatter",
+      "str"
+    ],
+    "ast_sha256": "33bc0367fc31c7010a8d1a5d24664db2365df0f8e9b84c264c0254c1bca0ce07",
+    "moved_ast_sha256": "33bc0367fc31c7010a8d1a5d24664db2365df0f8e9b84c264c0254c1bca0ce07"
+  },
+  {
+    "name": "skill_tree_hash",
+    "owner": "skill_inputs",
+    "sha256": "5cc3d39593f3d6a3ef59c82cf5fa157012e7c65036b99bf8ef52cba98fd28ba2",
+    "globals": [
+      "Path",
+      "ValueError",
+      "directory_tree_sha256",
+      "str"
+    ],
+    "ast_sha256": "7f4d4098174a2e963f7dfb08224fd200bd331e87295fcb52f00aa64f51353096",
+    "moved_ast_sha256": "7f4d4098174a2e963f7dfb08224fd200bd331e87295fcb52f00aa64f51353096"
+  },
+  {
+    "name": "materialize_trigger_ablation",
+    "owner": "skill_inputs",
+    "sha256": "de79e8a9599aaba098a1dbcd6a2a215e1152a43982e28c8eb584867642a886c7",
+    "globals": [
+      "AblationError",
+      "Any",
+      "Path",
+      "ablation_by_id",
+      "ablation_components",
+      "derived_population",
+      "dict",
+      "materialize_ablation",
+      "str"
+    ],
+    "ast_sha256": "e6daea6f26976c359e8cd1a99e8ffc68b939e40a7aea8b4a37327caac3c3dadf",
+    "moved_ast_sha256": "e6daea6f26976c359e8cd1a99e8ffc68b939e40a7aea8b4a37327caac3c3dadf"
+  },
+  {
+    "name": "build_canonical_skill_tree",
+    "owner": "skill_inputs",
+    "sha256": "0adf99501d54f134f302f17adaea31f2776493a2eea7a07b6e5ec773499abc5e",
+    "globals": [
+      "Any",
+      "Path",
+      "_copy_skill_root",
+      "_reject_output_root_overlap",
+      "_reject_overlapping_skill_roots",
+      "_safe_under",
+      "dict",
+      "list",
+      "skill_root_keys_for",
+      "str",
+      "zip"
+    ],
+    "ast_sha256": "c9353d34653f1bc552f5037e837266b65f377fe144ab446c4e9806013cf552f5",
+    "moved_ast_sha256": "c9353d34653f1bc552f5037e837266b65f377fe144ab446c4e9806013cf552f5"
+  },
+  {
+    "name": "mount_skill_tree",
+    "owner": "skill_inputs",
+    "sha256": "51ccd8885c61cffd565eeb9d4b5bec564f5ea4f289efb317c32117db43c8b3ba",
+    "globals": [
+      "Path",
+      "list",
+      "shutil",
+      "sorted"
+    ],
+    "ast_sha256": "1ffe0aadba521339fc2559609ac3a52f21bc0442fa42d9c9c5898045bde1be77",
+    "moved_ast_sha256": "1ffe0aadba521339fc2559609ac3a52f21bc0442fa42d9c9c5898045bde1be77"
+  },
+  {
+    "name": "expected_trigger_polarity",
+    "owner": "skill_inputs",
+    "sha256": "6eef9e4c70d8ed33323d94c368a1c298f9f9c568778dac4c7cd285d22d8c055a",
+    "globals": [
+      "Any",
+      "TypeError",
+      "bool",
+      "dict",
+      "isinstance",
+      "str"
+    ],
+    "ast_sha256": "da982d63fe51fd7baa72ad8fe48d013fc480c7bc8b5498315413fd3b4aa43da1",
+    "moved_ast_sha256": "da982d63fe51fd7baa72ad8fe48d013fc480c7bc8b5498315413fd3b4aa43da1"
+  },
+  {
+    "name": "canonical_trigger_query",
+    "owner": "skill_inputs",
+    "sha256": "a0b0a102dbac2281bf85f2ecc285d8727273a1883370e911b8bd290807167741",
+    "globals": [
+      "ValueError",
+      "isinstance",
+      "ord",
+      "str",
+      "unicodedata"
+    ],
+    "ast_sha256": "92826611dc8e3e4264ba9c81f8f6389f838c0fce54b99d1c9488c409c2a2b597",
+    "moved_ast_sha256": "92826611dc8e3e4264ba9c81f8f6389f838c0fce54b99d1c9488c409c2a2b597"
+  },
+  {
+    "name": "trigger_manifest_identity",
+    "owner": "skill_inputs",
+    "sha256": "d184fb1285fcaa728f56811335548dc82b3c3b4d060df3d92f10009b3c8cd662",
+    "globals": [
+      "Any",
+      "ablation_components",
+      "canonical_json_sha256",
+      "derived_population",
+      "dict",
+      "expected_provenance_for_ablation",
+      "isinstance",
+      "list",
+      "sorted",
+      "str"
+    ],
+    "ast_sha256": "b32a1fbe5160ff2a5beef16e7951bc79f56da35f7978a4ddc9818bf7a9afe4e9",
+    "moved_ast_sha256": "b32a1fbe5160ff2a5beef16e7951bc79f56da35f7978a4ddc9818bf7a9afe4e9"
+  },
+  {
+    "name": "expected_provenance_from_trigger_identity",
+    "owner": "skill_inputs",
+    "sha256": "e7eee10a3510e90e0de69df3be5738eec794599fa3e0de9d65e4ca0fb76fe087",
+    "globals": [
+      "Any",
+      "Component",
+      "ExpectedProvenance",
+      "TypeError",
+      "ValueError",
+      "dict",
+      "isinstance",
+      "len",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "f126ece03026ed7a65f404329447070bc0391248325d8fb4b4a1d63110ab21c1",
+    "moved_ast_sha256": "f126ece03026ed7a65f404329447070bc0391248325d8fb4b4a1d63110ab21c1"
+  },
+  {
+    "name": "canonical_skill_tree_hash",
+    "owner": "skill_inputs",
+    "sha256": "9702e456f26aae9254da695cae80eb615f06d34924c3ccb5ec2a95e7c9420ffa",
+    "globals": [
+      "Any",
+      "Path",
+      "build_canonical_skill_tree",
+      "dict",
+      "shutil",
+      "skill_tree_hash",
+      "str",
+      "tempfile"
+    ],
+    "ast_sha256": "edf43fdb4d9ffedcb60c6515e18d06a7fcd5d9f0cc48c8d1ecb2f6f18213c78e",
+    "moved_ast_sha256": "edf43fdb4d9ffedcb60c6515e18d06a7fcd5d9f0cc48c8d1ecb2f6f18213c78e"
+  },
+  {
+    "name": "materialized_tree_for_variant",
+    "owner": "skill_inputs",
+    "sha256": "6ebbb7bcaff1e659dfde9be02855188a99801e5d986914c35b1f8beff10f323d",
+    "globals": [
+      "AblationError",
+      "Any",
+      "Path",
+      "ablation_by_id",
+      "ablation_components",
+      "ablation_id_of",
+      "dict",
+      "materialize_ablation",
+      "str"
+    ],
+    "ast_sha256": "4353ccb94a425c973da642b75bde78250939d2d8097ce31e0c96b4f0a3dedefa",
+    "moved_ast_sha256": "4353ccb94a425c973da642b75bde78250939d2d8097ce31e0c96b4f0a3dedefa"
+  },
+  {
+    "name": "recovery_file_bytes",
+    "owner": "process_runtime",
+    "sha256": "f169fa6fda9ec2443cc1eecde0f16c0acd675438c262f1ade0593f29a1f18b51",
+    "globals": [
+      "Path",
+      "ValueError",
+      "bytes",
+      "getattr",
+      "os",
+      "reversed",
+      "stat",
+      "str"
+    ],
+    "ast_sha256": "1a5ddf6bfedb9a8b7f66a288cb04a2e080d33810e98335249decdd0b836e08bb",
+    "moved_ast_sha256": "1a5ddf6bfedb9a8b7f66a288cb04a2e080d33810e98335249decdd0b836e08bb"
+  },
+  {
+    "name": "recovery_group_stopped",
+    "owner": "process_runtime",
+    "sha256": "5fc2ef28041c8ac7983008d3c2308d35d8a1941e187f72294c66017b027f0833",
+    "globals": [
+      "FileNotFoundError",
+      "Path",
+      "ProcessLookupError",
+      "bool",
+      "callable",
+      "getattr",
+      "int",
+      "os",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "bf518a42fbc30f6b2e9b88d27eab9d301c546c688f695d692dd2233ef4edc979",
+    "moved_ast_sha256": "bf518a42fbc30f6b2e9b88d27eab9d301c546c688f695d692dd2233ef4edc979"
+  },
+  {
+    "name": "_stop_signal",
+    "owner": "process_runtime",
+    "sha256": "f1ae29d50aaa80bc0690bb28915abe9c555ec1c58a4ea90d2be99834f11f7ca6",
+    "globals": [
+      "int"
+    ],
+    "ast_sha256": "6b6a3002d45622baa8d2714ffa827c03c756efe4c17ba712bf284c8857d1996c",
+    "moved_ast_sha256": "6b6a3002d45622baa8d2714ffa827c03c756efe4c17ba712bf284c8857d1996c"
+  },
+  {
+    "name": "_stop_run",
+    "owner": "process_runtime",
+    "sha256": "aad44898054e53effd821d1619f94a23855e77cb183ac3f9c04d4f41e592fb2c",
+    "globals": [
+      "KeyboardInterrupt",
+      "_stop_signal",
+      "int",
+      "object"
+    ],
+    "ast_sha256": "764c78ae459ce20182df402c23ae4777e6f60a9f0a04d8bc2681cb8d7210c073",
+    "moved_ast_sha256": "764c78ae459ce20182df402c23ae4777e6f60a9f0a04d8bc2681cb8d7210c073"
+  },
+  {
+    "name": "stops_on_signal",
+    "owner": "process_runtime",
+    "sha256": "45bcbcf5ee87bbd990bcd0c2e12ee0805a190d12d3c52c9b73efdd8174f563f8",
+    "globals": [
+      "Callable",
+      "KeyboardInterrupt",
+      "_stop_run",
+      "_stop_signal",
+      "functools",
+      "int",
+      "print",
+      "signal",
+      "sys"
+    ],
+    "ast_sha256": "f78c90b84d56f39b544cc478abb4d100cb7854a8d8fb95de9ed73ac286bb9e3d",
+    "moved_ast_sha256": "f78c90b84d56f39b544cc478abb4d100cb7854a8d8fb95de9ed73ac286bb9e3d"
+  },
+  {
+    "name": "skill_benchmark_stopped",
+    "owner": "process_runtime",
+    "sha256": "127f89181b0628fe16b3fcf5621b4ef4283a7c31cf1405a47a5398b0d10add1e",
+    "globals": [
+      "_stop_signal",
+      "bool"
+    ],
+    "ast_sha256": "116eb34de992a3f6854d293225142f099074515d9cee9c60aa8f04920a5c6eff",
+    "moved_ast_sha256": "116eb34de992a3f6854d293225142f099074515d9cee9c60aa8f04920a5c6eff"
+  },
+  {
+    "name": "_BridgeLimits",
+    "owner": "process_runtime",
+    "sha256": "a84c472fca4bdb8839767ac1d07accd1dedccfe63b4afe7ae5d131fdae8126cb",
+    "globals": [
+      "ValueError",
+      "_dataclass",
+      "int",
+      "type"
+    ],
+    "ast_sha256": "1de23e1eff269b0c2c5fe0764dc6654f20b6ee692d55faebe029b9ee48bfb9fc",
+    "moved_ast_sha256": "1de23e1eff269b0c2c5fe0764dc6654f20b6ee692d55faebe029b9ee48bfb9fc"
+  },
+  {
+    "name": "_BridgeSession",
+    "owner": "process_runtime",
+    "sha256": "e9ed091935264ffb038a45406681fb8aa2622993b042fc7a21814850b82e82ed",
+    "globals": [
+      "Path",
+      "_BridgeLimits",
+      "_ToolReceiptJournal",
+      "_dataclass",
+      "int"
+    ],
+    "ast_sha256": "31d81f74cc51c4fcefa9f4bc204039a4dd81bdeed7b11150eaf3ca0ce596e24c",
+    "moved_ast_sha256": "c8c83454e7d6d901205ef2e658de85d8763bc8ddef4d85644e8642acf36a4614"
+  },
+  {
+    "name": "_BridgeProcessFacts",
+    "owner": "process_runtime",
+    "sha256": "2c56ed1e5bbc06d94778b03e3c98540b3356c4cdb91aec166fac79e0d4c2b82c",
+    "globals": [
+      "Any",
+      "_dataclass",
+      "bool",
+      "dict",
+      "int",
+      "property",
+      "str"
+    ],
+    "ast_sha256": "c8ac2f8ed1ed784456a592fd2d60541e4d55d89fa594185f39a9ba721d4d7c06",
+    "moved_ast_sha256": "c8ac2f8ed1ed784456a592fd2d60541e4d55d89fa594185f39a9ba721d4d7c06"
+  },
+  {
+    "name": "_BridgeStoppedAttempt",
+    "owner": "process_runtime",
+    "sha256": "6b80753e2ef0da416f7e5845c03b233ed307c0c5632d03798e17166405917ccf",
+    "globals": [
+      "Any",
+      "BaseException",
+      "InvocationOutcome",
+      "Mapping",
+      "_BridgeProcessFacts",
+      "_dataclass",
+      "str"
+    ],
+    "ast_sha256": "7a6ebaa80d5f760860b836fb434a8ff42dc9baa796f1db50d6eccbeaeda7d147",
+    "moved_ast_sha256": "7a6ebaa80d5f760860b836fb434a8ff42dc9baa796f1db50d6eccbeaeda7d147"
+  },
+  {
+    "name": "_ToolBridgeBackend",
+    "owner": "process_runtime",
+    "sha256": "14a2fc2ad3702a18af8c53e57d87fb8528fc4cc43316a000caee86d6e2ccb0b8",
+    "globals": [
+      "_BridgeLimits",
+      "_dataclass",
+      "int",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "d8ccd383e63d2072b4bce370a731026065edff9adc3894b453fa4baebebea7cf",
+    "moved_ast_sha256": "d8ccd383e63d2072b4bce370a731026065edff9adc3894b453fa4baebebea7cf"
+  },
+  {
+    "name": "_invoke_tool_dialogue",
+    "owner": "process_runtime",
+    "sha256": "c8d2cbdd5b9566e55a1b78e5d2cb19ea07e9e88ea919305c952edcbc895e4989",
+    "globals": [
+      "ProcessInvocationPlan",
+      "TypeError",
+      "ValueError",
+      "_BridgeSession",
+      "_BridgeStoppedAttempt",
+      "_bridge_supported",
+      "_invoke_process",
+      "isinstance"
+    ],
+    "ast_sha256": "fb77593d8270666457e7104932c86ba95591561aab7b43ffa10a6ff3fb84e413",
+    "moved_ast_sha256": "fb77593d8270666457e7104932c86ba95591561aab7b43ffa10a6ff3fb84e413"
+  },
+  {
+    "name": "_bridge_supported",
+    "owner": "process_runtime",
+    "sha256": "25b3000e48128aafef439f4963c03279b3efb05a47f9e759d2b2e58aef0c1d14",
+    "globals": [
+      "Path",
+      "all",
+      "bool",
+      "callable",
+      "getattr",
+      "int",
+      "isinstance",
+      "os",
+      "sys"
+    ],
+    "ast_sha256": "6b76305087d54091c48a0e57d86968fa3d205d91a666f93e0a5d655923a19067",
+    "moved_ast_sha256": "6b76305087d54091c48a0e57d86968fa3d205d91a666f93e0a5d655923a19067"
+  },
+  {
+    "name": "_bridge_frame_bytes",
+    "owner": "process_runtime",
+    "sha256": "f2390aefe8ce9ec01971fc908bcc6b4b5a9e5838034a57af54f4f2f2e6aed683",
+    "globals": [
+      "Any",
+      "Iterator",
+      "Mapping",
+      "StopIteration",
+      "ValueError",
+      "bool",
+      "bytearray",
+      "bytes",
+      "dict",
+      "int",
+      "isinstance",
+      "iter",
+      "json",
+      "len",
+      "list",
+      "max",
+      "next",
+      "range",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "c97903500acdd61abee19754298e08db694a71003963d858920d66fce14da007",
+    "moved_ast_sha256": "c97903500acdd61abee19754298e08db694a71003963d858920d66fce14da007"
+  },
+  {
+    "name": "invoke_argv_with_timeout",
+    "owner": "process_runtime",
+    "sha256": "6375edfbb5eac49dc1def47833d62e416d57d9a86c791f2b11f3b434a95ed295",
+    "globals": [
+      "InvocationOutcome",
+      "ProcessInvocationPlan",
+      "TypeError",
+      "_invoke_process",
+      "isinstance"
+    ],
+    "ast_sha256": "9131d2ced0cb7bd84d12b69d388b70b5fc19b2c4e90106fec4665cb37a66ad55",
+    "moved_ast_sha256": "9131d2ced0cb7bd84d12b69d388b70b5fc19b2c4e90106fec4665cb37a66ad55"
+  },
+  {
+    "name": "_invoke_process",
+    "owner": "process_runtime",
+    "sha256": "b6098c0b465608f6888a4c001fd394158fa6e143fc1a922d2c9ad092369cb56d",
+    "globals": [
+      "AGENT_STOP_GRACE_S",
+      "Any",
+      "AssertionError",
+      "BaseException",
+      "BlockingIOError",
+      "Callable",
+      "ChildProcessError",
+      "Exception",
+      "FileNotFoundError",
+      "InvocationOutcome",
+      "KeyboardInterrupt",
+      "Literal",
+      "Mapping",
+      "OSError",
+      "PROCESS_LEADER_POLL_INTERVAL_S",
+      "PROCESS_PIPE_DRAIN_GRACE_S",
+      "Path",
+      "ProcessInvocationPlan",
+      "ProcessLookupError",
+      "RawProcessFacts",
+      "RecoveryCapture",
+      "RecoveryProcessState",
+      "TimeoutError",
+      "TypeError",
+      "UnicodeDecodeError",
+      "UnicodeEncodeError",
+      "ValueError",
+      "_BridgeProcessFacts",
+      "_BridgeSession",
+      "_BridgeStoppedAttempt",
+      "_bridge_frame_bytes",
+      "_stderr_with_warning",
+      "_stop_signal",
+      "all",
+      "bool",
+      "bytearray",
+      "bytes",
+      "callable",
+      "dict",
+      "errno",
+      "float",
+      "freeze_json_mapping",
+      "getattr",
+      "hasattr",
+      "hashlib",
+      "int",
+      "isinstance",
+      "json",
+      "len",
+      "list",
+      "max",
+      "min",
+      "os",
+      "recovery_file_bytes",
+      "recovery_group_stopped",
+      "selectors",
+      "set",
+      "shutil",
+      "signal",
+      "str",
+      "strict_json_loads",
+      "subprocess",
+      "sys",
+      "time",
+      "tuple",
+      "type",
+      "validate_subagent_response",
+      "write_json"
+    ],
+    "ast_sha256": "8b9dd34d23c39f4aa3eabe3d6be4b67e5e5428cc0fd15543941a8ca24d498d79",
+    "moved_ast_sha256": "94a12693ffd3feda7332f15f13f658a9fee4ea22fb6edc650a33ab918e52fcc0",
+    "removed_docstrings": [
+      "_invoke_process.kill_process_group",
+      "_invoke_process.process_leader_exited"
+    ],
+    "comment_cleanup_ast_sha256": "663abde2ef3b295c123fe1e90c6f5ec3ce39ed5eb7b07bda01ded532b9bbced9"
+  },
+  {
+    "name": "run_argv_with_timeout",
+    "owner": "process_runtime",
+    "sha256": "39173c1a3fa7ee55eaba6da2259caef240acd56f343e4e213dc4bda5eb338466",
+    "globals": [
+      "Any",
+      "Path",
+      "ProcessInvocationPlan",
+      "dict",
+      "int",
+      "invoke_argv_with_timeout",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "ebb7fc51c0e093020fed19d9a4c102bbe214e2ffe9d03195dcf3d1a7194a1c7e",
+    "moved_ast_sha256": "ebb7fc51c0e093020fed19d9a4c102bbe214e2ffe9d03195dcf3d1a7194a1c7e"
+  },
+  {
+    "name": "CODEX_TRACE_DIALECT",
+    "owner": "trace_normalization",
+    "sha256": "c238a4970ec0cfe5b5c6cae00fce94c917bf5bcf279c4eebc93e912839dcb57e",
+    "globals": [
+      "TraceDialect",
+      "_codex_trace_protocol_error",
+      "codex_stream_flat_records"
+    ],
+    "ast_sha256": "629e7289298db80cba190f826fa3d83a590b849e68e7bc80abba3f33914d984b",
+    "moved_ast_sha256": "629e7289298db80cba190f826fa3d83a590b849e68e7bc80abba3f33914d984b"
+  },
+  {
+    "name": "JETTY_TRACE_DIALECT",
+    "owner": "trace_normalization",
+    "sha256": "bfa164b1fb2dfee13620e5c81d06781851dda73a73768e2c343973248318f9a9",
+    "globals": [
+      "TraceDialect",
+      "_jetty_trace_protocol_error"
+    ],
+    "ast_sha256": "270f301736651e1a80f4d6aa5e86f63b7e23af44b9854d18ef9e4716898fcc68",
+    "moved_ast_sha256": "270f301736651e1a80f4d6aa5e86f63b7e23af44b9854d18ef9e4716898fcc68"
+  },
+  {
+    "name": "VIBE_TRACE_DIALECT",
+    "owner": "trace_normalization",
+    "sha256": "599ef1f7d9e2997137b8dcbe99397b8a6f38355891f8d04c4a46556a166cf784",
+    "globals": [
+      "TraceDialect",
+      "_vibe_trace_protocol_error",
+      "vibe_stream_flat_records"
+    ],
+    "ast_sha256": "586f0d678f47f659de8a729077fa9377b2b5201c7cce927d5ff75af357940f29",
+    "moved_ast_sha256": "586f0d678f47f659de8a729077fa9377b2b5201c7cce927d5ff75af357940f29"
+  },
+  {
+    "name": "CLAUDE_TRACE_DIALECT",
+    "owner": "trace_normalization",
+    "sha256": "53b6c745090b84117196553f249db7dbe694a88997f47328cfb58814aa041869",
+    "globals": [
+      "TraceDialect",
+      "_claude_trace_protocol_error",
+      "claude_stream_flat_records"
+    ],
+    "ast_sha256": "30ecfdde20dde03d3293a8b78cbecdeb801c6fca254084755e2c3dd4c7fc4421",
+    "moved_ast_sha256": "30ecfdde20dde03d3293a8b78cbecdeb801c6fca254084755e2c3dd4c7fc4421"
+  },
+  {
+    "name": "PI_TRACE_DIALECT",
+    "owner": "trace_normalization",
+    "sha256": "90673d79e551684d6a75b2f6203f3b52934e5a9635d3e78c75d01b5fd4d2d61b",
+    "globals": [
+      "TraceDialect",
+      "_pi_retries",
+      "_pi_stream_semantics",
+      "_pi_trace_protocol_error",
+      "_pi_usage_and_cost_blocks",
+      "pi_stream_flat_records"
+    ],
+    "ast_sha256": "1e206dbd9719a3f3eeee17c044bd32a2182a43fd08ac3c5203ec962a061e2d15",
+    "moved_ast_sha256": "1e206dbd9719a3f3eeee17c044bd32a2182a43fd08ac3c5203ec962a061e2d15"
+  },
+  {
+    "name": "GEMINI_TRACE_DIALECT",
+    "owner": "trace_normalization",
+    "sha256": "0b8cb2cb8f1d525a44341cd4c7a8c40bd41b40432488c1aca678a316cec15859",
+    "globals": [
+      "TraceDialect",
+      "_gemini_stream_semantics",
+      "_gemini_trace_protocol_error",
+      "_gemini_usage_and_cost_blocks",
+      "gemini_stream_flat_records"
+    ],
+    "ast_sha256": "5b5b0f4fa6c307279abe3152d85da5e21efbea2afe38a1061b01a921bfdfb380",
+    "moved_ast_sha256": "5b5b0f4fa6c307279abe3152d85da5e21efbea2afe38a1061b01a921bfdfb380"
+  },
+  {
+    "name": "parse_vibe_messages",
+    "owner": "trace_normalization",
+    "sha256": "45510b72b321d27441eb26bb562a793b6ff3f25599813bd88e890cac91d200a7",
+    "globals": [
+      "Any",
+      "dict",
+      "list",
+      "parse_vibe_messages_with_errors",
+      "str"
+    ],
+    "ast_sha256": "bb51ec149c329b825d2b4b9532891d0d6e63cd3e9ba0aad3ae677dbe08d93954",
+    "moved_ast_sha256": "bb51ec149c329b825d2b4b9532891d0d6e63cd3e9ba0aad3ae677dbe08d93954"
+  },
+  {
+    "name": "parse_vibe_messages_with_errors",
+    "owner": "trace_normalization",
+    "sha256": "4c26da7a07443a889c42289c4024a490aee4a4bcd2c9b22e5478f4ea839a5196",
+    "globals": [
+      "Any",
+      "coerce_text",
+      "dict",
+      "enumerate",
+      "isinstance",
+      "json",
+      "list",
+      "parse_trace_jsonl_text",
+      "str",
+      "stream_json_loads",
+      "tuple"
+    ],
+    "ast_sha256": "e7b4e084a1271bd181c4e40935cd16ae2329c863a16d11c6acddcf29fd093f18",
+    "moved_ast_sha256": "e7b4e084a1271bd181c4e40935cd16ae2329c863a16d11c6acddcf29fd093f18"
+  },
+  {
+    "name": "load_trace_jsonl",
+    "owner": "trace_normalization",
+    "sha256": "924374f59657eaf330f80ead772cb9b14454011c42dd82135aee20af5a637656",
+    "globals": [
+      "Any",
+      "Path",
+      "dict",
+      "list",
+      "parse_trace_jsonl_text",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "1dafdcf5c0f568795c48726134457f31539b08d2186661ce082df1411718e22f",
+    "moved_ast_sha256": "1dafdcf5c0f568795c48726134457f31539b08d2186661ce082df1411718e22f"
+  },
+  {
+    "name": "pi_stream_terminal_error",
+    "owner": "trace_normalization",
+    "sha256": "0f332f7b79d6c0ecf6392d5edf01b3f9c20154e2a6b3352817ea310b3be0f7ee",
+    "globals": [
+      "PiStream",
+      "str"
+    ],
+    "ast_sha256": "cc2dc3b7ebeae701ecce87678d26fd6f4ce8ce2e4d655c3dfab84317b7630e7f",
+    "moved_ast_sha256": "cc2dc3b7ebeae701ecce87678d26fd6f4ce8ce2e4d655c3dfab84317b7630e7f"
+  },
+  {
+    "name": "detect_trigger_records",
+    "owner": "trace_normalization",
+    "sha256": "01458a801cbbd44759dfbee53702a7f6cb5eaccc43819552f667e5dc0e74e15c",
+    "globals": [
+      "Any",
+      "Iterable",
+      "Path",
+      "PiStream",
+      "TriggerDetection",
+      "TriggerEvidenceKind",
+      "dict",
+      "event_is_completed",
+      "event_texts_for_tool_input",
+      "int",
+      "isinstance",
+      "list",
+      "normalize_trace_records",
+      "str",
+      "text_mentions_mounted_skill",
+      "tool_fault_domain",
+      "type"
+    ],
+    "ast_sha256": "cf61ef29374db4831f569d8a7205b8fdbf664a26d335cec1705f4c212da827be",
+    "moved_ast_sha256": "cf61ef29374db4831f569d8a7205b8fdbf664a26d335cec1705f4c212da827be"
+  },
+  {
+    "name": "detect_trigger_detection",
+    "owner": "trace_normalization",
+    "sha256": "dede8a562a60466f36bc844e7c693e494202917191ef2ea281cab8e9ad507534",
+    "globals": [
+      "Path",
+      "TriggerDetection",
+      "detect_trigger_records",
+      "dict",
+      "isinstance",
+      "iter_json_objects",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "7b4d38354aa1ba2f97c5285bb706a495a37220426d1b79cbb816819ad3f86369",
+    "moved_ast_sha256": "7b4d38354aa1ba2f97c5285bb706a495a37220426d1b79cbb816819ad3f86369"
+  },
+  {
+    "name": "detect_trigger",
+    "owner": "trace_normalization",
+    "sha256": "4179df8c1e122d2eb787ba30032ad4d2c97a6d8ec79791bd5ed78dbed58816aa",
+    "globals": [
+      "Path",
+      "bool",
+      "detect_trigger_detection",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "ee00e35d263460d05c17155ca086762106aad30a0b98dbffec202a3740fee90e",
+    "moved_ast_sha256": "ee00e35d263460d05c17155ca086762106aad30a0b98dbffec202a3740fee90e"
+  },
+  {
+    "name": "safe_trace_label",
+    "owner": "trace_normalization",
+    "sha256": "b13c3d534e5b15104175e1ade56f9615e4c4f4d55053c267eff773e782918b52",
+    "globals": [
+      "re",
+      "str"
+    ],
+    "ast_sha256": "81cb94a1f4d8ed2e4777817d7e08fe8d42ead73a2913edaa2fece2d18e40c722",
+    "moved_ast_sha256": "81cb94a1f4d8ed2e4777817d7e08fe8d42ead73a2913edaa2fece2d18e40c722"
+  },
+  {
+    "name": "parse_trace_jsonl_text",
+    "owner": "trace_normalization",
+    "sha256": "860eb413d6e905dcf5cf3f7f2f6f18a92305ab23eb95b133b0d60118017b2b16",
+    "globals": [
+      "Any",
+      "bool",
+      "dict",
+      "list",
+      "parse_trace_jsonl_text_with_lines",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "75fcaa98e23a0dff53ecb992f1e39243c18cdfdb515d2ffd79ef634689876b27",
+    "moved_ast_sha256": "75fcaa98e23a0dff53ecb992f1e39243c18cdfdb515d2ffd79ef634689876b27"
+  },
+  {
+    "name": "stream_duplicate_keys",
+    "owner": "trace_normalization",
+    "sha256": "65462409dc1a0f48099672af4b963561d63456eab4777530e82b3e1fe76e0536",
+    "globals": [
+      "list",
+      "parse_trace_jsonl_text_with_lines",
+      "str"
+    ],
+    "ast_sha256": "8def203ad23f9b2e5aed93b8943e46a203818e15e989746740a3a2ace516189b",
+    "moved_ast_sha256": "8def203ad23f9b2e5aed93b8943e46a203818e15e989746740a3a2ace516189b"
+  },
+  {
+    "name": "trace_dialect_for",
+    "owner": "trace_normalization",
+    "sha256": "41f50507446f2b9b1ca5d856588ce6a5468c573b3957ddb9ba1c51cc84f5a8a6",
+    "globals": [
+      "KeyError",
+      "TRACE_DIALECTS",
+      "TraceDialect",
+      "ValueError",
+      "isinstance",
+      "sorted",
+      "str"
+    ],
+    "ast_sha256": "78c891516d826d803a2cf39fd377f0a51688f4185599f3dc68f2d92451e00626",
+    "moved_ast_sha256": "78c891516d826d803a2cf39fd377f0a51688f4185599f3dc68f2d92451e00626"
+  },
+  {
+    "name": "normalize_trace_records",
+    "owner": "trace_normalization",
+    "sha256": "90180248dbce788e00235b12ef932f64e0e9ac4562887a6deb1a506ff68e06b9",
+    "globals": [
+      "Any",
+      "PiStream",
+      "_num",
+      "bool",
+      "command_events",
+      "command_text",
+      "dict",
+      "enumerate",
+      "int",
+      "isinstance",
+      "list",
+      "normalize_trace_record",
+      "normalize_usage",
+      "raw_trace_value",
+      "repeated_command_max",
+      "str",
+      "trace_dialect_for",
+      "trace_event_counts",
+      "tuple",
+      "usage_number",
+      "zip"
+    ],
+    "ast_sha256": "d7d8b96e0703394e72f087d61be0a0bdb78ddcff0ae159f7b7ff122c546d628f",
+    "moved_ast_sha256": "d7d8b96e0703394e72f087d61be0a0bdb78ddcff0ae159f7b7ff122c546d628f"
+  },
+  {
+    "name": "PiStream",
+    "owner": "trace_normalization",
+    "sha256": "d7bf52e46395193754d3301bdfb8a83cd964d8e2da9d4865cbe1c7233ac97fd8",
+    "globals": [
+      "Any",
+      "Iterable",
+      "TypeError",
+      "ValueError",
+      "_dataclass",
+      "_generic_stream_usage_and_cost",
+      "_pi_final_agent_end",
+      "_pi_terminal_error",
+      "_pi_terminal_usage",
+      "all",
+      "bool",
+      "classmethod",
+      "dict",
+      "int",
+      "isinstance",
+      "next",
+      "normalize_cost",
+      "normalize_usage",
+      "parse_trace_jsonl_text",
+      "property",
+      "reversed",
+      "str",
+      "sum",
+      "tuple"
+    ],
+    "ast_sha256": "c51e4e9a7a66e24f0b06f1c47088b0e939358d7c6489f47c0c7eb74099d852fe",
+    "moved_ast_sha256": "c51e4e9a7a66e24f0b06f1c47088b0e939358d7c6489f47c0c7eb74099d852fe"
+  },
+  {
+    "name": "stream_usage_and_cost",
+    "owner": "trace_normalization",
+    "sha256": "7f836b5602a8f558fb7221e0985e4e88d6f1a553c90c120b5ba21ac3be97b66e",
+    "globals": [
+      "Any",
+      "PiStream",
+      "dict",
+      "str",
+      "trace_dialect_for",
+      "tuple"
+    ],
+    "ast_sha256": "a8a90526e25d812bd82822edaeaa96b16bb5c1cd46089e2fe8130414a21ef935",
+    "moved_ast_sha256": "a8a90526e25d812bd82822edaeaa96b16bb5c1cd46089e2fe8130414a21ef935"
+  },
+  {
+    "name": "write_trace_artifacts",
+    "owner": "trace_normalization",
+    "sha256": "93749c7d9c55966e2b0dff2c3925dd8ed870d35ba2dd7b0928701ed2c6de3f11",
+    "globals": [
+      "Any",
+      "Path",
+      "PiStream",
+      "TypeError",
+      "ValueError",
+      "_claude_protocol_error",
+      "_tool_measurements",
+      "bool",
+      "dict",
+      "float",
+      "int",
+      "isinstance",
+      "len",
+      "list",
+      "normalize_trace_records",
+      "normalize_usage",
+      "parse_trace_jsonl_text_with_lines",
+      "range",
+      "set",
+      "sorted",
+      "str",
+      "telemetry_domain",
+      "tool_fault_domain",
+      "trace_dialect_for",
+      "tuple",
+      "write_json",
+      "zip"
+    ],
+    "ast_sha256": "9b85bf9d2e61c02eeebea9e4b16153fa39c349348daa385e8210040d39bc992d",
+    "moved_ast_sha256": "9b85bf9d2e61c02eeebea9e4b16153fa39c349348daa385e8210040d39bc992d"
+  },
+  {
+    "name": "TRACE_DIALECTS",
+    "owner": "trace_normalization",
+    "sha256": "aeca07ce0fcc206acf086263ce91d94a4a7f065510cca7c5639170713c5052f5",
+    "globals": [
+      "GENERIC_TRACE_DIALECT",
+      "TraceDialect",
+      "dict",
+      "str",
+      "trace_dialect_implementations"
+    ],
+    "ast_sha256": "2219c2cda7c399ee118357a577d621371f66e18363eb434c046b0b72f4c6dd4a",
+    "moved_ast_sha256": "2219c2cda7c399ee118357a577d621371f66e18363eb434c046b0b72f4c6dd4a"
+  },
+  {
+    "name": "TraceDialect",
+    "owner": "trace_normalization",
+    "sha256": "db82e7bc85f462b1263749d5cd093058dd916f7fed2ea768f3cf0837693c83ea",
+    "globals": [
+      "Any",
+      "Callable",
+      "PiStream",
+      "TraceFlattener",
+      "_dataclass",
+      "_generic_trace_protocol_error",
+      "_generic_usage_and_cost_blocks",
+      "_no_retry_observation",
+      "_no_stream_semantics",
+      "dict",
+      "identity_flat_records",
+      "int",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "62c546cb3175d711c8a73d3df86fdd91b0135112a18abe0ffc52b1d01ed7961b",
+    "moved_ast_sha256": "62c546cb3175d711c8a73d3df86fdd91b0135112a18abe0ffc52b1d01ed7961b"
+  },
+  {
+    "name": "claude_terminal_result_index",
+    "owner": "trace_normalization",
+    "sha256": "cffb9d8a85b01d8e90b158f294f868fc84c32e57394de95f8348cd5a31eb7462",
+    "globals": [
+      "Any",
+      "CLAUDE_SESSION_CONTENT_RECORD_TYPES",
+      "Mapping",
+      "Sequence",
+      "enumerate",
+      "int",
+      "isinstance",
+      "len",
+      "str"
+    ],
+    "ast_sha256": "2777cf2366b8030ecb45410ecc70baa5f39f646f1f180f0058d9a926165db93d",
+    "moved_ast_sha256": "2777cf2366b8030ecb45410ecc70baa5f39f646f1f180f0058d9a926165db93d"
+  },
+  {
+    "name": "vibe_final_answer",
+    "owner": "trace_normalization",
+    "sha256": "ce627cce0310b50cf072b98efe617dece473952ab852ed42e447ba4872d22036",
+    "globals": [
+      "Any",
+      "_vibe_content_text",
+      "dict",
+      "list",
+      "reversed",
+      "str"
+    ],
+    "ast_sha256": "4e99424ee7bc534c949e1aa439aa39884e77575c2f204d096974a03ba5098325",
+    "moved_ast_sha256": "4e99424ee7bc534c949e1aa439aa39884e77575c2f204d096974a03ba5098325"
+  },
+  {
+    "name": "vibe_skill_tool_evidence",
+    "owner": "trace_normalization",
+    "sha256": "c4c9fde2b9de7811b5fd89739337f2b8e188339acca04904cb840d6f3c07b92b",
+    "globals": [
+      "event_is_completed",
+      "list",
+      "normalize_trace_records",
+      "parse_trace_jsonl_text",
+      "set",
+      "str"
+    ],
+    "ast_sha256": "cc782b9dedc34ce6361f90aaaebb07b0391aaffe0dfb6db8bc8dff098d00eab3",
+    "moved_ast_sha256": "cc782b9dedc34ce6361f90aaaebb07b0391aaffe0dfb6db8bc8dff098d00eab3"
+  },
+  {
+    "name": "vibe_usage_and_cost",
+    "owner": "trace_normalization",
+    "sha256": "c52f84a9cf7cee8dffcf6d0029f8464508dab9dedd69d4cafab08f2905c613f9",
+    "globals": [
+      "Any",
+      "dict",
+      "float",
+      "isinstance",
+      "list",
+      "next",
+      "normalize_cost",
+      "normalize_usage",
+      "reversed",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "2cda847b85683789be6675424d41d9bbd7aca98732ec3537cee1c62fa1d87df7",
+    "moved_ast_sha256": "2cda847b85683789be6675424d41d9bbd7aca98732ec3537cee1c62fa1d87df7"
+  },
+  {
+    "name": "vibe_trace_text",
+    "owner": "trace_normalization",
+    "sha256": "d9cf0060e9dc7f2360c9d8d549fca52d9d9d6f22f269d535cd53a54b3829a617",
+    "globals": [
+      "Any",
+      "coerce_text",
+      "dict",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "2aa087872ba997b5b44e45ee6137fcc97f1f10a320a2ea3775492197b3afcbb9",
+    "moved_ast_sha256": "2aa087872ba997b5b44e45ee6137fcc97f1f10a320a2ea3775492197b3afcbb9"
+  },
+  {
+    "name": "codex_env_for_home",
+    "owner": "agent_clis",
+    "sha256": "978ca0da9cc7a10182745085c43e5c07b3c04d43e23414173f8de0977ac93126",
+    "globals": [
+      "Any",
+      "Path",
+      "dict",
+      "os",
+      "seed_codex_home",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "04afa75913a54ab3ae61e42cb4353144e793822161c3514ebda9d2da32f30b1d",
+    "moved_ast_sha256": "04afa75913a54ab3ae61e42cb4353144e793822161c3514ebda9d2da32f30b1d"
+  },
+  {
+    "name": "codex_rollout_path",
+    "owner": "agent_clis",
+    "sha256": "0280966bc44f010e855770b06ef8ad33bba3dab428260d6582b40a65f28f378e",
+    "globals": [
+      "CODEX_SESSIONS_DIRNAME",
+      "Path",
+      "sorted",
+      "str"
+    ],
+    "ast_sha256": "db3eb6dba18539002a3fcc4b867c23bd157f39bdb17346054381a9013987e060",
+    "moved_ast_sha256": "db3eb6dba18539002a3fcc4b867c23bd157f39bdb17346054381a9013987e060"
+  },
+  {
+    "name": "codex_rollout_skill_loads",
+    "owner": "agent_clis",
+    "sha256": "59657721962880b7425d2e0b70b6f983ffb6b039839d1dc29366be28edc1dd1d",
+    "globals": [
+      "CODEX_ROLLOUT_SKILL_TAG",
+      "Path",
+      "_codex_skill_tag",
+      "dict",
+      "isinstance",
+      "iter_json_objects",
+      "list",
+      "set",
+      "str",
+      "text_mentions_mounted_skill"
+    ],
+    "ast_sha256": "7f72c8a727c83f30258d1e1f963cd01e2e68b718fee349f5d957d280facb552e",
+    "moved_ast_sha256": "7f72c8a727c83f30258d1e1f963cd01e2e68b718fee349f5d957d280facb552e"
+  },
+  {
+    "name": "codex_host_path_redactor",
+    "owner": "agent_clis",
+    "sha256": "93a6fdcd9291f4afd1e1a1ef948dd0c7feb2d952a330b010b579ba26f5a0d42e",
+    "globals": [
+      "CodexHostPathRedactor",
+      "_codex_path_spellings",
+      "_walk_codex_host_skills",
+      "len",
+      "os",
+      "set",
+      "sorted",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "cfe2718966d8a534df2053e8347999569984f285e049155c2b4c0eff588f0b15",
+    "moved_ast_sha256": "cfe2718966d8a534df2053e8347999569984f285e049155c2b4c0eff588f0b15"
+  },
+  {
+    "name": "codex_trigger_context_isolation_args",
+    "owner": "agent_clis",
+    "sha256": "c9985656d829890e2f9ec0b2c364f1b27093f87e1b01d37b8bdfc56bad04dbbd",
+    "globals": [
+      "codex_host_skill_paths",
+      "len",
+      "list",
+      "str",
+      "toml_basic_string",
+      "tuple"
+    ],
+    "ast_sha256": "d68331f40a24ca63b173f99d78194b2c3b59d6cc1b0984d983c4084fb70f9ac0",
+    "moved_ast_sha256": "d68331f40a24ca63b173f99d78194b2c3b59d6cc1b0984d983c4084fb70f9ac0"
+  },
+  {
+    "name": "CODEX_HOME_FILES",
+    "owner": "agent_clis",
+    "sha256": "eb1b9f9de922982cfd1d1de7e2cd4927eff7fde5eb5ac87e498506e40a937780",
+    "globals": [],
+    "ast_sha256": "7a51652c75b7113f45a4f509c92cbefe322c5c48354445bd91410a225a301714",
+    "moved_ast_sha256": "7a51652c75b7113f45a4f509c92cbefe322c5c48354445bd91410a225a301714"
+  },
+  {
+    "name": "CodexRollout",
+    "owner": "agent_clis",
+    "sha256": "66cba24d56dde6dcebefcd24de6d8d2f27068975da708c91b199c8cbe12ca15f",
+    "globals": [
+      "Any",
+      "_dataclass",
+      "dict",
+      "str"
+    ],
+    "ast_sha256": "d0b08594f1aeed7afba0f695551937359145e654e3afe4027630e561a7497d6f",
+    "moved_ast_sha256": "d0b08594f1aeed7afba0f695551937359145e654e3afe4027630e561a7497d6f"
+  },
+  {
+    "name": "locate_codex_rollout",
+    "owner": "agent_clis",
+    "sha256": "ee582d0a3e10b55d568e5622d145e86183c8619582f3c1c5e19584147a8082f3",
+    "globals": [
+      "CodexRollout",
+      "Path",
+      "codex_rollout_path",
+      "codex_thread_id",
+      "list",
+      "os",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "ed5421aa7042c4d2c64b110697b9c9c0ec1a8605f3326358aaebe92410248eab",
+    "moved_ast_sha256": "ed5421aa7042c4d2c64b110697b9c9c0ec1a8605f3326358aaebe92410248eab"
+  },
+  {
+    "name": "VIBE_READ_ONLY_TOOLS",
+    "owner": "agent_clis",
+    "sha256": "b3d34ccbd420d8f35fdd54cb9925787092c5964e253ada9e24dca576326a5494",
+    "globals": [],
+    "ast_sha256": "f8a7b9255211004dd636fe617827f30b205570ebae64ecb7a88c69e199952b83",
+    "moved_ast_sha256": "f8a7b9255211004dd636fe617827f30b205570ebae64ecb7a88c69e199952b83"
+  },
+  {
+    "name": "build_vibe_cli_argv",
+    "owner": "agent_clis",
+    "sha256": "0226c6f008a77b4887931d86bf25932b3c987cb6c74ac56e1adfd867b009df5d",
+    "globals": [
+      "Iterable",
+      "Path",
+      "TypeError",
+      "VIBE_DEFAULT_CMD",
+      "VIBE_READ_ONLY_TOOLS",
+      "ValueError",
+      "bool",
+      "float",
+      "int",
+      "list",
+      "shlex",
+      "str"
+    ],
+    "ast_sha256": "34efb4d00b3c0a05165da836dc752ed36e03ec21b7b4d6ae67beffd815a5f862",
+    "moved_ast_sha256": "34efb4d00b3c0a05165da836dc752ed36e03ec21b7b4d6ae67beffd815a5f862"
+  },
+  {
+    "name": "vibe_env_for_home",
+    "owner": "agent_clis",
+    "sha256": "8264ebfaa73d3f048d2d3548c6bb14b9d1a180e7091207d0149bbbee88768856",
+    "globals": [
+      "Any",
+      "Path",
+      "dict",
+      "os",
+      "seed_vibe_home",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "451d3eb79bdac317ca14969c3a8729f9d9e4745430b8519b054f6a160588c405",
+    "moved_ast_sha256": "451d3eb79bdac317ca14969c3a8729f9d9e4745430b8519b054f6a160588c405"
+  },
+  {
+    "name": "redact_vibe_prompt_arg",
+    "owner": "agent_clis",
+    "sha256": "350f5ed5ce695a71a40925f865b6d8cb8d6d44c5bc3a4b1fcebcb77d629461ac",
+    "globals": [
+      "len",
+      "list",
+      "range",
+      "str"
+    ],
+    "ast_sha256": "e96d32c144da57c0028f32f96ffd5582ba9580d370a37c1d4bd0f50851fb11ef",
+    "moved_ast_sha256": "e96d32c144da57c0028f32f96ffd5582ba9580d370a37c1d4bd0f50851fb11ef"
+  },
+  {
+    "name": "CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS",
+    "owner": "agent_clis",
+    "sha256": "e3e4104d771516b7c2be8db7f2bd245582964ecb0150b6c3ead67b2c981f35f1",
+    "globals": [],
+    "ast_sha256": "a20b4977703b62a6b2f0e4e92013615f3ae809c18af0cfd18441faa2fee9128f",
+    "moved_ast_sha256": "a20b4977703b62a6b2f0e4e92013615f3ae809c18af0cfd18441faa2fee9128f"
+  },
+  {
+    "name": "write_json",
+    "owner": "json_contracts",
+    "sha256": "4b91708b0f67260890cf8efd54ae5ba265da4d7892848c38de4ea3f3add6297c",
+    "globals": [
+      "Any",
+      "Path",
+      "json"
+    ],
+    "ast_sha256": "2faa1fd8d1566f7ca800049ad231ee49e47854dd4f0bfb385a907063699583ec",
+    "moved_ast_sha256": "2faa1fd8d1566f7ca800049ad231ee49e47854dd4f0bfb385a907063699583ec"
+  },
+  {
+    "name": "iter_json_objects",
+    "owner": "json_contracts",
+    "sha256": "a791beac78dda84cdbc9eefc53c0a9f5108f345fcdbdfcd65c6d570762c93b30",
+    "globals": [
+      "StrictJSONViolation",
+      "ValueError",
+      "bool",
+      "json",
+      "str",
+      "stream_json_loads",
+      "strict_json_loads"
+    ],
+    "ast_sha256": "78b8b8305377c13303cc15e8677c040be656dfb174103d968fc7c2b95d7c6a41",
+    "moved_ast_sha256": "78b8b8305377c13303cc15e8677c040be656dfb174103d968fc7c2b95d7c6a41"
+  },
+  {
+    "name": "canonical_json_sha256",
+    "owner": "content_digests",
+    "sha256": "b6dc845152bf65d14218c2944d8789ffc0070b82d5bc0794258cd036e6e0f1f3",
+    "globals": [
+      "Any",
+      "hashlib",
+      "json",
+      "str"
+    ],
+    "ast_sha256": "11d5e33f07b89fc8d0c98c778ee600a47f3d03c0aa307d57968655797e0e81c1",
+    "moved_ast_sha256": "11d5e33f07b89fc8d0c98c778ee600a47f3d03c0aa307d57968655797e0e81c1"
+  },
+  {
+    "name": "die",
+    "owner": "cli_contracts",
+    "sha256": "26f0b3ba8655a9926604846ce96555786ea18610eb01ec18cf44859061f31f7e",
+    "globals": [
+      "NoReturn",
+      "SystemExit",
+      "print",
+      "str",
+      "sys"
+    ],
+    "ast_sha256": "2b6c4fa7e6d607b0939bbfd3c9c7c6bc1ce5c47259352801183b9f1a72a7e396",
+    "moved_ast_sha256": "2b6c4fa7e6d607b0939bbfd3c9c7c6bc1ce5c47259352801183b9f1a72a7e396"
+  },
+  {
+    "name": "native_spend_policy",
+    "owner": "cli_contracts",
+    "sha256": "5b7679391b712267881b78d23c6543a55b7e1ad21d050131f13300c2df0c7ba5",
+    "globals": [
+      "SpendPolicy",
+      "TypeError",
+      "ValueError",
+      "argparse",
+      "die",
+      "getattr"
+    ],
+    "ast_sha256": "3a19896237589fe806dfec4169570ae4df278a1fd200d33c9377e62d60b14425",
+    "moved_ast_sha256": "3a19896237589fe806dfec4169570ae4df278a1fd200d33c9377e62d60b14425"
+  },
+  {
+    "name": "UniqueKeySafeLoader",
+    "owner": "skill_inputs",
+    "sha256": "03e0ed075aa72028b59f57cef112c85a88562060760e12ce6956f9e0e24e2f7c",
+    "globals": [
+      "yaml"
+    ],
+    "ast_sha256": "2136e2d81be6be280ad3356855b5f4ebc940aaa78e3a7aa14bb4fbce3f0f8a12",
+    "moved_ast_sha256": "2136e2d81be6be280ad3356855b5f4ebc940aaa78e3a7aa14bb4fbce3f0f8a12"
+  },
+  {
+    "name": "materialize_dataset_cases",
+    "owner": "skill_inputs",
+    "sha256": "e741f3fb7217e8325f53c742859224d6865782f24368fb5724d9125f728d55da",
+    "globals": [
+      "Any",
+      "all",
+      "apply_dataset_row",
+      "dict",
+      "die",
+      "enumerate",
+      "isinstance",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "109406e3be38c9a3fd9ccc98fb7346a7f95d82ddb5f7d1d122e75d02d45866ba",
+    "moved_ast_sha256": "109406e3be38c9a3fd9ccc98fb7346a7f95d82ddb5f7d1d122e75d02d45866ba"
+  },
+  {
+    "name": "load_json",
+    "owner": "skill_inputs",
+    "sha256": "37396b82dddd5dc4c45134dcc7861d018915dd94bc607d011508c6a8c81f7125",
+    "globals": [
+      "Any",
+      "FileNotFoundError",
+      "Path",
+      "dict",
+      "die",
+      "isinstance",
+      "json",
+      "str",
+      "strict_json_loads"
+    ],
+    "ast_sha256": "34f318becbb5107657dfc432f95cf82b8738adde15d92af8303a56169171cc03",
+    "moved_ast_sha256": "34f318becbb5107657dfc432f95cf82b8738adde15d92af8303a56169171cc03"
+  },
+  {
+    "name": "reject_nonfinite_numbers",
+    "owner": "skill_inputs",
+    "sha256": "b4007efb4d0064ab1d741312101e4dea1fdcc58146745f4f56888b646445dc73",
+    "globals": [
+      "Any",
+      "ValueError",
+      "dict",
+      "enumerate",
+      "float",
+      "isinstance",
+      "list",
+      "math",
+      "str"
+    ],
+    "ast_sha256": "92c04651990723077aa7a9f6fecbdc807ca377d3a9c1448dfc0b8fed872508e5",
+    "moved_ast_sha256": "92c04651990723077aa7a9f6fecbdc807ca377d3a9c1448dfc0b8fed872508e5"
+  },
+  {
+    "name": "skill_root_key",
+    "owner": "skill_inputs",
+    "sha256": "68ed9532b3178a6f5de64c26c0dbc4998a56f5e89cd1a4e9d84e7d23047f1a4f",
+    "globals": [
+      "AblationError",
+      "Path",
+      "PurePosixPath",
+      "frontmatter_value",
+      "isinstance",
+      "re",
+      "str"
+    ],
+    "ast_sha256": "f35a464b0bc5df2a43e38460f8e1c07f9c9a5a48a933f43ea472361f9fd6554b",
+    "moved_ast_sha256": "f35a464b0bc5df2a43e38460f8e1c07f9c9a5a48a933f43ea472361f9fd6554b"
+  },
+  {
+    "name": "parse_frontmatter",
+    "owner": "skill_inputs",
+    "sha256": "dcd1d2a28d1fa8ccce577e3653f086cd90951abb7b17847f1f13114c7fafde83",
+    "globals": [
+      "Any",
+      "dict",
+      "isinstance",
+      "split_frontmatter",
+      "str",
+      "yaml"
+    ],
+    "ast_sha256": "20dcb2e7c5812db9e71eb1252152e72f98082d1ca41248e2a2724cb3b1bda31d",
+    "moved_ast_sha256": "20dcb2e7c5812db9e71eb1252152e72f98082d1ca41248e2a2724cb3b1bda31d"
+  },
+  {
+    "name": "materialize_ablation",
+    "owner": "skill_inputs",
+    "sha256": "d85a6bb9d9520af2bf0d2b56d238b8c15f55186ce002586df11b537efb18a165",
+    "globals": [
+      "Any",
+      "Path",
+      "ValidatedAblation",
+      "dict",
+      "materialize",
+      "str"
+    ],
+    "ast_sha256": "333c758aed09a370afff37f12502f9ff476b8acb35fc7c2e23dd8c58c1f64cb1",
+    "moved_ast_sha256": "333c758aed09a370afff37f12502f9ff476b8acb35fc7c2e23dd8c58c1f64cb1"
+  },
+  {
+    "name": "ablation_by_id",
+    "owner": "skill_inputs",
+    "sha256": "2383936bc5cc8bcd7d0bf5f6d38469faba86f5c7dc0d6109ae4a354b74960317",
+    "globals": [
+      "Any",
+      "dict",
+      "next",
+      "str"
+    ],
+    "ast_sha256": "ae5205920999dcc42121a52e618ba0c14706785a15b376d26b30bb7e1f84901d",
+    "moved_ast_sha256": "ae5205920999dcc42121a52e618ba0c14706785a15b376d26b30bb7e1f84901d"
+  },
+  {
+    "name": "ablation_components",
+    "owner": "skill_inputs",
+    "sha256": "a30f2ee0085bde78f6e7cb91b2c5725575006c558d863bb2b8141f5de2a7de84",
+    "globals": [
+      "Any",
+      "dict",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "c8aa633d7f56ef3031db1454163d1ed97cbd6d95b1c10452f227cc7ae1cbffbe",
+    "moved_ast_sha256": "c8aa633d7f56ef3031db1454163d1ed97cbd6d95b1c10452f227cc7ae1cbffbe"
+  },
+  {
+    "name": "derived_population",
+    "owner": "skill_inputs",
+    "sha256": "4f3b65fe7446a6fdfedb5f573813de2d0cad217b47d70bd26909200a92e2e0bb",
+    "globals": [
+      "AblationError",
+      "Any",
+      "component_class",
+      "dict",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "8d797313427b17676cb0e7b84cf01502bec4286675b31fe3e2855f190827b1ef",
+    "moved_ast_sha256": "8d797313427b17676cb0e7b84cf01502bec4286675b31fe3e2855f190827b1ef"
+  },
+  {
+    "name": "_safe_under",
+    "owner": "skill_inputs",
+    "sha256": "0902bf2644c763cc65823be95a27b9d6ace3499b087b4306183ff035f61e339b",
+    "globals": [
+      "AblationError",
+      "Path"
+    ],
+    "ast_sha256": "7b2a599727c167428c58f64131c8d32f4a0184129c94c1d63171661c547eb07a",
+    "moved_ast_sha256": "7b2a599727c167428c58f64131c8d32f4a0184129c94c1d63171661c547eb07a"
+  },
+  {
+    "name": "_copy_skill_root",
+    "owner": "skill_inputs",
+    "sha256": "c41c259a01761d4bc92c4e055649e868156d56293f21489fe0feb17bd2237b7b",
+    "globals": [
+      "AblationError",
+      "Path",
+      "_COPY_EXCLUDE",
+      "list",
+      "os",
+      "shutil",
+      "str"
+    ],
+    "ast_sha256": "c827cf275402a547f10279ef55b4423335c57db6eb999b4612507be95d5fbdb3",
+    "moved_ast_sha256": "c827cf275402a547f10279ef55b4423335c57db6eb999b4612507be95d5fbdb3",
+    "removed_docstrings": [
+      "_copy_skill_root"
+    ],
+    "comment_cleanup_ast_sha256": "f4cdc80d1c1ae3c804c3954d42cd40991fb48d621bf9304a0acecbd3fba74249"
+  },
+  {
+    "name": "_reject_overlapping_skill_roots",
+    "owner": "skill_inputs",
+    "sha256": "6f1f7ce533ddd1b405bbd2008c6554ffd0e42956584c714bb501e052918e166e",
+    "globals": [
+      "AblationError",
+      "Any",
+      "Path",
+      "dict",
+      "enumerate",
+      "list",
+      "skill_root_keys_for",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "70222cbb22f277b734d01c11f4d71e1bc42640129342d4f029029075070bcfff",
+    "moved_ast_sha256": "70222cbb22f277b734d01c11f4d71e1bc42640129342d4f029029075070bcfff",
+    "removed_docstrings": [
+      "_reject_overlapping_skill_roots"
+    ],
+    "comment_cleanup_ast_sha256": "bc7b68a626940decfc572c4415de9371cc84e030ed41c5067f9cac2aadfe3fc1"
+  },
+  {
+    "name": "_reject_output_root_overlap",
+    "owner": "skill_inputs",
+    "sha256": "51ee5134e454204c217a07274e1456bf79fe3b6ded96445d234eb83040f0568b",
+    "globals": [
+      "AblationError",
+      "Any",
+      "Path",
+      "dict",
+      "str"
+    ],
+    "ast_sha256": "3e8a6c806c183d4dd0a7b58980da386cc079404f62f361e0d4428ae37dff6d40",
+    "moved_ast_sha256": "3e8a6c806c183d4dd0a7b58980da386cc079404f62f361e0d4428ae37dff6d40",
+    "removed_docstrings": [
+      "_reject_output_root_overlap"
+    ],
+    "comment_cleanup_ast_sha256": "e820caa8316f6c4a5cc66c86846706b326a4a09c0e2edc6f60292180400730b0"
+  },
+  {
+    "name": "expected_provenance_for_ablation",
+    "owner": "skill_inputs",
+    "sha256": "8a8e78d8305e87933e34ed19b2e948876e5b98c66bc474c104bf5af3e8e07a68",
+    "globals": [
+      "AblationMode",
+      "Any",
+      "CasePopulation",
+      "ExpectedProvenance",
+      "ValueError",
+      "_expected_component",
+      "ablation_by_id",
+      "ablation_components",
+      "all",
+      "derived_population",
+      "dict",
+      "isinstance",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "dd0d631549aa4aafc18ee5f4f12f7438a515276cb102705af602d9ec6435d3b6",
+    "moved_ast_sha256": "dd0d631549aa4aafc18ee5f4f12f7438a515276cb102705af602d9ec6435d3b6"
+  },
+  {
+    "name": "PROCESS_PIPE_DRAIN_GRACE_S",
+    "owner": "process_runtime",
+    "sha256": "9137fc76eac92cc63ffa0a27fb5d3f858740c1c3937950019b3659bc1de5b40f",
+    "globals": [],
+    "ast_sha256": "5d61d4368972bda91aa9f81d003e68092da4c3dcc27cd5d92882c4d3100b4504",
+    "moved_ast_sha256": "5d61d4368972bda91aa9f81d003e68092da4c3dcc27cd5d92882c4d3100b4504"
+  },
+  {
+    "name": "_stderr_with_warning",
+    "owner": "process_runtime",
+    "sha256": "e0bd806fec3115d19d0d5b5e3e14960481a4b6ce5fa170c7a7a470ef512472d9",
+    "globals": [
+      "int",
+      "len",
+      "max",
+      "str"
+    ],
+    "ast_sha256": "5cbb3e860c9e7354a198fa5486d1b218086335dd7b2060ba8dabfb265eb07696",
+    "moved_ast_sha256": "5cbb3e860c9e7354a198fa5486d1b218086335dd7b2060ba8dabfb265eb07696",
+    "removed_docstrings": [
+      "_stderr_with_warning"
+    ],
+    "comment_cleanup_ast_sha256": "6d317461adc9a6e0c8502007ed6ab8c8b4e75ad0dd8555c85c6e96f7a053d909"
+  },
+  {
+    "name": "PROCESS_LEADER_POLL_INTERVAL_S",
+    "owner": "process_runtime",
+    "sha256": "4a32a30646fd80d0f99462e6151ce9599f0351d0dbd3124b63dbd29de5341536",
+    "globals": [],
+    "ast_sha256": "1b024adb8d500c3b83d35fc478f34ef483033f1eea00c519cc1e6a8abc0ca77a",
+    "moved_ast_sha256": "1b024adb8d500c3b83d35fc478f34ef483033f1eea00c519cc1e6a8abc0ca77a"
+  },
+  {
+    "name": "AGENT_STOP_GRACE_S",
+    "owner": "process_runtime",
+    "sha256": "dff273a3b691f189495a9b76822c15474f68b51a9d40f7a139c535a03076e9ec",
+    "globals": [],
+    "ast_sha256": "ebed24ad87a01c330ee25dc6c319a1d9c336d6b21b584b2207a0dfb6fda735d0",
+    "moved_ast_sha256": "ebed24ad87a01c330ee25dc6c319a1d9c336d6b21b584b2207a0dfb6fda735d0"
+  },
+  {
+    "name": "_codex_trace_protocol_error",
+    "owner": "trace_normalization",
+    "sha256": "b1d8381459e749f78aa86461058416cb1a38c6a0b19fcb0a7671783fbaccf816",
+    "globals": [
+      "Any",
+      "PiStream",
+      "dict",
+      "enumerate",
+      "len",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "fefc08dbe225bf5737192e000822b1c77f29f0d44f8ff975a45bf338c9d66193",
+    "moved_ast_sha256": "fefc08dbe225bf5737192e000822b1c77f29f0d44f8ff975a45bf338c9d66193"
+  },
+  {
+    "name": "codex_stream_flat_records",
+    "owner": "trace_normalization",
+    "sha256": "39c2174cc0514795332e3567380dbe991d1ca5da66cecd483aa8166fd366b1a0",
+    "globals": [
+      "Any",
+      "EventState",
+      "ValueError",
+      "all",
+      "dict",
+      "enumerate",
+      "int",
+      "isinstance",
+      "len",
+      "list",
+      "parse_event_state",
+      "str",
+      "stringify_trace_value",
+      "tuple"
+    ],
+    "ast_sha256": "0986aada08ef62b1f40f208f73c31520b4ec76add3f11218618bf457de4c13b9",
+    "moved_ast_sha256": "0986aada08ef62b1f40f208f73c31520b4ec76add3f11218618bf457de4c13b9"
+  },
+  {
+    "name": "_jetty_trace_protocol_error",
+    "owner": "trace_normalization",
+    "sha256": "06410d22e6180b073f1d0f9ea84f178c22eecce668b313eb4cd0be9b9724aa1d",
+    "globals": [
+      "Any",
+      "PiStream",
+      "any",
+      "dict",
+      "list",
+      "next",
+      "str",
+      "sum"
+    ],
+    "ast_sha256": "f13b77c23e6da5dc31fc1462b90f7eac729a1e2e32b3301e7c198563b0451b09",
+    "moved_ast_sha256": "f13b77c23e6da5dc31fc1462b90f7eac729a1e2e32b3301e7c198563b0451b09"
+  },
+  {
+    "name": "vibe_stream_flat_records",
+    "owner": "trace_normalization",
+    "sha256": "1a1a2552e61c27e0e7f62665c8f78665db019919a04a4c60a2cc5e01bfc1988e",
+    "globals": [
+      "Any",
+      "dict",
+      "int",
+      "list",
+      "str",
+      "tuple",
+      "vibe_history_entry_flat_records",
+      "vibe_llm_message_flat_records",
+      "vibe_records_are_history_entries"
+    ],
+    "ast_sha256": "1ffd209c0c52255dc362fc8007d8a164bddeb8b58d52ca60a6473b38ed8df996",
+    "moved_ast_sha256": "1ffd209c0c52255dc362fc8007d8a164bddeb8b58d52ca60a6473b38ed8df996"
+  },
+  {
+    "name": "_vibe_trace_protocol_error",
+    "owner": "trace_normalization",
+    "sha256": "c410e7c894134565fadb29688656a41505bc0dca94676806df58be0aa3465210",
+    "globals": [
+      "Any",
+      "PiStream",
+      "VIBE_HISTORY_CONTENT_ENTRY_TYPES",
+      "bool",
+      "dict",
+      "isinstance",
+      "list",
+      "str",
+      "vibe_entry_text",
+      "vibe_records_are_history_entries"
+    ],
+    "ast_sha256": "6b712f132f83eadcf28ae83dbd83a6367bd6516d955db72346f6420c23d9fb31",
+    "moved_ast_sha256": "6b712f132f83eadcf28ae83dbd83a6367bd6516d955db72346f6420c23d9fb31"
+  },
+  {
+    "name": "_claude_trace_protocol_error",
+    "owner": "trace_normalization",
+    "sha256": "0d8f6af23c8c30e2811df2825aec08e08578124f2a210e65ec6f179c1bcf3d40",
+    "globals": [
+      "Any",
+      "PiStream",
+      "claude_terminal_result_index",
+      "dict",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "3f381b261331d275cf525a083c0335e8b173bcf7a93b7da414c2f0f6fe6cf7c2",
+    "moved_ast_sha256": "3f381b261331d275cf525a083c0335e8b173bcf7a93b7da414c2f0f6fe6cf7c2"
+  },
+  {
+    "name": "claude_stream_flat_records",
+    "owner": "trace_normalization",
+    "sha256": "a5f903f0f7dc444cb30ab94453ded8aa4c0a6a2de2926f3c90c65b40f3fe413f",
+    "globals": [
+      "Any",
+      "ValueError",
+      "_claude_protocol_error",
+      "_claude_tool_flat_record",
+      "bool",
+      "dict",
+      "enumerate",
+      "int",
+      "isinstance",
+      "len",
+      "list",
+      "set",
+      "sorted",
+      "str",
+      "stringify_trace_value",
+      "tuple"
+    ],
+    "ast_sha256": "888ddf6bb7c7e466018307ebdd7116846d94f5bed13e646cceda41cf1079319f",
+    "moved_ast_sha256": "888ddf6bb7c7e466018307ebdd7116846d94f5bed13e646cceda41cf1079319f"
+  },
+  {
+    "name": "_pi_retries",
+    "owner": "trace_normalization",
+    "sha256": "8435afddeccbc43438453deebcee33287f601d3aab51c4651f2b0775c299c8ff",
+    "globals": [
+      "Any",
+      "PiStream",
+      "dict",
+      "int",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "5b8921ac4f49d8e4f83684f506f617efc1489bbfd582417add840125cc113f20",
+    "moved_ast_sha256": "5b8921ac4f49d8e4f83684f506f617efc1489bbfd582417add840125cc113f20"
+  },
+  {
+    "name": "_pi_trace_protocol_error",
+    "owner": "trace_normalization",
+    "sha256": "ab3b6b12875b132151d0107fa9cfee90fa62dd276a15614128d625a7bddbf57f",
+    "globals": [
+      "Any",
+      "PiStream",
+      "dict",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "fcfbda8ba50a17032645f680b8c3bfb8960bdf30f93f35d4a597a0567b080010",
+    "moved_ast_sha256": "fcfbda8ba50a17032645f680b8c3bfb8960bdf30f93f35d4a597a0567b080010"
+  },
+  {
+    "name": "_pi_usage_and_cost_blocks",
+    "owner": "trace_normalization",
+    "sha256": "1d594680766afc40ba32b6a7185177a239ed84eb792820c9902fe60aa79f4eaa",
+    "globals": [
+      "Any",
+      "PiStream",
+      "dict",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "a39642a690c2276a03058515b3817b916d3a7ec2af0c1ab402226b992e33b4a3",
+    "moved_ast_sha256": "a39642a690c2276a03058515b3817b916d3a7ec2af0c1ab402226b992e33b4a3"
+  },
+  {
+    "name": "pi_stream_flat_records",
+    "owner": "trace_normalization",
+    "sha256": "78cfc2dbde2f69f8d1f20c8f2779682eee4896ff9b6b78f7f2caca94c061d673",
+    "globals": [
+      "Any",
+      "ValueError",
+      "dict",
+      "enumerate",
+      "int",
+      "isinstance",
+      "len",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "0f27959bb61c1542ade8e735dcdea97e48a1082ff0f83e44b72319798a7af1d8",
+    "moved_ast_sha256": "0f27959bb61c1542ade8e735dcdea97e48a1082ff0f83e44b72319798a7af1d8"
+  },
+  {
+    "name": "_pi_stream_semantics",
+    "owner": "trace_normalization",
+    "sha256": "cfa18f441dc61d8ba97992404b8836299343ab29c482c5314dc5bf7a96956172",
+    "globals": [
+      "Any",
+      "PiStream",
+      "dict",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "ceb33a02e56e302359bcc0f1243c0b5f21fc88550179bca4ea116db50684b66f",
+    "moved_ast_sha256": "ceb33a02e56e302359bcc0f1243c0b5f21fc88550179bca4ea116db50684b66f"
+  },
+  {
+    "name": "_gemini_stream_semantics",
+    "owner": "trace_normalization",
+    "sha256": "25c2ebe438b3dc0d5926f4094164902229e4204541dff4f9ffee084104f05081",
+    "globals": [
+      "Any",
+      "GeminiStream",
+      "PiStream",
+      "_gemini_records_text",
+      "dict",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "9f8f2bcdcbfafee1ce68ae6a2e4fbabc737153985f4ff0e6722ce5f372c58e28",
+    "moved_ast_sha256": "9f8f2bcdcbfafee1ce68ae6a2e4fbabc737153985f4ff0e6722ce5f372c58e28"
+  },
+  {
+    "name": "gemini_stream_flat_records",
+    "owner": "trace_normalization",
+    "sha256": "49c331ed43bcf08799498adc468fe10ab623cefa621b9ce5dd11d7d128c87817",
+    "globals": [
+      "Any",
+      "Mapping",
+      "ValueError",
+      "_claude_protocol_error",
+      "_gemini_tool_flat_record",
+      "dict",
+      "enumerate",
+      "int",
+      "isinstance",
+      "len",
+      "list",
+      "sorted",
+      "str",
+      "stringify_trace_value",
+      "tuple"
+    ],
+    "ast_sha256": "5f96453af7f93e2c2f3a448077324d5b5fedab753a14aed06fa38277e8dfbc4a",
+    "moved_ast_sha256": "5f96453af7f93e2c2f3a448077324d5b5fedab753a14aed06fa38277e8dfbc4a"
+  },
+  {
+    "name": "_gemini_trace_protocol_error",
+    "owner": "trace_normalization",
+    "sha256": "02cf4314df00c6ed0f1f4281200746ae5c8f733ba1737361ff7c9fa9d9c64805",
+    "globals": [
+      "Any",
+      "GeminiStream",
+      "PiStream",
+      "_gemini_records_text",
+      "dict",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "080a090aa3579342845aff526492bd56c1dff4b5f7c95723fb147c5ead92ccd6",
+    "moved_ast_sha256": "080a090aa3579342845aff526492bd56c1dff4b5f7c95723fb147c5ead92ccd6"
+  },
+  {
+    "name": "_gemini_usage_and_cost_blocks",
+    "owner": "trace_normalization",
+    "sha256": "c788df36094617cf7648b0e988e526ceb6108b5799653ae22b93da29baec76cc",
+    "globals": [
+      "Any",
+      "GeminiStream",
+      "PiStream",
+      "dict",
+      "normalize_usage",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "6b2a468e8a6db3c7f103ae9c920832077e85e35a612fda505881692903f588ec",
+    "moved_ast_sha256": "6b2a468e8a6db3c7f103ae9c920832077e85e35a612fda505881692903f588ec"
+  },
+  {
+    "name": "coerce_text",
+    "owner": "trace_normalization",
+    "sha256": "26d33ae25b2301fd6313d5ae26ffe8d37883f3dee068bcdfd6a06e80b8ffac2d",
+    "globals": [
+      "Any",
+      "bytes",
+      "isinstance",
+      "str"
+    ],
+    "ast_sha256": "0db37521380b4ae71cf06957d71a08262d37e9a55e53e97ff982a40026221892",
+    "moved_ast_sha256": "0db37521380b4ae71cf06957d71a08262d37e9a55e53e97ff982a40026221892"
+  },
+  {
+    "name": "event_texts_for_tool_input",
+    "owner": "trace_normalization",
+    "sha256": "d143be8cc0099ffde96c526107906a05df3005ddf58606b4912eba7a8561e180",
+    "globals": [
+      "Any",
+      "EVENT_TEXT_KEYS",
+      "_flatten_event_text",
+      "dict",
+      "isinstance",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "7eb805effb7bf7a70eba5dbb176444fc0a7e187dd5eb705cd36be3778a2a26d3",
+    "moved_ast_sha256": "7eb805effb7bf7a70eba5dbb176444fc0a7e187dd5eb705cd36be3778a2a26d3"
+  },
+  {
+    "name": "text_mentions_mounted_skill",
+    "owner": "trace_normalization",
+    "sha256": "b1ec96cd2702515e914bf1b0c521087e74738af3dba055669ec3049131dad4ed",
+    "globals": [
+      "Path",
+      "Sequence",
+      "bool",
+      "re",
+      "str"
+    ],
+    "ast_sha256": "f2c254de7d65b14fdf16484ba736bf2cb17b46af6f3eb434940d180055f19650",
+    "moved_ast_sha256": "f2c254de7d65b14fdf16484ba736bf2cb17b46af6f3eb434940d180055f19650"
+  },
+  {
+    "name": "parse_trace_jsonl_text_with_lines",
+    "owner": "trace_normalization",
+    "sha256": "be036c55db9e3681b7aed097658fa16a5daddf8a78c9f0f21f467a05d27f3817",
+    "globals": [
+      "Any",
+      "RecursionError",
+      "StrictJSONViolation",
+      "TypeError",
+      "ValueError",
+      "bool",
+      "dict",
+      "enumerate",
+      "int",
+      "isinstance",
+      "json",
+      "list",
+      "parse_stream_json",
+      "str",
+      "strict_json_loads",
+      "tuple",
+      "type"
+    ],
+    "ast_sha256": "e5c320392ae1c6985d1718d94eb7be81ed9a12406cc40e05ead01abae0024a05",
+    "moved_ast_sha256": "e5c320392ae1c6985d1718d94eb7be81ed9a12406cc40e05ead01abae0024a05"
+  },
+  {
+    "name": "repeated_command_max",
+    "owner": "trace_normalization",
+    "sha256": "63262c7b0f08432d9bc28454c21dc0cd17c207094547c1293937fbe67eb90c23",
+    "globals": [
+      "int",
+      "list",
+      "max",
+      "re",
+      "str"
+    ],
+    "ast_sha256": "066fdbc30bf6cd55b026b6b697ab8f9ac545e6726c57c6e6a68f0ab2f06cae8c",
+    "moved_ast_sha256": "066fdbc30bf6cd55b026b6b697ab8f9ac545e6726c57c6e6a68f0ab2f06cae8c"
+  },
+  {
+    "name": "normalize_usage",
+    "owner": "trace_normalization",
+    "sha256": "bc8e26eed15c443f1840766011d9099b73258d5798a4db023c9fdcab059f1d2e",
+    "globals": [
+      "Any",
+      "USAGE_SOURCES",
+      "ValueError",
+      "dict",
+      "sorted",
+      "str",
+      "telemetry_domain"
+    ],
+    "ast_sha256": "3e8d1966f1f6a806687916336f0b082812ef732e58b3b46ba85b447b24aecdb5",
+    "moved_ast_sha256": "3e8d1966f1f6a806687916336f0b082812ef732e58b3b46ba85b447b24aecdb5"
+  },
+  {
+    "name": "raw_trace_value",
+    "owner": "trace_normalization",
+    "sha256": "a1aed2b497b581d45a483d346e3c9dbab50ef2d8448362a71c00295c5e8aa26f",
+    "globals": [
+      "Any",
+      "dict",
+      "isinstance",
+      "str"
+    ],
+    "ast_sha256": "b9a85e6094825a38a98a1fbc13433cc09be750e240ddd42525f1da8e611ec86c",
+    "moved_ast_sha256": "b9a85e6094825a38a98a1fbc13433cc09be750e240ddd42525f1da8e611ec86c"
+  },
+  {
+    "name": "normalize_trace_record",
+    "owner": "trace_normalization",
+    "sha256": "66d233bc3d140492587ef265ee1d5df1c748ac2967fc6dcf9c7e5b40f077a3e9",
+    "globals": [
+      "Any",
+      "TraceEventKind",
+      "_num",
+      "any",
+      "bool",
+      "dict",
+      "int",
+      "isinstance",
+      "nested_item_type",
+      "otel_attributes_for_event",
+      "parse_event_state",
+      "raw_trace_has_key",
+      "raw_trace_input_value",
+      "raw_trace_value",
+      "raw_type_tokens",
+      "str",
+      "stringify_trace_value",
+      "usage_number"
+    ],
+    "ast_sha256": "a1cf5423e9b65e5a58d8f894ab766cb1a77a282973a5f148fcdbc72bb4642e0b",
+    "moved_ast_sha256": "a1cf5423e9b65e5a58d8f894ab766cb1a77a282973a5f148fcdbc72bb4642e0b"
+  },
+  {
+    "name": "trace_event_counts",
+    "owner": "trace_normalization",
+    "sha256": "772afd2fef3046d001d500458bfa75f42474625a4569b0e80e82da900ca24ed9",
+    "globals": [
+      "Any",
+      "TRAJECTORY_STEP_TYPES",
+      "_tool_measurements",
+      "command_events",
+      "dict",
+      "event_is_completed",
+      "event_mentions_skill_file",
+      "len",
+      "list",
+      "str",
+      "sum",
+      "tool_fault_domain"
+    ],
+    "ast_sha256": "8edfc7620c49e37fb1b638055d705b80395a5f6f92110e8fa7dc628c75b92fe3",
+    "moved_ast_sha256": "8edfc7620c49e37fb1b638055d705b80395a5f6f92110e8fa7dc628c75b92fe3"
+  },
+  {
+    "name": "_num",
+    "owner": "trace_normalization",
+    "sha256": "ce7acd55820dc6c70ca1ae75c0dd77a35b7fd7b2917ff4a1ea4e62fe6b28736d",
+    "globals": [
+      "Any",
+      "OverflowError",
+      "ValueError",
+      "bool",
+      "float",
+      "int",
+      "isinstance",
+      "math"
+    ],
+    "ast_sha256": "8d418d71cdc36578e33c63cbfde832fb8554d0ac3b0965e3ab76139b1d2c4003",
+    "moved_ast_sha256": "8d418d71cdc36578e33c63cbfde832fb8554d0ac3b0965e3ab76139b1d2c4003"
+  },
+  {
+    "name": "command_text",
+    "owner": "trace_normalization",
+    "sha256": "4fbae1c1f5a5d27d247fd7063e70fabf19a2daa3162680960a274ab935d2a3b5",
+    "globals": [
+      "Any",
+      "dict",
+      "isinstance",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "083d90643b77824de87284f799e988212e8d52f1401c0a3d70a68d96d8e33d40",
+    "moved_ast_sha256": "083d90643b77824de87284f799e988212e8d52f1401c0a3d70a68d96d8e33d40"
+  },
+  {
+    "name": "command_events",
+    "owner": "trace_normalization",
+    "sha256": "05930c8f2cf964566d44e6bf6966aa911ad0205d3c403420b5378767ba72e860",
+    "globals": [
+      "Any",
+      "dict",
+      "event_is_completed",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "f60ce79856a68f92cc101ec636c098b09a83fb3846d3209abee2368f365f0ad4",
+    "moved_ast_sha256": "f60ce79856a68f92cc101ec636c098b09a83fb3846d3209abee2368f365f0ad4"
+  },
+  {
+    "name": "usage_number",
+    "owner": "trace_normalization",
+    "sha256": "3a371167dfd9f81e0cc798fb63f4ba2a486d5f567f6e1933440b30f59c4285d1",
+    "globals": [
+      "Any",
+      "bool",
+      "dict",
+      "int",
+      "isinstance",
+      "normalize_usage",
+      "str"
+    ],
+    "ast_sha256": "8fff9fe72d4dda49549b71117f30cea1ba5f55df189f7534180d083766e8c1c1",
+    "moved_ast_sha256": "8fff9fe72d4dda49549b71117f30cea1ba5f55df189f7534180d083766e8c1c1"
+  },
+  {
+    "name": "_pi_terminal_usage",
+    "owner": "trace_normalization",
+    "sha256": "70f5350c9621f8558f69441c8d8c406636c56303596c0d5d70522d72aa63b833",
+    "globals": [
+      "Any",
+      "_pi_final_agent_end",
+      "_pi_final_message",
+      "dict",
+      "isinstance",
+      "list",
+      "next",
+      "reversed",
+      "str"
+    ],
+    "ast_sha256": "f36cfc3132aeb20c14135b5ee02ef321fabe50d36d3d139a1c6dbbeee9a0adb4",
+    "moved_ast_sha256": "f36cfc3132aeb20c14135b5ee02ef321fabe50d36d3d139a1c6dbbeee9a0adb4"
+  },
+  {
+    "name": "_pi_final_agent_end",
+    "owner": "trace_normalization",
+    "sha256": "e440482118c6a09cc9e96fbd146ee0d45a2612f0e57cfd75491cb7a9f388e2ec",
+    "globals": [
+      "Any",
+      "dict",
+      "list",
+      "next",
+      "reversed",
+      "str"
+    ],
+    "ast_sha256": "fe3491d516c21b1e0388493956b7d98eb9d183b7e21d0cb33c4d9a7378d1ac89",
+    "moved_ast_sha256": "fe3491d516c21b1e0388493956b7d98eb9d183b7e21d0cb33c4d9a7378d1ac89"
+  },
+  {
+    "name": "_generic_stream_usage_and_cost",
+    "owner": "trace_normalization",
+    "sha256": "b210373ff6eff410b10367229c8c23c6a49460041adf1c7ecb02b025fc7560ad",
+    "globals": [
+      "Any",
+      "_cost_value_from_record",
+      "_is_cumulative_usage_record",
+      "_stream_usage_doc",
+      "_sum_stream_usage",
+      "dict",
+      "float",
+      "iter",
+      "len",
+      "list",
+      "next",
+      "normalize_cost",
+      "normalize_usage",
+      "round",
+      "str",
+      "sum",
+      "tuple"
+    ],
+    "ast_sha256": "ac81e27c03ecaf021a4915353de82581092f636a0397b530a7e7882733ab59de",
+    "moved_ast_sha256": "ac81e27c03ecaf021a4915353de82581092f636a0397b530a7e7882733ab59de"
+  },
+  {
+    "name": "_pi_terminal_error",
+    "owner": "trace_normalization",
+    "sha256": "ce5c45cb35b66f678988e14e504b54c26dd395a303c34be068d2039def32c111",
+    "globals": [
+      "Any",
+      "_pi_final_agent_end",
+      "_pi_final_message",
+      "dict",
+      "isinstance",
+      "list",
+      "next",
+      "reversed",
+      "str"
+    ],
+    "ast_sha256": "21514d37d80f487e11be6ab39f78a3080788f440211a7443674fb045a77dd919",
+    "moved_ast_sha256": "21514d37d80f487e11be6ab39f78a3080788f440211a7443674fb045a77dd919"
+  },
+  {
+    "name": "normalize_cost",
+    "owner": "trace_normalization",
+    "sha256": "42a4ac6d9ae261e45a6b763b62b367d67b1494adba0917ee30ad576f9829f812",
+    "globals": [
+      "Any",
+      "COST_PART_ALIASES",
+      "COST_SOURCES",
+      "ValueError",
+      "_num",
+      "any",
+      "bool",
+      "dict",
+      "float",
+      "int",
+      "isinstance",
+      "len",
+      "list",
+      "math",
+      "re",
+      "sorted",
+      "str",
+      "sum",
+      "tuple"
+    ],
+    "ast_sha256": "5cd5d49cf178707ca142179bb8e3877f980651492a0a71e392b672bb1cf40169",
+    "moved_ast_sha256": "5cd5d49cf178707ca142179bb8e3877f980651492a0a71e392b672bb1cf40169"
+  },
+  {
+    "name": "_tool_measurements",
+    "owner": "trace_normalization",
+    "sha256": "c9e5e38d6ac214e6a6c85d25f3c161a1e361115e242ccc5464f952ba4fee4515",
+    "globals": [
+      "Any",
+      "Mapping",
+      "dict",
+      "isinstance",
+      "str",
+      "telemetry_domain",
+      "tool_fault_domain"
+    ],
+    "ast_sha256": "922b9475d2e2c6fce285bebc33c6c91a868acd1c9702b0510964560ba62d1874",
+    "moved_ast_sha256": "922b9475d2e2c6fce285bebc33c6c91a868acd1c9702b0510964560ba62d1874"
+  },
+  {
+    "name": "_claude_protocol_error",
+    "owner": "trace_normalization",
+    "sha256": "ca1f6d5f61d9f798b2f1aeebb5da6be3db932d459d585b08d0109b31b5684f58",
+    "globals": [
+      "Any",
+      "dict",
+      "str"
+    ],
+    "ast_sha256": "132ca2fafbabd768dbc27e46e875d68f9e2285184484d5eaf151a236605f1a9c",
+    "moved_ast_sha256": "132ca2fafbabd768dbc27e46e875d68f9e2285184484d5eaf151a236605f1a9c"
+  },
+  {
+    "name": "GENERIC_TRACE_DIALECT",
+    "owner": "trace_normalization",
+    "sha256": "6554773de348a8bc18678494256e9bafa6409fe05da9c5a7fb17912ea87eb710",
+    "globals": [
+      "TraceDialect"
+    ],
+    "ast_sha256": "4af01d3cd20be6b4d9dc93d3471f825575ed375b7e18385605dbb4cc87e3ce8d",
+    "moved_ast_sha256": "4af01d3cd20be6b4d9dc93d3471f825575ed375b7e18385605dbb4cc87e3ce8d"
+  },
+  {
+    "name": "_generic_trace_protocol_error",
+    "owner": "trace_normalization",
+    "sha256": "b3c15dcef8ed4914314ae62295026ffe20a53bdc932388e30dfc8de701f3c642",
+    "globals": [
+      "Any",
+      "PiStream",
+      "dict",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "81f9dc660a326321b3b41b9f92a4cc6e3e463152b5021860e82d16e00a608948",
+    "moved_ast_sha256": "81f9dc660a326321b3b41b9f92a4cc6e3e463152b5021860e82d16e00a608948"
+  },
+  {
+    "name": "_generic_usage_and_cost_blocks",
+    "owner": "trace_normalization",
+    "sha256": "71bf5a4ce1b13d0b0b1a866aa997008d64ae172035f2138a0e8626629dc61753",
+    "globals": [
+      "Any",
+      "PiStream",
+      "_generic_stream_usage_and_cost",
+      "dict",
+      "isinstance",
+      "iter_json_objects",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "775ade5b317539c8dfd08b58fd23ddbc54495b099daee86807c11d219b20e87e",
+    "moved_ast_sha256": "775ade5b317539c8dfd08b58fd23ddbc54495b099daee86807c11d219b20e87e"
+  },
+  {
+    "name": "_no_retry_observation",
+    "owner": "trace_normalization",
+    "sha256": "f22f8d52313973162978af6aa19a9bc98b4ad697ec40a696bbabb31c6b2afe4d",
+    "globals": [
+      "Any",
+      "PiStream",
+      "dict",
+      "int",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "8652a9ec1b5827104cb7f854c4e227ce182a92865113692b38d555499635e854",
+    "moved_ast_sha256": "8652a9ec1b5827104cb7f854c4e227ce182a92865113692b38d555499635e854"
+  },
+  {
+    "name": "TraceFlattener",
+    "owner": "trace_normalization",
+    "sha256": "d00532c31709bfa4a3fc6526df18d384ab647b433813581205f66405f086bf9c",
+    "globals": [
+      "Any",
+      "Protocol",
+      "dict",
+      "int",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "5de25b4fb388dee6b98bd04e3fa2ded3b2beba1a20664c745ecf4f5f0e4c2c4f",
+    "moved_ast_sha256": "5de25b4fb388dee6b98bd04e3fa2ded3b2beba1a20664c745ecf4f5f0e4c2c4f"
+  },
+  {
+    "name": "_no_stream_semantics",
+    "owner": "trace_normalization",
+    "sha256": "e9df5692853227b42da25fca848dd8b926154cce8874db24425d65c46e4a741a",
+    "globals": [
+      "Any",
+      "PiStream",
+      "dict",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "dc5fb4d663eccf338f75bc5b474f83ecd354814f7d2994f7d9c8d66fb89e9e03",
+    "moved_ast_sha256": "dc5fb4d663eccf338f75bc5b474f83ecd354814f7d2994f7d9c8d66fb89e9e03"
+  },
+  {
+    "name": "identity_flat_records",
+    "owner": "trace_normalization",
+    "sha256": "fbbd51668725a2237bf68c1d3d64e5b7851782f00a183a9b97e5255fb7135979",
+    "globals": [
+      "Any",
+      "ValueError",
+      "dict",
+      "enumerate",
+      "int",
+      "len",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "66924ed29cbf4160fd194a74044037f5aff9517ac7fe0807a0fb5030e2012ecc",
+    "moved_ast_sha256": "66924ed29cbf4160fd194a74044037f5aff9517ac7fe0807a0fb5030e2012ecc"
+  },
+  {
+    "name": "CLAUDE_SESSION_CONTENT_RECORD_TYPES",
+    "owner": "trace_normalization",
+    "sha256": "aceb30345bac0cd5a582ee709419adfdefe8760e6631b293a7389c6a89777773",
+    "globals": [
+      "frozenset"
+    ],
+    "ast_sha256": "bb29786dd44a1067553cdc65c6a9ab1b09b2c0d7772a308b161f6bbc13ab6ed8",
+    "moved_ast_sha256": "bb29786dd44a1067553cdc65c6a9ab1b09b2c0d7772a308b161f6bbc13ab6ed8"
+  },
+  {
+    "name": "_vibe_content_text",
+    "owner": "trace_normalization",
+    "sha256": "8077d778bb7f5523c021bf2de1fc445b4b5705e78404c9bd96fbe3b767858e89",
+    "globals": [
+      "Any",
+      "dict",
+      "isinstance",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "b87a6fc3ec9ccf45a4e8ec8da01a90083ae89822848618d313d90fe7bdd81c8f",
+    "moved_ast_sha256": "b87a6fc3ec9ccf45a4e8ec8da01a90083ae89822848618d313d90fe7bdd81c8f"
+  },
+  {
+    "name": "seed_codex_home",
+    "owner": "agent_clis",
+    "sha256": "fced9969f85c52ced6c732cfb7f82d056ad57ad3476e350556455d0678cda793",
+    "globals": [
+      "Any",
+      "CODEX_HOME_FILES",
+      "Path",
+      "dict",
+      "list",
+      "os",
+      "shutil",
+      "str"
+    ],
+    "ast_sha256": "1624aae58aadf26f2db5c1bd11c464d7780500eb4f317710d6b8e128c15312b1",
+    "moved_ast_sha256": "1624aae58aadf26f2db5c1bd11c464d7780500eb4f317710d6b8e128c15312b1"
+  },
+  {
+    "name": "CODEX_SESSIONS_DIRNAME",
+    "owner": "agent_clis",
+    "sha256": "e8b8233d2c4e135e65a277428073b609be39bb5fed51b53f6d9733b5cd5b777c",
+    "globals": [],
+    "ast_sha256": "5e5a56bc5bff9b292df7cbdab5463c33a66d3c88988e55b771c4235426ff94aa",
+    "moved_ast_sha256": "5e5a56bc5bff9b292df7cbdab5463c33a66d3c88988e55b771c4235426ff94aa"
+  },
+  {
+    "name": "CODEX_ROLLOUT_SKILL_TAG",
+    "owner": "agent_clis",
+    "sha256": "1529feeddd1a2d9a506dfde126d2f7aefd1c2db7b1a0e9bed98cc9dad3fba8d5",
+    "globals": [],
+    "ast_sha256": "95904b4145fdd6459704c1a413515e7d567b3e05934b95b8e610b5a97f26a777",
+    "moved_ast_sha256": "95904b4145fdd6459704c1a413515e7d567b3e05934b95b8e610b5a97f26a777"
+  },
+  {
+    "name": "_codex_skill_tag",
+    "owner": "agent_clis",
+    "sha256": "23d54316986feb7e3c7de7ddbf0361b5c13faca47dd9dd823b8ce9d7fddb0af2",
+    "globals": [
+      "_CODEX_SKILL_TAG_PATTERNS",
+      "str"
+    ],
+    "ast_sha256": "ac9d15911b8c8847cc377cb178abe6174c424658a4f8db7d0a50f91adca1fc1f",
+    "moved_ast_sha256": "ac9d15911b8c8847cc377cb178abe6174c424658a4f8db7d0a50f91adca1fc1f"
+  },
+  {
+    "name": "_walk_codex_host_skills",
+    "owner": "agent_clis",
+    "sha256": "06d673dcdd22250dbde4e395fb5667d05c118197e5c615c242bd640674ebf756",
+    "globals": [
+      "Path",
+      "list",
+      "os",
+      "set",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "c6a81e67af66367a0c9f67ace2f63e142dd79002a0a673db20e4eb70710e316d",
+    "moved_ast_sha256": "c6a81e67af66367a0c9f67ace2f63e142dd79002a0a673db20e4eb70710e316d",
+    "removed_docstrings": [
+      "_walk_codex_host_skills"
+    ],
+    "comment_cleanup_ast_sha256": "a36e818989d14ef6f66e1c0df767fe56af2c0fc12a85ae87c3caacabb64705b6"
+  },
+  {
+    "name": "_codex_path_spellings",
+    "owner": "agent_clis",
+    "sha256": "c09d0f9268e2c68248139a5d7340c0853209194b3f53bc7877a8f849160bb7f4",
+    "globals": [
+      "_CODEX_FILE_URL_SAFE",
+      "_CODEX_URL_DROPPED",
+      "_rust_debug_escape",
+      "json",
+      "set",
+      "str",
+      "toml_basic_string",
+      "urllib"
+    ],
+    "ast_sha256": "3cd7e7ab0eb641ade0c422cd7ed6fb8eac9b80690b614479779f5873a5ae463a",
+    "moved_ast_sha256": "3cd7e7ab0eb641ade0c422cd7ed6fb8eac9b80690b614479779f5873a5ae463a",
+    "removed_docstrings": [
+      "_codex_path_spellings"
+    ],
+    "comment_cleanup_ast_sha256": "68049ebc8d05f05fb491963cb1beaa6673e51ca69a81957d2db893afd20b9643"
+  },
+  {
+    "name": "CodexHostPathRedactor",
+    "owner": "agent_clis",
+    "sha256": "b3969ecd85f9903e05cb76ffa17015495ceeca0393db4bf6cec66ae0efd6e459",
+    "globals": [
+      "_CODEX_PATH_TAIL",
+      "_dataclass",
+      "any",
+      "len",
+      "map",
+      "re",
+      "sorted",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "87e9680af2fb790461e51f47bc4ce7b50b359b6cf3154f335058d9cdf1b5755a",
+    "moved_ast_sha256": "87e9680af2fb790461e51f47bc4ce7b50b359b6cf3154f335058d9cdf1b5755a"
+  },
+  {
+    "name": "toml_basic_string",
+    "owner": "agent_clis",
+    "sha256": "df27209dc74b4e1a994572eca8d9a86c1ffa7df473eec724834055078758b894",
+    "globals": [
+      "ord",
+      "str"
+    ],
+    "ast_sha256": "149136f84705fb0b8be3019e82c0d83114f206760def8c69603d2caad2adf184",
+    "moved_ast_sha256": "149136f84705fb0b8be3019e82c0d83114f206760def8c69603d2caad2adf184"
+  },
+  {
+    "name": "codex_host_skill_paths",
+    "owner": "agent_clis",
+    "sha256": "2b248039d125a1d623f6005d6c0accfefb75c5c76ec6ee6f63f0c1507e999844",
+    "globals": [
+      "_walk_codex_host_skills",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "a75f9a0447c89d60e57f8368689add03edf286c66404a36086329ab6cebe5ab4",
+    "moved_ast_sha256": "a75f9a0447c89d60e57f8368689add03edf286c66404a36086329ab6cebe5ab4"
+  },
+  {
+    "name": "codex_thread_id",
+    "owner": "agent_clis",
+    "sha256": "c6961b6a189c6c81c4c5822e0448352e8f00b92714419de31f9ada36ea6fa43c",
+    "globals": [
+      "dict",
+      "isinstance",
+      "iter_json_objects",
+      "str"
+    ],
+    "ast_sha256": "9025258b34f256accbad0e80be5791402db1e7727c329fc8b4935fe4ea360284",
+    "moved_ast_sha256": "9025258b34f256accbad0e80be5791402db1e7727c329fc8b4935fe4ea360284"
+  },
+  {
+    "name": "seed_vibe_home",
+    "owner": "agent_clis",
+    "sha256": "7bcf8ff3b1ff165ef8fc966aaa2ff49e93325869482e3827436bf565d7f774f2",
+    "globals": [
+      "Any",
+      "Path",
+      "dict",
+      "os",
+      "shutil",
+      "str"
+    ],
+    "ast_sha256": "a588fdac98f350da444f7b09cf29374dd0fdd93e5410733c3ed5541201eadacb",
+    "moved_ast_sha256": "a588fdac98f350da444f7b09cf29374dd0fdd93e5410733c3ed5541201eadacb"
+  },
+  {
+    "name": "apply_dataset_row",
+    "owner": "skill_inputs",
+    "sha256": "14ec534b13c48f1218cafa89b83c45539da0d319ceaafca051e2194148bf5de0",
+    "globals": [
+      "Any",
+      "dict",
+      "isinstance",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "d111c318e8aea0827ce34f3fe10aa82f05e9ff2e575e3794eabbc4318208518a",
+    "moved_ast_sha256": "d111c318e8aea0827ce34f3fe10aa82f05e9ff2e575e3794eabbc4318208518a"
+  },
+  {
+    "name": "split_frontmatter",
+    "owner": "skill_inputs",
+    "sha256": "d65f974e885c9827e33878060b85f704c3b5a4efd7704d091ea46360fc83eff6",
+    "globals": [
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "86704c1ab39dd39179765b99c424fc0e261cdcd3607c2a928c76a9d1dddf2a1d",
+    "moved_ast_sha256": "86704c1ab39dd39179765b99c424fc0e261cdcd3607c2a928c76a9d1dddf2a1d"
+  },
+  {
+    "name": "materialize",
+    "owner": "skill_inputs",
+    "sha256": "05aeff023282758ceb775ed22ac84d54ab6a384742bec29b8e523717c27af5e9",
+    "globals": [
+      "AblationError",
+      "AblationMode",
+      "Any",
+      "Arm",
+      "BaseException",
+      "Component",
+      "ComponentClass",
+      "MaterializedArm",
+      "Mechanism",
+      "Path",
+      "Provenance",
+      "TreeIdentity",
+      "ValidatedAblation",
+      "_apply_edits",
+      "_check_disjoint",
+      "_copy_skill_root",
+      "_reject_output_root_overlap",
+      "_resolve_component_ops",
+      "_safe_under",
+      "_write_text_preserving_newlines",
+      "component_class",
+      "dict",
+      "enumerate",
+      "int",
+      "len",
+      "list",
+      "print",
+      "required_fields_present",
+      "resolve_skill_root",
+      "shutil",
+      "skill_root_keys_for",
+      "skill_tree_hash",
+      "str",
+      "sum",
+      "sys",
+      "tempfile",
+      "tuple",
+      "zip"
+    ],
+    "ast_sha256": "72fe11325d5de2bd68cdb5ebacde0e427e3615323b2939135a9af438e6ba7039",
+    "moved_ast_sha256": "72fe11325d5de2bd68cdb5ebacde0e427e3615323b2939135a9af438e6ba7039"
+  },
+  {
+    "name": "ValidatedAblation",
+    "owner": "skill_inputs",
+    "sha256": "502c084a4b45c8ae74cafef220142bcc511bd31e3d79575a0c3a2f9dc4eb5dd8",
+    "globals": [
+      "AblationError",
+      "Any",
+      "CasePopulation",
+      "Path",
+      "_dataclass",
+      "_reject_overlapping_skill_roots",
+      "ablation_components",
+      "classmethod",
+      "derived_population",
+      "dict",
+      "str",
+      "tuple",
+      "validate_ablation_removal"
+    ],
+    "ast_sha256": "c2f15c98e7fc6f996f313fd70641e93d9dc1bb6c5a9ef42052973e10c9b8addc",
+    "moved_ast_sha256": "c2f15c98e7fc6f996f313fd70641e93d9dc1bb6c5a9ef42052973e10c9b8addc"
+  },
+  {
+    "name": "component_class",
+    "owner": "skill_inputs",
+    "sha256": "e685eb0a7a075b026fd2318472bf9f2d59ea2878b7eb7922d1f3e5f8bd82ccc5",
+    "globals": [
+      "Any",
+      "DISCOVERY_FIELDS",
+      "dict",
+      "str"
+    ],
+    "ast_sha256": "4030ee96955936b5568ca203b44961dd56185521219a09770b868cf01f36aebe",
+    "moved_ast_sha256": "4030ee96955936b5568ca203b44961dd56185521219a09770b868cf01f36aebe"
+  },
+  {
+    "name": "_COPY_EXCLUDE",
+    "owner": "skill_inputs",
+    "sha256": "d4a98aba9abceb9701dfd38c8720119fd087e6abf712bce2405da1cdc0fd19ee",
+    "globals": [],
+    "ast_sha256": "939163f86f88aab2da44dbad59092b500f24936b98434088c1a3574162783216",
+    "moved_ast_sha256": "939163f86f88aab2da44dbad59092b500f24936b98434088c1a3574162783216"
+  },
+  {
+    "name": "_expected_component",
+    "owner": "skill_inputs",
+    "sha256": "95112b4bdcf04c39e815f92580d67ce3fd025b3bda5dd2618cc1b96ce3862987",
+    "globals": [
+      "Any",
+      "Component",
+      "ComponentClass",
+      "Mechanism",
+      "ValueError",
+      "component_class",
+      "dict",
+      "list",
+      "resolve_skill_root",
+      "str"
+    ],
+    "ast_sha256": "9dfc1b93bee581e81841c12502ce43a332026ceff2b9e63cf3d7c648dbddf966",
+    "moved_ast_sha256": "9dfc1b93bee581e81841c12502ce43a332026ceff2b9e63cf3d7c648dbddf966",
+    "removed_docstrings": [
+      "_expected_component"
+    ],
+    "comment_cleanup_ast_sha256": "796aca6dc25dc38c9b0772b6643d66873ce1fb35413e39017620fde76fc7507f"
+  },
+  {
+    "name": "stringify_trace_value",
+    "owner": "trace_normalization",
+    "sha256": "e8b2e26a64e8c1f74f321c14068f0377f0c3da4fb0136d767cf5852ed4134d69",
+    "globals": [
+      "Any",
+      "dict",
+      "isinstance",
+      "json",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "ec99b059a5480c88f3e81127275a0e329e58a27da6fd9f322bfcf3abfe68b1b2",
+    "moved_ast_sha256": "ec99b059a5480c88f3e81127275a0e329e58a27da6fd9f322bfcf3abfe68b1b2"
+  },
+  {
+    "name": "vibe_history_entry_flat_records",
+    "owner": "trace_normalization",
+    "sha256": "e5575a24afc8f76d089f8ef4aeb449aa8fec1278dba9ef99773c728484c8cc46",
+    "globals": [
+      "Any",
+      "VIBE_HISTORY_METADATA_ENTRY_TYPES",
+      "ValueError",
+      "_claude_protocol_error",
+      "_vibe_tool_flat_record",
+      "all",
+      "dict",
+      "enumerate",
+      "int",
+      "isinstance",
+      "len",
+      "list",
+      "set",
+      "str",
+      "stringify_trace_value",
+      "tuple",
+      "vibe_entry_text"
+    ],
+    "ast_sha256": "1d18103cab9fa2b9232cf32cbf2745cc5df383421d1d47dc546c31360ea3273c",
+    "moved_ast_sha256": "1d18103cab9fa2b9232cf32cbf2745cc5df383421d1d47dc546c31360ea3273c"
+  },
+  {
+    "name": "vibe_llm_message_flat_records",
+    "owner": "trace_normalization",
+    "sha256": "43831e225d1e643a3f790bc38bc9438f1833b5fc1367defdb81b8888a9b451c9",
+    "globals": [
+      "Any",
+      "ValueError",
+      "_claude_protocol_error",
+      "_vibe_tool_flat_record",
+      "dict",
+      "enumerate",
+      "int",
+      "isinstance",
+      "json",
+      "len",
+      "list",
+      "set",
+      "sorted",
+      "str",
+      "stream_json_loads",
+      "stringify_trace_value",
+      "tuple"
+    ],
+    "ast_sha256": "80874285c6d7565bb22ff8a0ea7a2b2f5947bf4db4e7e2679e6552d243d1314c",
+    "moved_ast_sha256": "80874285c6d7565bb22ff8a0ea7a2b2f5947bf4db4e7e2679e6552d243d1314c"
+  },
+  {
+    "name": "vibe_records_are_history_entries",
+    "owner": "trace_normalization",
+    "sha256": "f25342beedc0b6ddc220161b72d6c2070ea3195ea102766d5f4ee606d78eda68",
+    "globals": [
+      "Any",
+      "Mapping",
+      "Sequence",
+      "bool",
+      "str"
+    ],
+    "ast_sha256": "2ca6451d1fd9dde669052b44c5800da7d23349e26e1b19a609d1fa0c1fb3bfa6",
+    "moved_ast_sha256": "2ca6451d1fd9dde669052b44c5800da7d23349e26e1b19a609d1fa0c1fb3bfa6"
+  },
+  {
+    "name": "VIBE_HISTORY_CONTENT_ENTRY_TYPES",
+    "owner": "trace_normalization",
+    "sha256": "4f1d800f2512c556723d5e0fbaeb7ded00e6d9be46b8b9d087339ec13941126b",
+    "globals": [
+      "frozenset"
+    ],
+    "ast_sha256": "dbfb90b2187a995b6b50ad0d06e66c74c4659fabd68eb9eb8e97ecf7b35a7ae7",
+    "moved_ast_sha256": "dbfb90b2187a995b6b50ad0d06e66c74c4659fabd68eb9eb8e97ecf7b35a7ae7"
+  },
+  {
+    "name": "vibe_entry_text",
+    "owner": "trace_normalization",
+    "sha256": "be85695abe4049d5bf72be48eb49400befff5efa874f5a91a223e8cf56c0adae",
+    "globals": [
+      "Any",
+      "Mapping",
+      "dict",
+      "isinstance",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "227826b332f44df4248317f41f0d7cf493109706620f3a8403a28a6b9166930d",
+    "moved_ast_sha256": "227826b332f44df4248317f41f0d7cf493109706620f3a8403a28a6b9166930d"
+  },
+  {
+    "name": "_claude_tool_flat_record",
+    "owner": "trace_normalization",
+    "sha256": "8779e2a24bbd8dcdfd24ac92e6f0d3e7ae1ee9935ab31a42697da29586d0e4ea",
+    "globals": [
+      "Any",
+      "dict",
+      "isinstance",
+      "str"
+    ],
+    "ast_sha256": "954387a923d22384b77d856dbfe738f70ab3cfd0ff78959de7729a520d1a83a6",
+    "moved_ast_sha256": "954387a923d22384b77d856dbfe738f70ab3cfd0ff78959de7729a520d1a83a6"
+  },
+  {
+    "name": "_gemini_records_text",
+    "owner": "trace_normalization",
+    "sha256": "c8f10acb6ce59f9f7406a5e8f30dac2158cf9a1b8d038c0a2c4fd147c215cf84",
+    "globals": [
+      "Any",
+      "Iterable",
+      "Mapping",
+      "dict",
+      "json",
+      "str"
+    ],
+    "ast_sha256": "71ae8ec5152e2863b984e04a40bc8cacfaa774217aeeb305ad9d9f4958d93e32",
+    "moved_ast_sha256": "71ae8ec5152e2863b984e04a40bc8cacfaa774217aeeb305ad9d9f4958d93e32"
+  },
+  {
+    "name": "_gemini_tool_flat_record",
+    "owner": "trace_normalization",
+    "sha256": "f66eadaf736d446a2b3b1076e4a94d3c3e5067e9685aac52136329d2c4ef1826",
+    "globals": [
+      "Any",
+      "GEMINI_READ_ONLY_TOOLS",
+      "Mapping",
+      "dict",
+      "str"
+    ],
+    "ast_sha256": "2e47886a1cc17066224711a6d6aeff9ff1ba5331bb69c698336516948c6a201c",
+    "moved_ast_sha256": "2e47886a1cc17066224711a6d6aeff9ff1ba5331bb69c698336516948c6a201c"
+  },
+  {
+    "name": "EVENT_TEXT_KEYS",
+    "owner": "trace_normalization",
+    "sha256": "1464246d4db5b8302d894a810af2b596c612f1bb216c5b59c406aeab12d52a2c",
+    "globals": [],
+    "ast_sha256": "19c28dd979fc06c6031ee94e4170426298ab3f470611767c0773a2617b4a2631",
+    "moved_ast_sha256": "19c28dd979fc06c6031ee94e4170426298ab3f470611767c0773a2617b4a2631"
+  },
+  {
+    "name": "_flatten_event_text",
+    "owner": "trace_normalization",
+    "sha256": "3adb394ef2da2b8ab80cb26e50732448929f1360701306a9b692a262b62eeb32",
+    "globals": [
+      "Any",
+      "isinstance",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "55eb929cf0ea4fdaa45dd928a445a23eeb799bcd146c4c93c413ab87975db630",
+    "moved_ast_sha256": "55eb929cf0ea4fdaa45dd928a445a23eeb799bcd146c4c93c413ab87975db630"
+  },
+  {
+    "name": "otel_attributes_for_event",
+    "owner": "trace_normalization",
+    "sha256": "cfd01287f6be9a0ff732f520108af51c4616a251d0458115f9b6fcabebf68694",
+    "globals": [
+      "Any",
+      "_num",
+      "dict",
+      "int",
+      "isinstance",
+      "str"
+    ],
+    "ast_sha256": "cb8c3723ce7bba3b54b89ef0e6f8a38f398f63959e03cf8722a425dee9ecac6e",
+    "moved_ast_sha256": "cb8c3723ce7bba3b54b89ef0e6f8a38f398f63959e03cf8722a425dee9ecac6e"
+  },
+  {
+    "name": "nested_item_type",
+    "owner": "trace_normalization",
+    "sha256": "158d84c97f050213d07308d7a61c30622ee5fc63b7dfd599da9e490903be9f8c",
+    "globals": [
+      "Any",
+      "dict",
+      "isinstance",
+      "str"
+    ],
+    "ast_sha256": "520f97dd6a666a2bb66806252192068374757765afc33df482f6a0bfa11a6870",
+    "moved_ast_sha256": "520f97dd6a666a2bb66806252192068374757765afc33df482f6a0bfa11a6870"
+  },
+  {
+    "name": "raw_type_tokens",
+    "owner": "trace_normalization",
+    "sha256": "8fc0dea58257fc0c51ec6cbddd69280f58ef334d42db34426542eeef8ebe68ec",
+    "globals": [
+      "_RAW_TYPE_WORD_BOUNDARY",
+      "frozenset",
+      "str"
+    ],
+    "ast_sha256": "2dea7c13f6c382487500b8d4e936dd04a416409141f25fea8aeaf94f9ae285bb",
+    "moved_ast_sha256": "2dea7c13f6c382487500b8d4e936dd04a416409141f25fea8aeaf94f9ae285bb"
+  },
+  {
+    "name": "raw_trace_input_value",
+    "owner": "trace_normalization",
+    "sha256": "59fe7e491c6158d291b9c0b883f3721b5cee57f1af680c3c6732841e6600b16c",
+    "globals": [
+      "Any",
+      "dict",
+      "isinstance",
+      "raw_trace_value",
+      "str"
+    ],
+    "ast_sha256": "cfb15c0f2e3ac3d1aa1601560e5cf9c5d007ad125967c6888a7fc5f9595f2e22",
+    "moved_ast_sha256": "cfb15c0f2e3ac3d1aa1601560e5cf9c5d007ad125967c6888a7fc5f9595f2e22"
+  },
+  {
+    "name": "raw_trace_has_key",
+    "owner": "trace_normalization",
+    "sha256": "05c9f5b35ffe56f81dacd6144d4de33fb3e37107656da1242e156ea5dac65cb1",
+    "globals": [
+      "Any",
+      "any",
+      "bool",
+      "dict",
+      "isinstance",
+      "str"
+    ],
+    "ast_sha256": "9fed07e86b45636a850290bcc5787d302a8010245567917879576e11df9309e4",
+    "moved_ast_sha256": "9fed07e86b45636a850290bcc5787d302a8010245567917879576e11df9309e4"
+  },
+  {
+    "name": "TRAJECTORY_STEP_TYPES",
+    "owner": "trace_normalization",
+    "sha256": "8c2138939475e20eb526e4b92358a55a2325f21342c30bd9e3f3a0f2ca2c8698",
+    "globals": [],
+    "ast_sha256": "9a3568d1eb1d66f4d85c997d2f0d0e1ab023220c02dea77d33b6e10fdfab2803",
+    "moved_ast_sha256": "9a3568d1eb1d66f4d85c997d2f0d0e1ab023220c02dea77d33b6e10fdfab2803"
+  },
+  {
+    "name": "event_mentions_skill_file",
+    "owner": "trace_normalization",
+    "sha256": "a7f1a3de2aa284661f30866bbd52245d1efdc13c9fc7845918460e4ca96c3344",
+    "globals": [
+      "Any",
+      "bool",
+      "dict",
+      "str"
+    ],
+    "ast_sha256": "b4c9dc86baba00536cfc144b7d7be6b3d876e0074708970e89bff661169f1979",
+    "moved_ast_sha256": "b4c9dc86baba00536cfc144b7d7be6b3d876e0074708970e89bff661169f1979"
+  },
+  {
+    "name": "_pi_final_message",
+    "owner": "trace_normalization",
+    "sha256": "39370bf69adfe55ff8a0eef0c1c0a96ca0f3c3a568ae8e6271d3a939f56a4c5b",
+    "globals": [
+      "Any",
+      "dict",
+      "isinstance",
+      "list",
+      "reversed",
+      "str",
+      "string_keyed_dict"
+    ],
+    "ast_sha256": "95bc2253600292a88ef94eb36bdcfdf2b4d8db3f9a3027ed99fd479786edecdf",
+    "moved_ast_sha256": "95bc2253600292a88ef94eb36bdcfdf2b4d8db3f9a3027ed99fd479786edecdf"
+  },
+  {
+    "name": "_sum_stream_usage",
+    "owner": "trace_normalization",
+    "sha256": "4e9535d40de5d9fa13a8649b1893a864898b56b5b21a0ae7ff3e8b14e46296ac",
+    "globals": [
+      "Any",
+      "USAGE_ALIASES",
+      "_stream_usage_doc",
+      "bool",
+      "dict",
+      "float",
+      "int",
+      "isinstance",
+      "list",
+      "normalize_usage",
+      "str"
+    ],
+    "ast_sha256": "756a1967abbb97cd6f01e2fde8e3899f411aaa6ff954b251ea58fa7c7a436131",
+    "moved_ast_sha256": "756a1967abbb97cd6f01e2fde8e3899f411aaa6ff954b251ea58fa7c7a436131"
+  },
+  {
+    "name": "_is_cumulative_usage_record",
+    "owner": "trace_normalization",
+    "sha256": "d5a6308c7e49bc26eb2289c8cce32a057e44c02e0a57262ab6080c97bb255d38",
+    "globals": [
+      "Any",
+      "bool",
+      "dict",
+      "nested_item_type",
+      "raw_trace_value",
+      "str"
+    ],
+    "ast_sha256": "9ec4f3eced4fb90b23468fe4e04a5bdc9691a02c0227c3525445bdb9553e4951",
+    "moved_ast_sha256": "9ec4f3eced4fb90b23468fe4e04a5bdc9691a02c0227c3525445bdb9553e4951"
+  },
+  {
+    "name": "_stream_usage_doc",
+    "owner": "trace_normalization",
+    "sha256": "896c75f7abcbbdfd6c1103cbdf725ffdfa80ce2199bdd2310c60439df74c2ab9",
+    "globals": [
+      "Any",
+      "dict",
+      "isinstance",
+      "raw_trace_value",
+      "str"
+    ],
+    "ast_sha256": "81d71425e1d92d9680ad3c19a6544aec482e50e73c8ab27da203a82894760973",
+    "moved_ast_sha256": "81d71425e1d92d9680ad3c19a6544aec482e50e73c8ab27da203a82894760973"
+  },
+  {
+    "name": "_cost_value_from_record",
+    "owner": "trace_normalization",
+    "sha256": "9e3d1d04a5c93b51d514e24b6a1183ca5f612e796e3d63baf5d941d34aea662c",
+    "globals": [
+      "Any",
+      "_num",
+      "_stream_usage_doc",
+      "bool",
+      "dict",
+      "float",
+      "int",
+      "isinstance",
+      "normalize_cost",
+      "raw_trace_value",
+      "str"
+    ],
+    "ast_sha256": "e2a13ea17540ca3f10d81a00574c7824d6694d7e0fa5d80e80add806c456b9d8",
+    "moved_ast_sha256": "e2a13ea17540ca3f10d81a00574c7824d6694d7e0fa5d80e80add806c456b9d8"
+  },
+  {
+    "name": "COST_PART_ALIASES",
+    "owner": "trace_normalization",
+    "sha256": "0f5907cd553c267e3b36cc71aab41dfe9203492bdb044be6e115b3ab9bd46198",
+    "globals": [
+      "dict",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "028a9dae14b4e6064b13f3d508914cd8b19629754790d6f5abb70889eb972668",
+    "moved_ast_sha256": "028a9dae14b4e6064b13f3d508914cd8b19629754790d6f5abb70889eb972668"
+  },
+  {
+    "name": "_CODEX_SKILL_TAG_PATTERNS",
+    "owner": "agent_clis",
+    "sha256": "7a4dfad77a66ab2954685f68d86b24d597ccda5e35a6b0a00ce1bfa508699e67",
+    "globals": [
+      "re"
+    ],
+    "ast_sha256": "27fab8f1f520b0b3477f00805e29d18a6fe0ae17abd276b1dc484a676ae1e10a",
+    "moved_ast_sha256": "27fab8f1f520b0b3477f00805e29d18a6fe0ae17abd276b1dc484a676ae1e10a"
+  },
+  {
+    "name": "_CODEX_URL_DROPPED",
+    "owner": "agent_clis",
+    "sha256": "23ae22bf505b3b81569a2ebd0bd128f0d328717800d9569ddc24987e459d8bd4",
+    "globals": [
+      "ord"
+    ],
+    "ast_sha256": "01d53a3fc4602ca860f52b2142d182a931459dfb41875275a32520492d9497e1",
+    "moved_ast_sha256": "01d53a3fc4602ca860f52b2142d182a931459dfb41875275a32520492d9497e1"
+  },
+  {
+    "name": "_CODEX_FILE_URL_SAFE",
+    "owner": "agent_clis",
+    "sha256": "1a859aa53bbca83601196452ee95d3d4d3092d5f392d0cbac6fa04f979fada1a",
+    "globals": [],
+    "ast_sha256": "c1524c61eacd181f627b0f1e7836929d6c06e0b9826ecd296003bbe36a3c0d2b",
+    "moved_ast_sha256": "c1524c61eacd181f627b0f1e7836929d6c06e0b9826ecd296003bbe36a3c0d2b"
+  },
+  {
+    "name": "_rust_debug_escape",
+    "owner": "agent_clis",
+    "sha256": "a910eed496da5dfd80a7d4e9efefcb16f5c30f7b0202ad306c1fdf2833d728cd",
+    "globals": [
+      "ord",
+      "str"
+    ],
+    "ast_sha256": "f54503e45276b9bfeabf32df30583161a538aba10144f00ee56c605da1b7beed",
+    "moved_ast_sha256": "f54503e45276b9bfeabf32df30583161a538aba10144f00ee56c605da1b7beed",
+    "removed_docstrings": [
+      "_rust_debug_escape"
+    ],
+    "comment_cleanup_ast_sha256": "c4fc0fd29f5bd4d3d11a0f4d22742a2df14e988ae437ab36cdf14f49b148cef1"
+  },
+  {
+    "name": "_CODEX_PATH_TAIL",
+    "owner": "agent_clis",
+    "sha256": "849524d6cb9a63dce191244223da4c5ba32ca5f7a4e890c5e0f2ccd6cf6e0ef3",
+    "globals": [],
+    "ast_sha256": "a161c70d39b03365c724fc1f5e2b3c00cdde12a9d18a957bd4b91c1228086592",
+    "moved_ast_sha256": "a161c70d39b03365c724fc1f5e2b3c00cdde12a9d18a957bd4b91c1228086592"
+  },
+  {
+    "name": "_check_disjoint",
+    "owner": "skill_inputs",
+    "sha256": "687cb7fdb624b835ca6f7783bdec128d7a66dd82c2c7fa2dbf10bd8cb108b9b5",
+    "globals": [
+      "AblationError",
+      "int",
+      "len",
+      "list",
+      "range",
+      "sorted",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "791a24493690d4cf3ab8591b0bce6c1debefe4b3cea20eaba503ac67632ae3c0",
+    "moved_ast_sha256": "791a24493690d4cf3ab8591b0bce6c1debefe4b3cea20eaba503ac67632ae3c0"
+  },
+  {
+    "name": "_resolve_component_ops",
+    "owner": "skill_inputs",
+    "sha256": "15d1833546eb12faa44bdd4e4d95ed6e7e413d6ac220cc84ea2a4da90e7957ac",
+    "globals": [
+      "AblationError",
+      "Any",
+      "Path",
+      "_safe_under",
+      "_verify_hunks_match_class",
+      "component_class",
+      "dict",
+      "frontmatter_field_span",
+      "int",
+      "list",
+      "list_item_ops",
+      "patch_delete_ops",
+      "preprocess_ops",
+      "reference_pointer_ops",
+      "section_span",
+      "set",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "f9a47720561476216b207f92c5276489728b12e5faf02d6e3913d9b45c479f8c",
+    "moved_ast_sha256": "f9a47720561476216b207f92c5276489728b12e5faf02d6e3913d9b45c479f8c"
+  },
+  {
+    "name": "required_fields_present",
+    "owner": "skill_inputs",
+    "sha256": "722cf068499cdb3c857421d7d1879151626336972c5e65aa900e49fd3bec8911",
+    "globals": [
+      "REQUIRED_FRONTMATTER_FIELDS",
+      "bool",
+      "isinstance",
+      "parse_frontmatter",
+      "str"
+    ],
+    "ast_sha256": "92a1fcae80ff2d46203dfd515f209fd48d6896774d25730f988d6b7add2ff09f",
+    "moved_ast_sha256": "92a1fcae80ff2d46203dfd515f209fd48d6896774d25730f988d6b7add2ff09f"
+  },
+  {
+    "name": "_apply_edits",
+    "owner": "skill_inputs",
+    "sha256": "3659362880c6428930d1b976bfba3ab25cfb9cb9588969576bab590580bdc3f1",
+    "globals": [
+      "int",
+      "list",
+      "sorted",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "2263ed3a4bbf61b20cbc34f59bb1f32a23e8219e88f07a731e3a6d28251b7ed1",
+    "moved_ast_sha256": "2263ed3a4bbf61b20cbc34f59bb1f32a23e8219e88f07a731e3a6d28251b7ed1"
+  },
+  {
+    "name": "resolve_skill_root",
+    "owner": "skill_inputs",
+    "sha256": "f373a6a4ed661521e1324bfb3e000fa3d88eb749230f0993a5eeddd849cd33f2",
+    "globals": [
+      "Any",
+      "dict",
+      "list",
+      "str"
+    ],
+    "ast_sha256": "f5c551e09485b89d69e514849239b10655bd427385638f6034525c7659c86ce5",
+    "moved_ast_sha256": "f5c551e09485b89d69e514849239b10655bd427385638f6034525c7659c86ce5"
+  },
+  {
+    "name": "_write_text_preserving_newlines",
+    "owner": "skill_inputs",
+    "sha256": "fcc3df4b4ddac02ce07a8025a542abad8ef940de020a370322fbccfe82cd659a",
+    "globals": [
+      "Path",
+      "_detect_newline",
+      "str"
+    ],
+    "ast_sha256": "c28e363f62b0cf98eeded13a6ad2615504471f973d363534909fc3cffaf9d5cf",
+    "moved_ast_sha256": "c28e363f62b0cf98eeded13a6ad2615504471f973d363534909fc3cffaf9d5cf",
+    "removed_docstrings": [
+      "_write_text_preserving_newlines"
+    ],
+    "comment_cleanup_ast_sha256": "92fd25fb44b09f8149abbfc169d675c246b567a3c333e4a02bb861844be4bb17"
+  },
+  {
+    "name": "validate_ablation_removal",
+    "owner": "skill_inputs",
+    "sha256": "d3f22c9f2a528144629541bceb0e50579c3cb5b4f6935b8c31a41b036a35f62e",
+    "globals": [
+      "AblationError",
+      "Any",
+      "COMPONENT_CLASSES",
+      "MECHANISM_CLASSES",
+      "Path",
+      "SKILL_MECHANISMS",
+      "_required_target_keys",
+      "ablation_components",
+      "component_class",
+      "dict",
+      "isinstance",
+      "len",
+      "set",
+      "sorted",
+      "str"
+    ],
+    "ast_sha256": "5e0c05f180b6724e60904bd652e450f5afdb9b2b5427c74e5c9b94eeb6a71c2f",
+    "moved_ast_sha256": "5e0c05f180b6724e60904bd652e450f5afdb9b2b5427c74e5c9b94eeb6a71c2f"
+  },
+  {
+    "name": "DISCOVERY_FIELDS",
+    "owner": "skill_inputs",
+    "sha256": "7277d467ee16a6c8841935dda165d6d19e92321b5e8f08c042b6f7643cfadc1f",
+    "globals": [],
+    "ast_sha256": "b9792104e0d7d0a9b390b45f1679db4b390076744c4723eb10670c3854ecbbbe",
+    "moved_ast_sha256": "b9792104e0d7d0a9b390b45f1679db4b390076744c4723eb10670c3854ecbbbe"
+  },
+  {
+    "name": "_vibe_tool_flat_record",
+    "owner": "trace_normalization",
+    "sha256": "3f1c7a5e139efdde6e563ef7294a715b6a550c8ac87a47271ee2e91c8de073ac",
+    "globals": [
+      "Any",
+      "Mapping",
+      "dict",
+      "str"
+    ],
+    "ast_sha256": "720c139474a129467be7e225bc88bdbf7d0b3cd553d54fe1a3377cb97eae6f5a",
+    "moved_ast_sha256": "720c139474a129467be7e225bc88bdbf7d0b3cd553d54fe1a3377cb97eae6f5a"
+  },
+  {
+    "name": "VIBE_HISTORY_METADATA_ENTRY_TYPES",
+    "owner": "trace_normalization",
+    "sha256": "134b1513754081b2b5f5b0390449f67deeccda1903d337be09ec506e494d8eea",
+    "globals": [
+      "frozenset"
+    ],
+    "ast_sha256": "787062bccdbe63ec8f7c4cb2d8c2927d5e2d42a0bac26b88d640d8ff03cc165b",
+    "moved_ast_sha256": "787062bccdbe63ec8f7c4cb2d8c2927d5e2d42a0bac26b88d640d8ff03cc165b"
+  },
+  {
+    "name": "GEMINI_READ_ONLY_TOOLS",
+    "owner": "trace_normalization",
+    "sha256": "50b9c0aa03fb54a223b28e3a350e1bb13ff40aafbaea7915398a277c08a3c331",
+    "globals": [],
+    "ast_sha256": "4cca6da383af3fc522d547a901f9a6a125ecc441f1dfad68dfb64db1fac477f0",
+    "moved_ast_sha256": "4cca6da383af3fc522d547a901f9a6a125ecc441f1dfad68dfb64db1fac477f0"
+  },
+  {
+    "name": "_RAW_TYPE_WORD_BOUNDARY",
+    "owner": "trace_normalization",
+    "sha256": "2af47f55d7b9bb36e1886d5d3a275cecd2eabaee605d8cde63d2a87d453894b1",
+    "globals": [
+      "re"
+    ],
+    "ast_sha256": "6ae895df29cb4e8ffb75622ee9ba48b79a39fae6f82d8a4c0462696013e55288",
+    "moved_ast_sha256": "6ae895df29cb4e8ffb75622ee9ba48b79a39fae6f82d8a4c0462696013e55288"
+  },
+  {
+    "name": "string_keyed_dict",
+    "owner": "trace_normalization",
+    "sha256": "a00949ec6ebb67b7d1ba75855d225d116f43b18eda06414ed5fc8075961028dd",
+    "globals": [
+      "Any",
+      "TypeError",
+      "all",
+      "dict",
+      "isinstance",
+      "str"
+    ],
+    "ast_sha256": "c66e373103f109bf7f752ed632815841fa4f68255e7890277c03085611922118",
+    "moved_ast_sha256": "c66e373103f109bf7f752ed632815841fa4f68255e7890277c03085611922118"
+  },
+  {
+    "name": "USAGE_ALIASES",
+    "owner": "trace_normalization",
+    "sha256": "3fa97728401d62a8c547bbf952185629fb47c0f27f71f3b5bd6ded149423861b",
+    "globals": [
+      "telemetry_domain"
+    ],
+    "ast_sha256": "a159564a8504498a12b8fc0c71c88d1f178753c7d6f00209166e4115eb83d37c",
+    "moved_ast_sha256": "a159564a8504498a12b8fc0c71c88d1f178753c7d6f00209166e4115eb83d37c"
+  },
+  {
+    "name": "patch_delete_ops",
+    "owner": "skill_inputs",
+    "sha256": "915f20e03aa5c5b528b0798e9c5beedccf7b2e7907e73664db7d35940522c805",
+    "globals": [
+      "AblationError",
+      "_line_starts",
+      "int",
+      "len",
+      "list",
+      "re",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "38af00c7e268b32942684f5f1e9e83027998e7f47011ea6c4d553bbfcb03a72d",
+    "moved_ast_sha256": "38af00c7e268b32942684f5f1e9e83027998e7f47011ea6c4d553bbfcb03a72d"
+  },
+  {
+    "name": "list_item_ops",
+    "owner": "skill_inputs",
+    "sha256": "09e3de9f1f42c625fc67f8f87a942daf075e4587478b60175c3fd1854b271c6c",
+    "globals": [
+      "AblationError",
+      "_fenced_mask",
+      "_line_starts",
+      "_locate_section",
+      "any",
+      "int",
+      "len",
+      "list",
+      "re",
+      "split_frontmatter",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "080569e1a334a4d087b740eda6419981d78cc5406b93163a836f1dd8b94ca824",
+    "moved_ast_sha256": "080569e1a334a4d087b740eda6419981d78cc5406b93163a836f1dd8b94ca824"
+  },
+  {
+    "name": "frontmatter_field_span",
+    "owner": "skill_inputs",
+    "sha256": "a2b6e3914f5af50b95a6114b35cd5664ca04fccf198227cb65f8259d20877cd6",
+    "globals": [
+      "_line_starts",
+      "int",
+      "len",
+      "range",
+      "re",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "5fbb9f8c665b80cc8bf42074c512003715ec7bcaf7047178a19bc2b71f1ada7e",
+    "moved_ast_sha256": "5fbb9f8c665b80cc8bf42074c512003715ec7bcaf7047178a19bc2b71f1ada7e"
+  },
+  {
+    "name": "preprocess_ops",
+    "owner": "skill_inputs",
+    "sha256": "4f69fd9f6548500bfaceafe333480b2d1f09f46b244df6c98f325735d6217f75",
+    "globals": [
+      "AblationError",
+      "_fenced_char_spans",
+      "_in_spans",
+      "_inline_code_spans",
+      "any",
+      "bool",
+      "int",
+      "len",
+      "list",
+      "re",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "51451e60596bacce5c2a66b1a24f1c8f334f93f88c784cfe0a9cca8a5a084ac4",
+    "moved_ast_sha256": "51451e60596bacce5c2a66b1a24f1c8f334f93f88c784cfe0a9cca8a5a084ac4"
+  },
+  {
+    "name": "reference_pointer_ops",
+    "owner": "skill_inputs",
+    "sha256": "53f9e2234bdfbdc9930ed23546ad90b3107fb1eb2e1e32ab3cf1b285cda15c3c",
+    "globals": [
+      "AblationError",
+      "_fenced_char_spans",
+      "_in_spans",
+      "_inline_code_spans",
+      "int",
+      "list",
+      "re",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "316bea7e0cf64219bd9577581021d08adbf94ead7920657dfae388635b29a04f",
+    "moved_ast_sha256": "316bea7e0cf64219bd9577581021d08adbf94ead7920657dfae388635b29a04f"
+  },
+  {
+    "name": "section_span",
+    "owner": "skill_inputs",
+    "sha256": "e93c09aac55ab26749309c157e2fffecbe13ae284bcf302f1a77aff2a480ec81",
+    "globals": [
+      "_fenced_mask",
+      "_line_starts",
+      "_locate_section",
+      "int",
+      "len",
+      "split_frontmatter",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "008286815eb4e157917869bf201f8a40794ed15467687ce4e50b101dd4beaa7a",
+    "moved_ast_sha256": "008286815eb4e157917869bf201f8a40794ed15467687ce4e50b101dd4beaa7a"
+  },
+  {
+    "name": "_verify_hunks_match_class",
+    "owner": "skill_inputs",
+    "sha256": "3f3bbbd0669742a1b19ec78182c5412cfc7ca482767640baf20f866fe386c798",
+    "globals": [
+      "AblationError",
+      "DISCOVERY_FIELDS",
+      "any",
+      "frontmatter_field_span",
+      "int",
+      "len",
+      "list",
+      "next",
+      "parse_frontmatter",
+      "split_frontmatter",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "ee38614915c40984140b033cbf590a8f31709db9513f4b3d7ef20adcfeeaa013",
+    "moved_ast_sha256": "ee38614915c40984140b033cbf590a8f31709db9513f4b3d7ef20adcfeeaa013",
+    "removed_docstrings": [
+      "_verify_hunks_match_class"
+    ],
+    "comment_cleanup_ast_sha256": "09393479f0d2458c0376e89b0da5984b2165e5f148781be2d8c07f3cf325ad09"
+  },
+  {
+    "name": "REQUIRED_FRONTMATTER_FIELDS",
+    "owner": "skill_inputs",
+    "sha256": "1185c33e7c8ee55036436d915d4155734034ddc5c642a5e0f26749377f13e632",
+    "globals": [],
+    "ast_sha256": "945b42e1aab30409e9ceb19fa27da65cf900758fdc6a310cabd87f0e16f5e5cf",
+    "moved_ast_sha256": "945b42e1aab30409e9ceb19fa27da65cf900758fdc6a310cabd87f0e16f5e5cf"
+  },
+  {
+    "name": "_detect_newline",
+    "owner": "skill_inputs",
+    "sha256": "de3881e854d842b6554a1c328ef3ecd6352faa714b427fedd80398c54cd710f2",
+    "globals": [
+      "bytes",
+      "str"
+    ],
+    "ast_sha256": "6dbad05599d599bcd623b06a083db91e5cb5df9769031f5628c5de16de8be9e5",
+    "moved_ast_sha256": "6dbad05599d599bcd623b06a083db91e5cb5df9769031f5628c5de16de8be9e5",
+    "removed_docstrings": [
+      "_detect_newline"
+    ],
+    "comment_cleanup_ast_sha256": "cbc0c54017745855f9a4aee1252ea1601afa395d1aac21b0b080da46e758732a"
+  },
+  {
+    "name": "_required_target_keys",
+    "owner": "skill_inputs",
+    "sha256": "d0e76083ed011f6d42e54428892458c8dc56405478aa9fb74b4f426326cc9623",
+    "globals": [
+      "list",
+      "str"
+    ],
+    "ast_sha256": "74995e8689eb69e30674b15b3478a9bcab8a81ff7cec4c50d9f52d96c5e2a9b6",
+    "moved_ast_sha256": "74995e8689eb69e30674b15b3478a9bcab8a81ff7cec4c50d9f52d96c5e2a9b6"
+  },
+  {
+    "name": "SKILL_MECHANISMS",
+    "owner": "skill_inputs",
+    "sha256": "97695a34209978f7ff9e70c4815400896bae26f1bdc40ec7ddbdc692df2b9b64",
+    "globals": [
+      "Mechanism"
+    ],
+    "ast_sha256": "13cc8977ed0634d3ad7e44fb3901f4b87eb3bbfd057ad46a1380a0d1fffa466d",
+    "moved_ast_sha256": "13cc8977ed0634d3ad7e44fb3901f4b87eb3bbfd057ad46a1380a0d1fffa466d"
+  },
+  {
+    "name": "MECHANISM_CLASSES",
+    "owner": "skill_inputs",
+    "sha256": "ee61167d4081e9ce38955a3b802866363a66db8bafa1bf0dc304feb95f25b45b",
+    "globals": [],
+    "ast_sha256": "722553caa267f981b48a3c7b87033413de509b0f42ea64d78eb3eab064d638c4",
+    "moved_ast_sha256": "722553caa267f981b48a3c7b87033413de509b0f42ea64d78eb3eab064d638c4"
+  },
+  {
+    "name": "COMPONENT_CLASSES",
+    "owner": "skill_inputs",
+    "sha256": "b42ba778cfda0a0e3f7924de7831309da1d3361da0eb0f2b582bc1c9d4f97730",
+    "globals": [
+      "ComponentClass"
+    ],
+    "ast_sha256": "836345534fb6255dfcb7e2f3ddf0945e9b89da4f3c5ea561512dba39592b38f2",
+    "moved_ast_sha256": "836345534fb6255dfcb7e2f3ddf0945e9b89da4f3c5ea561512dba39592b38f2"
+  },
+  {
+    "name": "_line_starts",
+    "owner": "skill_inputs",
+    "sha256": "db29164e27308ef505475dbc92fbe9223a0f9288c02ef1e39d47d51707bc8f69",
+    "globals": [
+      "int",
+      "len",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "5e9a422697fb0aec1de7a07f4b4b107dbe247b093580a3e7a75a50761f695b5f",
+    "moved_ast_sha256": "5e9a422697fb0aec1de7a07f4b4b107dbe247b093580a3e7a75a50761f695b5f"
+  },
+  {
+    "name": "_locate_section",
+    "owner": "skill_inputs",
+    "sha256": "eac6ebb32fcbcd8f7fa8957747c5833f94f9cbced2457c97fbd225fa95d0df1b",
+    "globals": [
+      "AblationError",
+      "bool",
+      "enumerate",
+      "int",
+      "len",
+      "list",
+      "range",
+      "re",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "7f9cd1336af493c7cfe343883b641a1bb21dd898662bd8b0091031280e2b2fd0",
+    "moved_ast_sha256": "7f9cd1336af493c7cfe343883b641a1bb21dd898662bd8b0091031280e2b2fd0",
+    "removed_docstrings": [
+      "_locate_section"
+    ],
+    "comment_cleanup_ast_sha256": "cf19031d20b1f03cde28fa873f72c80fcc8dd99a2f2d42a4569295bbcdf2e868"
+  },
+  {
+    "name": "_fenced_mask",
+    "owner": "skill_inputs",
+    "sha256": "c0dc6dfd8cf36c6b0d3268f485515ad8b57d72d55c77ce7fe56ab3492a28728f",
+    "globals": [
+      "bool",
+      "int",
+      "len",
+      "list",
+      "re",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "444daf906f06ca32b8780d12f2941948ef6345158748bef7f5ede5ba6d76f9d6",
+    "moved_ast_sha256": "444daf906f06ca32b8780d12f2941948ef6345158748bef7f5ede5ba6d76f9d6"
+  },
+  {
+    "name": "_in_spans",
+    "owner": "skill_inputs",
+    "sha256": "66c8d2bb582a52997d248e8708115bc1072a325ba048afa0a5bcd0e04a72c031",
+    "globals": [
+      "any",
+      "bool",
+      "int",
+      "list",
+      "tuple"
+    ],
+    "ast_sha256": "c08049ab9a25102281f23c1e0fa13b11d5dac65056f1a9c6b53bc32e6ee4453d",
+    "moved_ast_sha256": "c08049ab9a25102281f23c1e0fa13b11d5dac65056f1a9c6b53bc32e6ee4453d"
+  },
+  {
+    "name": "_fenced_char_spans",
+    "owner": "skill_inputs",
+    "sha256": "941f53aa306cbe4152d6489cab15c070f829a747549064f33b4b08d7e8a648e0",
+    "globals": [
+      "_fenced_mask",
+      "_line_starts",
+      "enumerate",
+      "int",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "09df5215ab895c0b7d6eee1144d15308b10e9631c3bf7bcf6ee11e1d9933a253",
+    "moved_ast_sha256": "09df5215ab895c0b7d6eee1144d15308b10e9631c3bf7bcf6ee11e1d9933a253"
+  },
+  {
+    "name": "_inline_code_spans",
+    "owner": "skill_inputs",
+    "sha256": "71da905197fd45ffe70b5ddc6cf77b0479b2560170ef23f2d42227bc6397d00d",
+    "globals": [
+      "int",
+      "len",
+      "list",
+      "str",
+      "tuple"
+    ],
+    "ast_sha256": "a78db91dcb26d855c766810dc108e9ce2e5050ad7bee907469aad6151d8218ed",
+    "moved_ast_sha256": "a78db91dcb26d855c766810dc108e9ce2e5050ad7bee907469aad6151d8218ed"
+  }
+]
