@@ -43,6 +43,15 @@ class BridgeCliBoundaryTests(unittest.TestCase):
 
 
 class BridgeObservationTests(unittest.TestCase):
+    def test_over_frame_scalar_is_rejected_before_encoder_entry(self):
+        from unittest import mock
+
+        import skill_benchmark as sb
+        with mock.patch("skill_benchmark.json.JSONEncoder", wraps=json.JSONEncoder) as encoder:
+            with self.assertRaisesRegex(ValueError, "outbound frame exceeds"):
+                sb._bridge_frame_bytes({"output": "x" * 100000}, 1024)
+            encoder.assert_not_called()
+
     def test_direct_acknowledged_search_cannot_establish_skill_open_success(self):
         import skill_benchmark as sb
         import tool_fault_contracts as domain
