@@ -4,6 +4,12 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add optional `--review-diagnostics` on benchmark, saved report, and error analysis.
+  Complete never-passing cohorts, ASCII asterisk literal hypotheses, and accepted
+  objective-versus-qualitative disagreement nominate author review. Saved validation
+  preserves diagnostic unavailability, while default grades, gates, queues, GitHub,
+  and JUnit output remain unchanged. See [diagnostic review](docs/why-did-this-run-fail.md#review-optional-verifier-diagnostics).
+
 - Add `run-subagent --tool-bridge` for bounded offline replay and challenge delivery.
   Exact ACKs conserve typed responses through the existing journal. Legacy error data remains
   unavailable. The existing process owner records cleanup before publication, and paid turns

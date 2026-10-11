@@ -1070,5 +1070,187 @@ class TrajectoryDiffTests(unittest.TestCase):
         self.assertEqual(diff["cases"][0]["commands_only_with_skill"], ["npm test"])
 
 
+
+
+class VerifierReviewTests(unittest.TestCase):
+    def fixture(self, root, *, turns=False, assertion=None, assertions=None):
+        declarations = assertions or [assertion or {"name": "severity", "type": "contains", "value": "Severity: Blocking"},
+                        {"name": "quality", "type": "judge", "prompt": "Is this acceptable?"}]
+        case = {"id": "c", "split": "tune", "prompt": "Review this change.", "assertions": declarations}
+        if turns:
+            case.pop("prompt")
+            case["turns"] = [{"prompt": "Review it.", "assertions": declarations}]
+        path = make_eval_repo(root, cases=[case])
+        runs = root / "runs"
+        for variant in ("with_skill", "without_skill"):
+            for number in (1, 2):
+                base = runs / "c" / variant / f"run-{number}"
+                write_run(base, "Severity: **Blocking**", metadata={"returncode": 0, "provider": "claude"})
+                if turns:
+                    write_run(base / "turn-1", "Severity: **Blocking**", metadata={"returncode": 0})
+        attest_answer_design(path, runs)
+        judged = judge_with_stub(path, runs, root / "judged.json", passes_on="Blocking")
+        return path, runs, judged
+
+    def report(self, path, runs, judged, *, enabled=True):
+        return sb.build_benchmark_report(path, runs, judge_results_path=str(judged), review_diagnostics=enabled)
+
+    def leads(self, report):
+        review = sb._read_verifier_review(report)
+        return review.get("leads", review.get("observed", {}).get("leads", []))
+
+    def test_direct_projection_has_all_leads_and_preserves_original_results(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td))
+            normal = self.report(path, runs, judged, enabled=False)
+            diagnostic = self.report(path, runs, judged)
+            old = {key: value for key, value in diagnostic.items() if key not in {"verifier_review", "generated_at"}}
+            self.assertEqual(old, {key: value for key, value in normal.items() if key != "generated_at"})
+            self.assertEqual(sb._read_verifier_review(diagnostic)["availability"], "complete")
+            signals = [lead["signal"] for lead in self.leads(diagnostic)]
+            self.assertEqual({signal: signals.count(signal) for signal in set(signals)},
+                             {"never_passes": 2, "format_near_miss": 4, "oracle_disagreement": 4})
+            self.assertTrue(all(row["assertions"][0]["passed"] is False for row in diagnostic["results"]))
+            self.assertTrue(all(lead["effort_verified"] is False for lead in self.leads(diagnostic) if lead["signal"] == "never_passes"))
+            self.assertEqual(sb.junit_xml_from_report(normal), sb.junit_xml_from_report(diagnostic))
+            self.assertEqual(sb.github_summary_from_report(normal), sb.github_summary_from_report(diagnostic))
+            self.assertTrue(sb.github_summary_from_report(diagnostic, review_diagnostics=True).startswith(sb.github_summary_from_report(normal)))
+            ordinary = sb.error_analysis_report(normal, limit=1)
+            extra = sb.error_analysis_report(diagnostic, limit=1, review_diagnostics=True)
+            self.assertEqual({key: value for key, value in extra.items() if key != "diagnostic_review"}, ordinary)
+            self.assertEqual(extra["diagnostic_review"]["review_queue_truncated"], 3)
+            self.assertEqual(extra["diagnostic_review"]["review_queue"][0]["run_number"], 1)
+
+    def test_passing_repetition_defeats_its_whole_never_passes_cohort(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td))
+            (runs / "c" / "with_skill" / "run-2" / "output.md").write_text("Severity: Blocking", encoding="utf-8")
+            judge_with_stub(path, runs, judged, passes_on="Blocking")
+            report = self.report(path, runs, judged)
+            never = [lead for lead in self.leads(report) if lead["signal"] == "never_passes"]
+            self.assertEqual(len(never), 1)
+            planned = report["verifier_review"]["population"]["planned"]
+            identities = {sb._report_attempt_identity(row): row["variant"] for row in planned}
+            self.assertEqual([identities[run] for run in never[0]["runs"]], ["without_skill", "without_skill"])
+            for output in runs.glob("c/*/run-*/output.md"):
+                output.write_text("Severity: Blocking", encoding="utf-8")
+            judge_with_stub(path, runs, judged, passes_on="Blocking")
+            supported = self.report(path, runs, judged)
+            self.assertEqual(sb._read_verifier_review(supported)["availability"], "complete")
+            self.assertEqual(self.leads(supported), [])
+
+    def test_missing_and_mismatched_cohorts_keep_only_observed_local_leads(self):
+        for change in ("missing", "provider", "effort", "refused"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as td:
+                path, runs, judged = self.fixture(Path(td))
+                base = runs / "c" / "with_skill" / "run-2"
+                if change == "missing":
+                    (base / "output.md").unlink()
+                else:
+                    metadata = json.loads((base / "metadata.json").read_text())
+                    if change == "provider":
+                        metadata["provider"] = "codex"
+                    elif change == "refused":
+                        metadata["stop_class"] = "refused"
+                    else:
+                        for run in runs.glob("c/*/run-*/metadata.json"):
+                            value = json.loads(run.read_text())
+                            value["effort"] = {"requested": "high", "applied_by": "fixture"}
+                            run.write_text(json.dumps(value))
+                        metadata["effort"] = {"requested": "low", "applied_by": "fixture"}
+                    (base / "metadata.json").write_text(json.dumps(metadata))
+                report = self.report(path, runs, judged)
+                review = sb._read_verifier_review(report)
+                self.assertEqual(review["availability"], "unavailable")
+                self.assertFalse(any(lead["signal"] == "never_passes" for lead in self.leads(report)))
+                self.assertTrue(any(lead["signal"] == "format_near_miss" for lead in self.leads(report)))
+                queue = sb.error_analysis_report(report, review_diagnostics=True)["diagnostic_review"]
+                self.assertEqual(queue["review_queue"], [])
+                self.assertGreater(len(queue["observed"]["review_queue"]), 0)
+
+    def test_rejected_judgment_fingerprint_cannot_nominate_disagreement(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td))
+            rows = [json.loads(line) for line in judged.read_text().splitlines()]
+            for row in rows:
+                row["judge_prompt_sha256"] = "0" * 64
+            judged.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            report = self.report(path, runs, judged)
+            self.assertEqual(len(report["deferred_judge_tasks"]), 4)
+            self.assertEqual(self.leads(report), [])
+            self.assertEqual(report["verifier_review"]["availability"], "unavailable")
+
+    def test_turns_and_case_level_multiturn_literals_have_unknown_consumed_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td), turns=True)
+            report = self.report(path, runs, judged)
+            self.assertIn("source_text_unavailable", report["verifier_review"]["reasons"])
+            self.assertFalse(any(lead["signal"] == "format_near_miss" for lead in self.leads(report)))
+            self.assertEqual(sum(lead["signal"] == "oracle_disagreement" for lead in self.leads(report)), 8)
+
+    def test_empty_transformed_operand_is_unavailable_in_the_projection(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td), assertion={"type": "contains", "value": "***", "comparison": "exact"})
+            report = self.report(path, runs, judged)
+            self.assertIn("empty_transformed_operand", report["verifier_review"]["reasons"])
+            self.assertEqual(sb._read_verifier_review(report)["availability"], "unavailable")
+
+    def test_recorded_backend_default_and_high_block_whole_cohorts(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td))
+            for file in runs.glob("c/*/run-*/metadata.json"):
+                metadata = json.loads(file.read_text())
+                metadata["effort"] = ({"requested": None, "applied_by": "backend_default"}
+                                      if file.parent.name == "run-1" else {"requested": "high", "applied_by": "fixture"})
+                file.write_text(json.dumps(metadata))
+            report = self.report(path, runs, judged)
+            self.assertEqual(report["availability"], "complete")
+            self.assertIn("cohort_settings_mismatch", sb._read_verifier_review(report)["reasons"])
+            self.assertFalse(any(lead["signal"] == "never_passes" for lead in self.leads(report)))
+            self.assertEqual(sum(lead["signal"] == "format_near_miss" for lead in self.leads(report)), 4)
+
+    def test_failed_critical_qualitative_assertion_cannot_nominate_disagreement(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path, runs, judged = self.fixture(root, assertions=[
+                {"name": "quality", "type": "judge", "prompt": "Is this acceptable?"},
+                {"name": "critical-judge", "type": "judge", "severity": "critical", "prompt": "reject-this-judge"}])
+            script = root / "selective-judge.py"
+            script.write_text('import sys, json\ntext = sys.stdin.read()\nprint(json.dumps({"passed": "reject-this-judge" not in text, "evidence": "offline"}))\n')
+            code, _, stderr = run_cli("judge", path, "--runs", runs, "--judge-cmd", f"{sys.executable} {script}", "--out", judged)
+            self.assertEqual((code, stderr), (0, ""))
+            report = self.report(path, runs, judged)
+            self.assertTrue(all(row["qualitative_assertions"][1]["passed"] is False for row in report["results"]))
+            disagreement = [lead for lead in self.leads(report) if lead["signal"] == "oracle_disagreement"]
+            self.assertEqual(report["availability"], "complete")
+            self.assertEqual(disagreement, [])
+            self.assertTrue(all(row["qualitative_assertions"][0]["passed"] is True for row in report["results"]))
+            review = sb._read_verifier_review(report)
+            self.assertEqual((review["availability"], review["reason"]), ("not_applicable", "no_supported_assertions"))
+            diagnostic = sb.error_analysis_report(report, review_diagnostics=True)["diagnostic_review"]
+            self.assertEqual((diagnostic["availability"], diagnostic["review_queue"]), ("not_applicable", []))
+            self.assertIn("Diagnostic availability is `not_applicable`", sb.github_summary_from_report(report, review_diagnostics=True))
+
+    def test_saved_reader_rejects_stale_basis_and_incompatible_leads_without_affecting_gates(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td))
+            original = self.report(path, runs, judged)
+            for change in ("basis", "signal", "population"):
+                with self.subTest(change=change):
+                    report = copy.deepcopy(original)
+                    if change == "basis":
+                        report["results"][0]["assertions"][0]["evidence"] = "changed saved source"
+                    elif change == "signal":
+                        report["verifier_review"]["leads"][0]["signal"] = "unknown"
+                    else:
+                        report["verifier_review"]["population"]["planned"].pop()
+                    without = {key: value for key, value in report.items() if key != "verifier_review"}
+                    policy = sb.report_domain.ReportGatePolicy((sb.ExecutionVariant.parse("with_skill"),))
+                    self.assertEqual(sb.benchmark_gate(report, policy), sb.benchmark_gate(without, policy))
+                    self.assertEqual(sb._read_verifier_review(report)["reasons"], ["invalid_saved_diagnostics"])
+            normal = self.report(path, runs, judged, enabled=False)
+            self.assertEqual(sb._read_verifier_review(normal), {"evidence_class": "diagnostic", "availability": "not_applicable", "reason": "diagnostics_not_requested"})
+
+
 if __name__ == "__main__":
     unittest.main()

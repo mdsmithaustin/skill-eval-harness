@@ -108,6 +108,12 @@ benchmark -> benchmark.json with summary, results, and case_flags
 viewer    -> review.html with assertion evidence and output previews
 ```
 
+`benchmark --review-diagnostics` adds optional verifier authoring leads.
+Saved `report` and `error-analysis` use the same opt-in. Grades, rates, gates,
+and ordinary failure queues stay unchanged. Read the
+[diagnostic review guide](docs/why-did-this-run-fail.md#review-optional-verifier-diagnostics)
+before changing an assertion.
+
 `benchmark.json` records one row per case/variant/run, plus aggregate pass rates, timing/token summaries, and flags for saturated (both arms always pass), floor (`floor: fails in both arms`), no-lift, flaky, or with-skill-failed cases. It also carries a `reliability` block — unbiased **pass@k** and **pass^k** per (case, variant) from the repeated runs — beside the paired lift's sign-flip `significance`, and a `trajectory_diff` block: per case, over validated experimental pairs, the commands exclusive to one arm across the case's complete repetition set, event-count deltas (steps/commands/tool calls/file reads/file writes), and per-arm skill-load rates — how the arms *behaved*, beside whether they passed. An arm without non-empty, readable trace evidence blocks its pair with a named reason instead of reading as an empty diff.
 
 Each paired lift also carries an `interval` (the sign-flip test inverted into a 95% confidence interval, unbounded below six paired cases; the six-unit bound is the **Inference unit** entry in [`docs/vocabulary.md`](docs/vocabulary.md#report-signals)) and a `noise_check` whose `verdict` names what stops the eval from resolving a lift: too few cases moved, a noise floor above the `without_skill` headroom, or one above the `--min-lift` you would act on. A `run_endings` block counts, per variant, how runs stopped, whether the served model matched the request, and the effort each ran at, so a refusal is not read as a capability miss. The fields are in [`docs/commands.md`](docs/commands.md#lift-interval-and-noise-check).

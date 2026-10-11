@@ -174,3 +174,22 @@ the skill actually *loaded* on each tier; whether the description routes on a gi
 model is a separate, prior question answered by
 [`tuning-skill-activation.md`](tuning-skill-activation.md). Rank tiers here, price them
 from their runs' spend, and confirm they load before you trust either number.
+
+## Why verifier diagnostics do not infer model order
+
+`--review-diagnostics` provides optional verifier authoring leads. It exposes no
+model-order flag, ordered-cohort calculator, or new statistical estimator.
+Existing paired skill lift stays within each requested model.
+
+Current native artifacts do not attest complete effective backend options,
+timeout, and executable identity. Jetty embeds the requested model in
+model-visible request messages, so changing the model also changes that input.
+These producers cannot establish an otherwise held-fixed model-order experiment.
+Editing historical metadata does not supply execution provenance.
+
+A future ordering feature needs an immutable producer contract and real producer
+evidence. Its planned population must contain every declared case, arm, model,
+and matched repetition, with unchanged treatment, settings, and assertion
+definitions and verified single served-model identity. That separate work must
+preserve case-level statistical units and equal case weights. The current
+verifier diagnostics establish none of those experiment claims.

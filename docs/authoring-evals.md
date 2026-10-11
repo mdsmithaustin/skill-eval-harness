@@ -366,6 +366,13 @@ The path matters as much as the answer. A case can produce the right final text 
 reason, so grade the trajectory (`skill_invoked`, `command_order`) alongside the output, and treat
 a right answer reached the wrong way as a finding, not a pass.
 
+For suspected eval defects, use [optional verifier diagnostics](why-did-this-run-fail.md#review-optional-verifier-diagnostics)
+to inspect complete never-passing cohorts, bounded literal formatting hypotheses,
+and accepted objective-versus-qualitative disagreement. Enable them on `benchmark`
+with `--review-diagnostics`. Read each referenced answer and original definition
+before changing a tune assertion. Diagnostics preserve grades and cannot justify
+curating holdout cases by measured outcomes.
+
 ### `tool_sequence`: checking the trajectory shape
 
 `command_order` and `tool_call`'s `order` check that some calls happened in some sequence.

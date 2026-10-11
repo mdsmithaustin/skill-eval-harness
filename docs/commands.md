@@ -295,6 +295,12 @@ skill-benchmark error-analysis --benchmark benchmark.json --feedback feedback.js
 
 Queue rows carry `run_number`. `--feedback` reads the served review's `feedback.json`: a run-level judgement (one naming no assertion) for the same case, model, variant, and run fills that row's `note` and adds `human_verdict`, so a note written while reading the run is not typed again here. A missing file adds nothing; a malformed one is an error.
 
+Add `--review-diagnostics` to read the saved optional `verifier_review` block into a
+separate `diagnostic_review` queue. Its run order is canonical and each run appears
+once. `--limit` limits each queue independently. Ordinary taxonomy, first failures,
+feedback notes, and queue order remain unchanged. Saved consumers never grade,
+judge, or reopen output files. See [diagnostic review](why-did-this-run-fail.md#review-optional-verifier-diagnostics).
+
 ## Pi trace runners
 
 The Adewale Pi smoke example writes the trace-aware run layout directly:
@@ -362,6 +368,46 @@ skill-benchmark benchmark ../repo/evals/shared-benchmark.json \
 ```
 
 Multi-model runs prepare with `--models a,b,c` (run dirs gain a model segment: `<case>/<model>/<variant>`); grading discovers both layouts and pairs lift per (case, model).
+
+### Optional verifier diagnostics
+
+`--review-diagnostics` adds `verifier_review` after grading and answer-design
+coverage decisions. The default report has no diagnostic block. The Python
+`build_benchmark_report` keyword is `review_diagnostics=False`.
+
+```bash
+skill-benchmark benchmark ../repo/evals/shared-benchmark.json \
+  --runs ../repo/eval-runs/latest --judge-results judge-results.jsonl \
+  --review-diagnostics --out benchmark.json
+skill-benchmark error-analysis --benchmark benchmark.json \
+  --review-diagnostics --out diagnostic-errors.json
+skill-benchmark report --benchmark benchmark.json --format github \
+  --review-diagnostics --out diagnostic-summary.md
+```
+
+Every new block, lead, and queue has `evidence_class: diagnostic`. Complete review
+contains `leads`. Unavailable review carries `reasons` and row-local leads under
+`observed`. Partial source has no diagnostic headline queue or complete
+`never_passes` lead. A known population with no applicable objective assertions is `not_applicable`
+with `no_supported_assertions`. Legacy absence is `not_applicable` with
+`diagnostics_not_requested`.
+Malformed or stale saved diagnostics become unavailable with
+`invalid_saved_diagnostics`. The basis digest checks internal consistency of saved
+results and design coverage. It does not authenticate artifacts or execution.
+
+Producer reason codes are `source_report_incomplete`, `answer_design_unverified`,
+`population_incomplete`, `assertion_identity_unavailable`, `source_text_unavailable`,
+`empty_transformed_operand`, `cohort_settings_mismatch`, and
+`assertion_observation_incomplete`. An absent saved block has
+`diagnostics_not_requested`.
+
+The three signals and their evidence requirements are in the
+[failure-analysis guide](why-did-this-run-fail.md#review-optional-verifier-diagnostics).
+Diagnostics do not change grades, aggregate rates, judgment requests, or gates.
+Only `benchmark` computes them. Saved `report` and `error-analysis` validate and
+present the saved block. Opt-in GitHub output appends a diagnostic section after
+ordinary output and annotations. JUnit output has the same testcases and bytes
+with either setting.
 
 ### Lift interval and noise check
 
