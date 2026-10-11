@@ -2975,16 +2975,19 @@ class AnswerWorkspaceAttestationTests(unittest.TestCase):
             payloads = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
             payload = next(
                 item for item in payloads if item["harness"]["variant"] == "with_skill")
+            valid = next(
+                item for item in payloads if item["harness"]["variant"] == "without_skill")
             skill_item = next(
                 item for item in payload["upload_plan"]["files"]
                 if item.get("role") == "skill")
             Path(skill_item["local_path"]).write_text("changed after export\n", encoding="utf-8")
             client = FakeJettyClient()
 
-            [record] = list(sb.execute_jetty_payloads([payload], client=client))
-            self.assertEqual(record["status"], "failed")
-            self.assertIn("changed after attestation", record["error"])
-            self.assertEqual((client.upload_calls, client.submit_calls), (0, 0))
+            with self.assertRaisesRegex(
+                    RuntimeError, "^Jetty model-visible task/runbook/upload plan changed after attestation$"):
+                list(sb.execute_jetty_payloads([valid, payload], client=client))
+            self.assertEqual((client.upload_calls, client.submit_calls, client.poll_calls,
+                              client.fetch_calls, client.download_calls), (0, 0, 0, 0, 0))
 
     def test_jetty_plan_rejects_skill_bytes_that_differ_from_the_prepared_tree(self):
         # The export-time twin of the workspace mount check: the planned skill

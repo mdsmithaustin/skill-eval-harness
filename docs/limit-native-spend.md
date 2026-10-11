@@ -1,4 +1,4 @@
-# How do I stop an answer, subagent, or judge batch at a dollar ceiling?
+# How do I stop an answer, subagent, judge, or Jetty batch at a dollar ceiling?
 
 Use `--max-cost-usd` on `run-agent`, `run-claude`, or `run-codex` to limit admission for one command invocation. A call can exceed the ceiling. The command finishes that call and refuses later calls.
 
@@ -39,7 +39,7 @@ The harness publishes `in_flight` before dispatch and publishes the charge befor
 
 Each publication flushes and syncs the file before atomic replacement, then syncs the directory where the platform supports it. File publication failures stop dispatch. An abrupt process kill or failed settlement publication can leave unresolved `in_flight` evidence. The ledger then reports partial spend. A raised callback exception retains an attempted, unpriced receipt, or a labeled assumption if one was supplied. Raised setup, provider, or pricing exceptions skip workspace capture. A settlement publication error also skips capture. Returned failure and timeout outcomes still capture workspace evidence before deletion.
 
-For capped batches, every selected task must be an ordinary native answer task. A recovery row anywhere in the batch rejects the command before provider calls or writes to the runs root. Uncapped recovery keeps its existing phase behavior. The native rules above apply to the serial native answer commands. `run-subagent` has the external-turn rules below. Judge calls have the rules below. Jetty submissions, trigger matrices, and Pi trigger evaluations keep their existing execution policies.
+For capped batches, every selected task must be an ordinary native answer task. A recovery row anywhere in the batch rejects the command before provider calls or writes to the runs root. Uncapped recovery keeps its existing phase behavior. The native rules above apply to the serial native answer commands. `run-subagent` has the external-turn rules below. Judge calls have the rules below. Jetty submissions have the rules below. Trigger matrices and Pi trigger evaluations keep their existing execution policies.
 
 ## Subagent external turns
 
@@ -132,3 +132,71 @@ Settlement precedes verdict parsing and transcript publication. A paid malformed
 failed transcript write retains its settled price. The output error still stops execution.
 `benchmark` and `cost-summary` include the invocation ledger and retain the existing recursive
 judge price accounting. A refused slot cannot establish a billed whole-price observation.
+
+## Jetty submissions
+
+`run-jetty` accepts the ceiling and assumption flags. It validates every selected payload,
+attested upload, route, saved result, and output slot before creating a ledger or replacing
+output. Already uploaded tasks use their stored contract and receipt. Their original local
+files need not remain available.
+
+Apply a ceiling to exported executable payloads:
+
+```sh
+skill-benchmark run-jetty --payloads jetty-payloads.jsonl --out jetty-runs.jsonl \
+  --max-cost-usd 1 --assumed-cost-per-run-usd 0.10
+```
+
+This command requires `JETTY_API_TOKEN` and can incur provider spend. The assumption is a
+ledger policy amount. If a response establishes a $0.60 cumulative floor, the ledger charges
+at least $0.60. The assumption never becomes provider telemetry.
+
+A fresh zero ceiling makes no HTTP request, uploads no bundle, and appends no submission
+attempt. Refused rows have `invocation_state: not_started`, requested routing, and the
+prospective paid call identity. They have no provider status, return code, served model, or
+trajectory acknowledgement. An explicit unknown replacement refused at zero preserves the
+old journal bytes and reports its prior receipt separately. `import-jetty-results` accepts
+refusal rows as incomplete metadata without creating an answer or provider execution facts.
+
+Polling, artifact retrieval, and durable replay reconcile earlier attempts without new
+admission. A zero ceiling permits those operations. Replay makes no HTTP request and emits
+the original saved record without changing its hash. A reconciliation-only invocation has
+an empty paid plan. Historical incomplete accounting does not make its current ledger partial.
+
+The ledger first records `in_flight`. Its callback uploads when needed, persists a new UUID
+at the journal's `submitting` transition, and submits. Uncapped submissions also receive a
+UUID and create no spend directory. Unknown submissions never retry automatically.
+`--resubmit-unknown` requests a distinct admitted attempt and retains the predecessor's
+identity and receipts. Internal HTTP 429 retries keep one logical attempt. Final 429 and
+possibly accepted 5xx responses do not prove zero billing.
+
+Supported `cost` and `cost_usd` fields, including nested `usage` aliases, are cumulative
+provider-reported observations. Equal aliases count once. Conflicting or malformed dollar
+aliases contribute no invented amount. Valid earlier floors survive later conflicts, missing
+fields, malformed sibling tokens, and local artifact errors. Floors use the maximum safe
+observation, never the sum of snapshots. Terminal execution status does not establish complete
+billing. Jetty's current provider contract supplies no billing finality marker, so current
+records and imported telemetry leave the complete price unavailable. `benchmark` and
+`cost-summary` exclude these floors from complete observed dollar totals. The floor remains
+in `jetty_price_evidence.observed_subtotal_usd`, imported `observed_subtotal_usd`, and the
+current invocation ledger. Historical replay retains its original cost claims and the
+importer labels their billing finality `historical_unverified`.
+
+Every capped invocation writes `<out>.spend/<invocation-id>/spend-ceiling.json`. Earlier
+ledgers remain immutable when later reconciliation adds journal evidence. Inspect those
+admission snapshots separately from provider receipts. They describe the same attempt and
+must not be added as separate charges. Missing complete price closes later fresh admission
+unless an assumption applies. Earlier reconciliation and replay continue. Current refusal
+or partial accounting exits 2. Other lifecycle exits remain unchanged.
+
+Journal schema 2 stores digest-keyed tasks with shared upload facts and ordered submission
+attempts. Schema 1 loads without a write. A real transition persists migration while retaining
+surviving receipts, exact record hashes, opaque abandonment counts, and unclassified metadata.
+Its scoped `legacy_current` reference identifies the surviving local receipt. It cannot recover
+an original submission UUID or vanished prior attempts and costs. Load, replay, and refusal
+alone do not rewrite that journal.
+
+Persistence failures and interruptions stop execution. When settlement publication succeeds,
+known floors settle before a deferred error propagates. A failed submitting checkpoint sends
+no submit request. A hard process kill or settlement failure can leave the ledger `in_flight`.
+No local error proves free model execution. Output publication still precedes journal commit.

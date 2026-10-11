@@ -9,6 +9,7 @@ from spend_contracts import (
     CallState,
     Charge,
     InFlight,
+    JettyCall,
     JudgeCall,
     NoModelSpend,
     ObservedCharge,
@@ -66,6 +67,9 @@ def call_precision(call: SpendCall) -> None:
         assert_type(call.judge_input_sha256, str)
         assert_type(call.requested_model, str | None)
         assert_type(call.repeat, int)
+    elif isinstance(call, JettyCall):
+        assert_type(call.task_contract_sha256, str)
+        assert_type(call.journal_attempt_id, str)
     elif isinstance(call, AnswerCall):
         assert_type(call.task_sha256, str)
     else:

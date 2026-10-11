@@ -8,6 +8,7 @@ from spend_contracts import (
     AnswerCall,
     AssumedCharge,
     InFlight,
+    JettyCall,
     NoModelSpend,
     ObservedCharge,
     Planned,
@@ -146,6 +147,21 @@ class SpendContractTests(unittest.TestCase):
                 SubagentTurnCall(answer.task_sha256, answer.coordinate, value)
         with self.assertRaisesRegex(ValueError, "duplicate"):
             SpendPlan((call, call))
+
+    def test_jetty_identity_round_trips_and_rejects_invalid_persisted_inputs(self):
+        call = JettyCall("sha256:" + "a" * 64, "b" * 32)
+        self.assertEqual(call.as_dict(), {"kind": "jetty", "task_contract_sha256": "sha256:" + "a" * 64,
+                                          "journal_attempt_id": "b" * 32})
+        ledger = SpendLedger.planned("c" * 32, SpendPolicy.from_raw("1"), SpendPlan((call,)))
+        ledger = ledger.transition(InFlight(call)).transition(Settled(call, UnpricedCall("jetty_billing_finality_unavailable", Money.from_raw("0.6"))))
+        self.assertEqual(SpendLedger.from_dict(ledger.as_dict()), ledger)
+        for field, value, message in (("task_contract_sha256", "a" * 64, "task contract SHA-256"),
+                                      ("journal_attempt_id", "b" * 31, "UUID hex"),
+                                      ("journal_attempt_id", True, "UUID hex")):
+            raw = ledger.as_dict()
+            raw["calls"][0]["call"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, message):
+                SpendLedger.from_dict(raw)
 
     def test_subagent_ledger_rejects_unknown_kind_invalid_turn_and_contradictory_id(self):
         answer = self.call()

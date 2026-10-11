@@ -2,6 +2,7 @@ import io
 import json
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -322,10 +323,8 @@ class JettyBoundaryIntegrationTests(unittest.TestCase):
                 mutate(payload)
                 client = FakeJettyClient()
 
-                record = next(iter(sb.execute_jetty_payloads([payload], client=client)))
-
-                self.assertEqual(record["status"], "failed")
-                self.assertIn("changed after attestation", record["error"])
+                with self.assertRaisesRegex(RuntimeError, "changed after attestation"):
+                    list(sb.execute_jetty_payloads([payload], client=client))
                 self.assertEqual(client.upload_calls, 0)
 
     def test_executor_snapshots_every_local_upload_before_network_io(self):
@@ -388,9 +387,6 @@ class JettyBoundaryIntegrationTests(unittest.TestCase):
         self.assertEqual(replaced, {"one": "remote-I", "ten": "remote-J"})
 
     def test_mounted_skill_bytes_must_match_the_attested_skill_tree_hash(self):
-        # Each arm hashes the skill surface it mounts (old_skill mounts the old
-        # skill), and a harness hash that disagrees with those bytes is
-        # rejected before upload even when the task-contract digest agrees.
         with tempfile.TemporaryDirectory() as td:
             skill = Path(td) / "SKILL.md"
             skill.write_text("skill bytes", encoding="utf-8")
@@ -412,15 +408,13 @@ class JettyBoundaryIntegrationTests(unittest.TestCase):
                         }, files=files)
                         client = FakeJettyClient()
 
-                        record = next(iter(
-                            sb.execute_jetty_payloads([payload], client=client)))
-
                         if error is None:
+                            record = next(iter(sb.execute_jetty_payloads([payload], client=client)))
                             self.assertEqual(record["status"], "completed")
                             self.assertEqual(client.upload_calls, 1)
                         else:
-                            self.assertEqual(record["status"], "failed")
-                            self.assertIn(error, record["error"])
+                            with self.assertRaisesRegex(RuntimeError, error):
+                                list(sb.execute_jetty_payloads([payload], client=client))
                             self.assertEqual(client.upload_calls, 0)
 
     def test_failed_trajectory_cannot_promote_partial_events_to_complete_operations(self):
@@ -482,6 +476,132 @@ class JettyBoundaryIntegrationTests(unittest.TestCase):
         self.assertEqual(caught.exception.last["status"], "running")
         self.assertEqual(
             caught.exception.last["provider_status"], "running")
+
+    def test_poller_http_404_expires_with_a_pending_receipt_without_observation(self):
+        client = sb.JettyClient("fixture-token")
+        missing = urllib.error.HTTPError("fixture", 404, "missing", None, None)
+        observations = []
+        with (
+            mock.patch.object(client, "_json_request", side_effect=missing) as request,
+            mock.patch.object(sb.time, "time", side_effect=[0, 1, 2]),
+            mock.patch.object(sb.time, "sleep") as sleep,
+            self.assertRaises(sb.JettyPollWaitExpired) as caught,
+        ):
+            client.poll(
+                "c/a", "task space", "trajectory/1", timeout_s=1,
+                poll_interval_s=0.25,
+                on_observation=lambda record: observations.append(dict(record)),
+            )
+        self.assertEqual(caught.exception.last, {
+            "status": "queued", "trajectory_id": "trajectory/1",
+            "provider_status": "queued",
+        })
+        self.assertEqual(observations, [])
+        sleep.assert_called_once_with(0.25)
+        request.assert_called_once_with(
+            "GET", "/api/v1/db/trajectory/c%2Fa/task%20space/trajectory%2F1")
+
+    def test_poller_http_404_replaces_an_earlier_running_receipt(self):
+        client = sb.JettyClient("fixture-token")
+        running = {
+            "status": "running", "trajectory_id": "trajectory-1",
+            "cost_usd": "0.60", "storage_path": "c/task/trajectory-1",
+        }
+        missing = urllib.error.HTTPError("fixture", 404, "missing", None, None)
+        observations = []
+        with (
+            mock.patch.object(client, "_json_request", side_effect=[running, missing]),
+            mock.patch.object(sb.time, "time", side_effect=[0, 0, 1, 2]),
+            mock.patch.object(sb.time, "sleep") as sleep,
+            self.assertRaises(sb.JettyPollWaitExpired) as caught,
+        ):
+            client.poll(
+                "c", "task", "trajectory-1", timeout_s=1,
+                poll_interval_s=0.25,
+                on_observation=lambda record: observations.append(dict(record)),
+            )
+        self.assertEqual(observations, [{
+            "status": "running", "trajectory_id": "trajectory-1",
+            "cost_usd": "0.60", "storage_path": "c/task/trajectory-1",
+        }])
+        self.assertEqual(caught.exception.last, {
+            "status": "queued", "trajectory_id": "trajectory-1",
+            "provider_status": "queued",
+        })
+        self.assertEqual(sleep.call_args_list, [mock.call(0.25), mock.call(0.25)])
+
+    def test_poller_observes_terminal_response_before_normalization_after_http_404(self):
+        client = sb.JettyClient("fixture-token")
+        missing = urllib.error.HTTPError("fixture", 404, "missing", None, None)
+        terminal = {"status": "success", "trajectory_id": "trajectory-1"}
+        observations = []
+        with (
+            mock.patch.object(client, "_json_request", side_effect=[missing, terminal]),
+            mock.patch.object(sb.time, "time", side_effect=[0, 0, 1]),
+            mock.patch.object(sb.time, "sleep") as sleep,
+        ):
+            record = client.poll(
+                "c", "task", "trajectory-1", timeout_s=1,
+                poll_interval_s=0.25,
+                on_observation=lambda response: observations.append(dict(response)),
+            )
+        self.assertEqual(observations, [
+            {"status": "success", "trajectory_id": "trajectory-1"},
+        ])
+        self.assertEqual(record, {
+            "status": "completed", "trajectory_id": "trajectory-1",
+            "provider_status": "success",
+            "lifecycle": {"kind": "succeeded", "status": "completed", "raw_status": "completed"},
+        })
+        sleep.assert_called_once_with(0.25)
+
+    def test_poller_propagates_non_404_http_errors_unchanged(self):
+        client = sb.JettyClient("fixture-token")
+        error = urllib.error.HTTPError("fixture", 403, "forbidden", None, None)
+        observations = []
+        with (
+            mock.patch.object(client, "_json_request", side_effect=error),
+            mock.patch.object(sb.time, "time", side_effect=[0, 0]),
+            mock.patch.object(sb.time, "sleep") as sleep,
+            self.assertRaises(urllib.error.HTTPError) as caught,
+        ):
+            client.poll(
+                "c", "task", "trajectory-1", timeout_s=1,
+                on_observation=lambda record: observations.append(dict(record)),
+            )
+        self.assertIs(caught.exception, error)
+        self.assertEqual(caught.exception.code, 403)
+        self.assertEqual(observations, [])
+        sleep.assert_not_called()
+
+    def test_poller_propagates_observation_errors_before_terminal_normalization(self):
+        client = sb.JettyClient("fixture-token")
+        terminal = {"status": "success", "trajectory_id": "trajectory-1"}
+        observations = []
+        error = RuntimeError("checkpoint failed")
+
+        def observe(record):
+            observations.append(dict(record))
+            raise error
+
+        with (
+            mock.patch.object(client, "_json_request", return_value=terminal),
+            mock.patch.object(sb.time, "time", side_effect=[0, 0]),
+            mock.patch.object(sb.time, "sleep") as sleep,
+            self.assertRaises(RuntimeError) as caught,
+        ):
+            client.poll(
+                "c", "task", "trajectory-1", timeout_s=1,
+                on_observation=observe,
+            )
+        self.assertIs(caught.exception, error)
+        self.assertEqual(observations, [
+            {"status": "success", "trajectory_id": "trajectory-1"},
+        ])
+        self.assertEqual(terminal, {
+            "status": "success", "trajectory_id": "trajectory-1",
+        })
+        sleep.assert_not_called()
 
 
 class JettyObservationTests(unittest.TestCase):

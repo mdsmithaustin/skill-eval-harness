@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from helpers import (
+    FakeJettyClient,
     attach_jetty_task_contract,
     attest_answer_design,
     demo_manifest,
@@ -602,14 +603,12 @@ class SkillBenchmarkTests(unittest.TestCase):
             row = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
             self.assertFalse(row["harness"]["executable"])
 
-            class ShouldNotCallClient:
-                def upload(self, *args, **kwargs):
-                    raise AssertionError("non-executable payload should not upload")
-
-            records = list(sb.execute_jetty_payloads([row], client=ShouldNotCallClient()))
-            self.assertEqual(records[0]["status"], "protocol_invalid")
-            self.assertEqual(records[0]["lifecycle"]["kind"], "protocol_invalid")
-            self.assertIn("non-executable", records[0]["error"])
+            client = FakeJettyClient()
+            with self.assertRaisesRegex(
+                    ValueError, "^payload is non-executable; missing hidden prompt content or dry-run placeholder$"):
+                list(sb.execute_jetty_payloads([row], client=client))
+            self.assertEqual((client.upload_calls, client.submit_calls, client.poll_calls,
+                              client.fetch_calls, client.download_calls), (0, 0, 0, 0, 0))
 
     def test_pi_smoke_command_line_points_only_at_workspace_copies(self):
         # CF.2 proves what each pi-smoke workspace holds; this owns what the pi
@@ -1268,7 +1267,7 @@ class SkillBenchmarkTests(unittest.TestCase):
 
     def test_run_jetty_uploads_bundle_submits_polls_and_fetches_artifacts(self):
         row = {
-            "harness": {"skill_name": "demo", "case_id": "case-1", "variant": "with_skill", "run_number": 1, "split": "tune", "run_dir": "case-1/with_skill"},
+            "harness": {"skill_name": "demo", "case_id": "case-1", "variant": "with_skill", "run_number": 1, "split": "tune", "run_dir": "case-1/with_skill", "executable": True},
             "jetty_request": {
                 "model": "claude-sonnet-4-6",
                 "messages": [{"role": "system", "content": "runbook"}, {"role": "user", "content": "Execute the runbook."}],
@@ -1302,19 +1301,21 @@ class SkillBenchmarkTests(unittest.TestCase):
                 self.downloaded: list[str] = []
             def upload_bundle(self, archive_name, data):
                 self.bundle = (archive_name, data)
-                # Live shape: POST /api/v1/sandbox/upload returns file_paths.
                 return "skill-evals/_sandbox_uploads/abc123/demo.zip"
             def submit(self, request_body):
                 self.submitted = request_body
-                # Live shape: sync wait exceeded -> 202 + jetty_metadata.workflow_id.
                 return {"jetty_metadata": {"mode": "runbook", "status": "running", "workflow_id": "traj_1"}}
-            def poll(self, collection, task, trajectory_id, *, timeout_s=1800, poll_interval_s=5):
-                return {
+            def poll(self, collection, task, trajectory_id, *, timeout_s=1800, poll_interval_s=5, on_observation):
+                self.polled = (collection, task, trajectory_id, timeout_s, poll_interval_s)
+                response = {
                     "status": "completed",
                     "trajectory_id": trajectory_id,
                     "storage_path": f"{collection}/{task}/0000",
                 }
+                on_observation(response)
+                return response
             def fetch_trajectory(self, collection, task, trajectory_id):
+                self.fetched = (collection, task, trajectory_id)
                 return {
                     "status": "completed",
                     "trajectory_id": trajectory_id,
@@ -1335,11 +1336,17 @@ class SkillBenchmarkTests(unittest.TestCase):
         self.assertEqual(archive_name, "demo.zip")
         with zipfile.ZipFile(io.BytesIO(bundle_bytes)) as zf:
             self.assertEqual(sorted(zf.namelist()), ["skills/demo/SKILL.md", "tasks/demo.json"])
+            self.assertEqual(zf.read("skills/demo/SKILL.md"), b"skill body")
+            self.assertEqual(zf.read("tasks/demo.json"), b"{}")
+        self.assertEqual(client.polled, ("skill-evals", "demo-case-1-with-skill-1", "traj_1", 1, 0))
+        self.assertEqual(client.fetched, ("skill-evals", "demo-case-1-with-skill-1", "traj_1"))
+        self.assertEqual(client.downloaded, [
+            "skill-evals/demo-case-1-with-skill-1/0000/traj_1.run.0000.app--results--output.md"])
         self.assertEqual(client.submitted["jetty"]["file_paths"], ["skill-evals/_sandbox_uploads/abc123/demo.zip"])
-        # Model-visible sandbox paths never change at run time.
         self.assertEqual(client.submitted["jetty"]["template_variables"]["task_json"], "/app/assets/tasks/demo.json")
         record = records[0]
         self.assertEqual(record["status"], "completed")
+        self.assertEqual(record["attempt_state"], "artifacts_downloaded")
         self.assertEqual(record["trajectory_id"], "traj_1")
         self.assertEqual(record["artifacts"], [{
             "path": "/app/results/output.md",
@@ -1350,6 +1357,11 @@ class SkillBenchmarkTests(unittest.TestCase):
         self.assertEqual(record["trajectory"]["usage"]["prompt_tokens"], 100)
         self.assertEqual(record["trajectory"]["elapsed_ms"], 2000)
         self.assertEqual(record["trajectory"]["cost_usd"], 0.01)
+        self.assertEqual(record["jetty_price_evidence"], {
+            "complete_price": "unavailable",
+            "reason": "jetty_billing_finality_unavailable",
+            "observed_subtotal_usd": "0.01",
+        })
 
     def test_jetty_artifact_sandbox_path_decodes_flattened_storage_names(self):
         tid = "3c9246ca-1111-2222-3333-444455556666"
