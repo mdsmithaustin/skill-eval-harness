@@ -151,6 +151,136 @@ class BoundedAdmissionTests(unittest.TestCase):
                     self.assertIsInstance(caught.exception.cause, OSError)
                     invoke.assert_not_called()
 
+    def test_interrupted_paid_result_drains_peer_and_retains_persistence_failure(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from spend_contracts import Settled
+        from spend_runtime import (
+            BoundedRunError,
+            MatrixNotStarted,
+            MatrixStopReason,
+            Priced,
+            SpendAdmission,
+            Started,
+        )
+        from telemetry import Measurement, Money
+        population = self.population()
+        interruption = KeyboardInterrupt("interrupted paid result")
+        persistence_error = OSError("final persistence failed")
+        prior_error = ValueError("prior persistence cause")
+        persistence_error.__cause__ = prior_error
+        peer_started = threading.Event()
+        release_peer = threading.Event()
+        peer_finished = threading.Event()
+        started = []
+        def invoke(call):
+            started.append(call.query_id)
+            if call.query_id == "0":
+                if not peer_started.wait(5):
+                    raise TimeoutError("paid peer did not start")
+                return Priced("interrupted value", Measurement.available(
+                    Money.from_raw("0.2"), provenance="provider_reported"), interruption=interruption)
+            peer_started.set()
+            if not release_peer.wait(5):
+                raise TimeoutError("paid peer was not drained")
+            peer_finished.set()
+            return Priced("peer value", Measurement.available(
+                Money.from_raw("0.3"), provenance="provider_reported"))
+        import spend_runtime
+        price = spend_runtime.price_measurement
+        def charge(*args, **kwargs):
+            result = price(*args, **kwargs)
+            release_peer.set()
+            return result
+        executor = ThreadPoolExecutor(max_workers=2)
+        self.addCleanup(executor.shutdown, wait=True, cancel_futures=True)
+        with tempfile.TemporaryDirectory() as td:
+            with SpendAdmission.open(SpendPolicy.from_raw(1), population.paid_plan,
+                                     root=Path(td)) as admission:
+                persist = admission._persist
+                def final_persistence():
+                    if any(isinstance(state, Settled) for state in admission.ledger.states.values()):
+                        raise persistence_error
+                    persist()
+                published = mock.Mock(side_effect=lambda value: value)
+                with mock.patch.object(admission, "_persist", side_effect=final_persistence), \
+                        mock.patch("spend_runtime.price_measurement", side_effect=charge), \
+                        mock.patch("spend_runtime.ThreadPoolExecutor", return_value=executor), \
+                        mock.patch.object(executor, "shutdown", wraps=executor.shutdown) as shutdown:
+                    with self.assertRaises(BoundedRunError) as caught:
+                        admission.bounded_map(population, invoke, workers=2, publish=published)
+                error = caught.exception
+                self.assertIs(error.cause, interruption)
+                self.assertIs(error.__cause__, persistence_error)
+                self.assertIs(interruption.__context__, persistence_error)
+                self.assertIsNot(persistence_error.__context__, interruption)
+                self.assertIs(persistence_error.__cause__, prior_error)
+                self.assertEqual([item.call.query_id for item in error.executions], ["0", "1", "2", "3", "4"])
+                self.assertEqual(error.executions[:2], (
+                    Started(population.cells[0].call, "interrupted value"),
+                    Started(population.cells[1].call, "peer value")))
+                self.assertEqual(error.executions[2:], tuple(
+                    MatrixNotStarted(cell.call, MatrixStopReason.INTERRUPTED) for cell in population.cells[2:]))
+                self.assertEqual(str(admission.ledger.spent.amount), "0.5")
+                self.assertEqual(sorted(started), ["0", "1"])
+                self.assertTrue(peer_finished.is_set())
+                published.assert_not_called()
+                shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+
+    def test_drain_collects_all_paid_outcomes_before_charging_can_fail(self):
+        from spend_contracts import InFlight
+        from spend_runtime import (
+            BoundedRunError,
+            MatrixNotStarted,
+            MatrixStopReason,
+            Priced,
+            SpendAdmission,
+            Started,
+        )
+        from telemetry import Measurement, Money
+        population = self.population()
+        interruption = KeyboardInterrupt("controller stopped")
+        charge_error = ValueError("charging failed")
+        all_started = threading.Event()
+        release = threading.Event()
+        started = []
+        finished = []
+        def invoke(call):
+            started.append(call.query_id)
+            if len(started) == 3:
+                all_started.set()
+            if not release.wait(5):
+                raise TimeoutError("admitted workers were not drained")
+            finished.append(call.query_id)
+            return Priced(f"paid value {call.query_id}", Measurement.available(
+                Money.from_raw("0.2"), provenance="provider_reported"))
+        def stopped():
+            if all_started.is_set():
+                release.set()
+                raise interruption
+            return False
+        with tempfile.TemporaryDirectory() as td:
+            with SpendAdmission.open(SpendPolicy.from_raw(1), population.paid_plan,
+                                     root=Path(td)) as admission:
+                published = mock.Mock(side_effect=lambda value: value)
+                with mock.patch("spend_runtime.price_measurement", side_effect=charge_error):
+                    with self.assertRaises(BoundedRunError) as caught:
+                        admission.bounded_map(population, invoke, workers=3,
+                                              publish=published, stopped=stopped)
+                error = caught.exception
+                self.assertIs(error.cause, interruption)
+                self.assertEqual(error.executions[:3], tuple(
+                    Started(cell.call, f"paid value {index}") for index, cell in enumerate(population.cells[:3])))
+                self.assertIs(error.__cause__, charge_error)
+                self.assertEqual(error.executions[3:], tuple(
+                    MatrixNotStarted(cell.call, MatrixStopReason.INTERRUPTED) for cell in population.cells[3:]))
+                self.assertEqual(sorted(started), ["0", "1", "2"])
+                self.assertEqual(sorted(finished), ["0", "1", "2"])
+                self.assertEqual(str(admission.ledger.spent.amount), "0")
+                self.assertEqual([type(admission.ledger.states[cell.call.call_id]) for cell in population.cells[:3]],
+                                 [InFlight, InFlight, InFlight])
+                published.assert_not_called()
+
     @unittest.skipIf(os.name == "nt", "requires supported POSIX directory sync")
     def test_supported_directory_sync_failure_is_fatal_but_unsupported_is_allowed(self):
         import errno
