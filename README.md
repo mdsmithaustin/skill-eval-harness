@@ -414,6 +414,11 @@ for fresh tasks and still permits prior reconciliation and durable replay. Unkno
 retain ordered attempt history. Current provider dollars remain cumulative floors because the
 provider contract supplies no complete billing marker. See [Jetty spend and migration](docs/limit-native-spend.md#jetty-submissions).
 
+`skill-trigger-matrix` and `skill-pi-trigger-eval` accept the same ceiling and assumption flags.
+They bound active cells by `--workers`, settle ready results before new admission, and retain
+every planned repetition. Paid refusal exits 2 and omits incomplete rate fields. Trusted offline
+Stub cells can continue after paid admission closes. See [matrix spend](docs/limit-native-spend.md#trigger-matrices-and-pi-evaluations).
+
 
 Ordinary answer runners (`run-agent`, `run-codex`, `run-claude`) and `run-subagent` run the model in a
 temporary workspace and delete it afterwards. Before deletion they diff it against a copy taken
