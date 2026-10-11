@@ -28,6 +28,7 @@ import math
 import os
 import random
 import re
+import selectors
 import shlex
 import shutil
 import signal
@@ -2207,7 +2208,7 @@ def manifest_variant_skill_hash(
 
 
 def answer_design_from_tasks(tasks: list[dict[str, Any]], *,
-                             default_model: str | None = None) -> dict[str, Any]:
+                             default_model: str | None = None, tool_bridge: bool = False) -> dict[str, Any]:
     """Exact expected answer-run identities, persisted before execution."""
     identities: list[dict[str, Any]] = []
     seen: set[tuple[str, str | None, str, int]] = set()
@@ -2266,6 +2267,7 @@ def answer_design_from_tasks(tasks: list[dict[str, Any]], *,
             "fixture_tree_hash": fixture_tree_hash,
             **({"tool_faults": tool_fault_domain.fault_rows(pt.tool_faults), "expected_turns": len(task.get("turns") or []) or 1}
                if pt.tool_faults else {}),
+            **({"tool_bridge": True, "expected_turns": len(task.get("turns") or []) or 1} if tool_bridge else {}),
         })
     identities.sort(key=lambda row: (
         row["case_id"], str(row["model"] or ""), row["variant"], row["run_number"]))
@@ -2297,7 +2299,7 @@ def validate_answer_design(value: Any) -> dict[str, Any]:
         if not isinstance(row, dict) or set(row) != {
                 "case_id", "model", "variant", "run_number", "run_dir",
                 "task_sha256", "case_input_sha256", "instruction_sha256",
-                "planned_skill_tree_hash", "fixture_tree_hash"} | ({"tool_faults", "expected_turns"} if "tool_faults" in row else set()):
+                "planned_skill_tree_hash", "fixture_tree_hash"} | ({"tool_faults", "expected_turns"} if "tool_faults" in row else set()) | ({"tool_bridge", "expected_turns"} if "tool_bridge" in row else set()):
             raise ValueError("answer design identity has an invalid shape")
         case_id, model, variant = row["case_id"], row["model"], row["variant"]
         run_number, run_dir = row["run_number"], row["run_dir"]
@@ -2345,8 +2347,10 @@ def validate_answer_design(value: Any) -> dict[str, Any]:
             raise ValueError(f"duplicate answer design run_dir: {run_dir}")
         if "tool_faults" in row:
             tool_fault_domain.parse_faults(row["tool_faults"])
-            if type(row.get("expected_turns")) is not int or row["expected_turns"] < 1:
-                raise ValueError("answer design fault turns must be positive integers")
+        if "tool_bridge" in row and row["tool_bridge"] is not True:
+            raise ValueError("answer design bridge route must be true")
+        if ("tool_faults" in row or "tool_bridge" in row) and (type(row.get("expected_turns")) is not int or row["expected_turns"] < 1):
+            raise ValueError("answer design tool turns must be positive integers")
         seen.add(key)
         seen_run_dirs.add(run_dir)
         normalized_identities.append(dict(row))
@@ -2378,8 +2382,8 @@ def validate_answer_design(value: Any) -> dict[str, Any]:
 
 
 def persist_answer_design(runs: Path, tasks: list[dict[str, Any]], *,
-                          default_model: str | None = None) -> dict[str, Any]:
-    design = answer_design_from_tasks(tasks, default_model=default_model)
+                          default_model: str | None = None, tool_bridge: bool = False) -> dict[str, Any]:
+    design = answer_design_from_tasks(tasks, default_model=default_model, tool_bridge=tool_bridge)
     path = runs / ANSWER_DESIGN_NAME
     if path.exists():
         existing = validate_answer_design(strict_json_loads(path.read_text(encoding="utf-8")))
@@ -6707,7 +6711,8 @@ def _tool_observation_identity(planned: Mapping[str, Any]) -> dict[str, Any]:
     return {"task_sha256": planned["task_sha256"], "case_input_sha256": planned["case_input_sha256"],
             "run": {"case_id": planned["case_id"], "variant": planned["variant"],
                     "run_number": planned["run_number"], "model": planned["model"], "population": "answer"},
-            "faults": planned["tool_faults"], "expected_turns": planned["expected_turns"]}
+            "faults": planned.get("tool_faults", []), "expected_turns": planned["expected_turns"],
+            **({"route": "offline_bridge"} if planned.get("tool_bridge") is True else {})}
 
 
 def read_tool_observation_base(base: Path, raw_events: Any = None) -> tool_fault_domain.ToolObservation | None:
@@ -6722,7 +6727,7 @@ def read_tool_observation_base(base: Path, raw_events: Any = None) -> tool_fault
         for planned in design["identities"]:
             if relative not in {planned["run_dir"], *(planned["run_dir"] + f"/turn-{n}" for n in range(1, planned.get("expected_turns", 1) + 1))}:
                 continue
-            if "tool_faults" in planned:
+            if "tool_faults" in planned or planned.get("tool_bridge") is True:
                 expected = _tool_observation_identity(planned)
                 if relative != planned["run_dir"]:
                     turn = int(base.name.removeprefix("turn-"))
@@ -7149,6 +7154,120 @@ def skill_benchmark_stopped() -> bool:
     return _stop_signal is not None
 
 
+@_dataclass(frozen=True)
+class _BridgeLimits:
+    frame_bytes: int = 64 * 1024
+    stream_bytes: int = 8 * 1024 * 1024
+    outbound_bytes: int = 8 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        for value, maximum in ((self.frame_bytes, 64 * 1024),
+                               (self.stream_bytes, 8 * 1024 * 1024),
+                               (self.outbound_bytes, 8 * 1024 * 1024)):
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise ValueError("tool bridge limits must be positive integers within the default bounds")
+
+
+@_dataclass(frozen=True)
+class _BridgeSession:
+    journal: _ToolReceiptJournal
+    turn: int
+    directory: Path
+    limits: _BridgeLimits
+
+
+@_dataclass(frozen=True)
+class _BridgeProcessFacts:
+    pid: int | None
+    os_returncode: int | None
+    natural_exit: bool
+    group_stopped: bool
+    group_observation: str
+    drained: bool
+    reaped: bool
+    timed_out: bool
+    forced_termination: bool
+    stream_bytes: int
+    cleanup_bytes: int
+
+    @property
+    def incomplete_billing(self) -> bool:
+        return self.pid is not None and (self.forced_termination or not self.group_stopped or not self.drained or not self.reaped)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"pid": self.pid, "os_returncode": self.os_returncode,
+                "natural_exit": self.natural_exit, "group_stopped": self.group_stopped,
+                "group_observation": self.group_observation, "drained": self.drained,
+                "reaped": self.reaped, "timed_out": self.timed_out,
+                "forced_termination": self.forced_termination,
+                "stream_bytes": self.stream_bytes, "cleanup_bytes": self.cleanup_bytes}
+
+
+@_dataclass(frozen=True)
+class _BridgeStoppedAttempt:
+    outcome: InvocationOutcome
+    final: Mapping[str, Any] | None
+    error: str | None
+    interruption: BaseException | None
+    facts: _BridgeProcessFacts
+
+
+@_dataclass(frozen=True)
+class _ToolBridgeBackend:
+    argv: tuple[str, ...]
+    timeout: int
+    limits: _BridgeLimits
+
+
+def _invoke_tool_dialogue(plan: ProcessInvocationPlan, session: _BridgeSession) -> _BridgeStoppedAttempt:
+    if not _bridge_supported():
+        raise ValueError("tool bridge requires POSIX nonreaping waitid, process-group controls, and Linux procfs")
+    result = _invoke_process(plan, session)
+    if not isinstance(result, _BridgeStoppedAttempt):
+        raise TypeError("dialogue invocation returned an ordinary outcome")
+    return result
+
+
+def _bridge_supported() -> bool:
+    return sys.platform == "linux" and Path("/proc/self/stat").is_file() and all(callable(getattr(os, name, None)) for name in
+        ("waitid", "killpg", "set_blocking")) and all(isinstance(getattr(os, name, None), int)
+        for name in ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT"))
+
+
+def _bridge_frame_bytes(frame: Mapping[str, Any], limit: int) -> bytes:
+    remaining = limit - 1
+    pending: list[Iterator[Any]] = [iter((frame,))]
+    while pending:
+        try:
+            value = next(pending[-1])
+        except StopIteration:
+            pending.pop()
+            continue
+        if isinstance(value, str):
+            remaining -= len(value) + 2
+        elif isinstance(value, dict):
+            remaining -= 2 + len(value) + max(0, len(value) - 1)
+            pending.append(part for pair in value.items() for part in pair)
+        elif isinstance(value, (list, tuple)):
+            remaining -= 2 + max(0, len(value) - 1)
+            pending.append(iter(value))
+        elif isinstance(value, int) and not isinstance(value, bool):
+            remaining -= max(1, value.bit_length() // 4) + (value < 0)
+        else:
+            remaining -= 1
+        if remaining < 0:
+            raise ValueError("tool bridge outbound frame exceeds configured bound")
+    encoded = bytearray()
+    for text in json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":")).iterencode(frame):
+        for index in range(0, len(text), 4096):
+            chunk = text[index:index + 4096].encode("utf-8", errors="strict")
+            if len(encoded) + len(chunk) + 1 > limit:
+                raise ValueError("tool bridge outbound frame exceeds configured bound")
+            encoded.extend(chunk)
+    encoded.extend(b"\n")
+    return bytes(encoded)
+
+
 def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
     """Typed subprocess owner for every spawned runner/adapter process.
 
@@ -7156,6 +7275,13 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
     bypass cwd, timeout, argv, environment, or stdin construction. Completion
     state is classified once here; consumers cannot independently assemble
     contradictory returncode/timeout/completeness booleans."""
+    result = _invoke_process(plan)
+    if not isinstance(result, InvocationOutcome):
+        raise TypeError("ordinary invocation returned a dialogue attempt")
+    return result
+
+
+def _invoke_process(plan: ProcessInvocationPlan, dialogue: _BridgeSession | None = None) -> InvocationOutcome | _BridgeStoppedAttempt:
     if not isinstance(plan, ProcessInvocationPlan):
         raise TypeError("invoke_argv_with_timeout requires a ProcessInvocationPlan")
     argv = list(plan.argv)
@@ -7246,7 +7372,8 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                 status = waitid(p_pid, proc.pid,
                                 wexited | wnohang | wnowait)
             except (ChildProcessError, OSError):
-                pass
+                if dialogue is not None:
+                    return False
             else:
                 return status is not None
         return proc.poll() is not None
@@ -7472,6 +7599,252 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                                               returncode=proc.returncode,
                                               elapsed_ms=elapsed, metadata=metadata)
 
+    def observe_tool_dialogue(proc: subprocess.Popen[bytes], session: _BridgeSession) -> _BridgeStoppedAttempt:
+        if proc.stdin is None or proc.stdout is None or proc.stderr is None:
+            raise AssertionError("bridge lost its owned pipes")
+        stdin, stdout_pipe, stderr_pipe = proc.stdin, proc.stdout, proc.stderr
+        deadline = time.monotonic() + timeout
+        streams = {"stdout": bytearray(), "stderr": bytearray()}
+        buffer = bytearray()
+        outbound = input_bytes or b""
+        written = 0
+        outbound_total = len(outbound)
+        state: Literal["opening", "ready", "writing", "awaiting_ack", "final"] = "opening"
+        final: Mapping[str, Any] | None = None
+        error: str | None = None
+        interruption: BaseException | None = None
+        timed_out = False
+        stream_total = 0
+        cleanup_bytes = 0
+        leader_seen_at: float | None = None
+        raw_handles: dict[str, Any] = {}
+        selector = selectors.DefaultSelector()
+
+        def receive(frame: Any) -> None:
+            nonlocal state, final, outbound, written, outbound_total, error
+            if not isinstance(frame, dict) or type(frame.get("protocol_version")) is not int or frame["protocol_version"] != 1:
+                raise ValueError("tool bridge requires a version 1 object frame")
+            kind = frame.get("type")
+            if kind == "final" and final is None:
+                final = freeze_json_mapping(frame, "bridge final candidate")
+            if kind == "call":
+                if set(frame) != {"type", "protocol_version", "id", "tool", "input"} or state != "ready":
+                    raise ValueError("tool bridge call requires ready state and exact fields")
+                if type(frame["id"]) is not int or not 1 <= frame["id"] <= 2**63 - 1:
+                    raise ValueError("tool bridge request id must be a positive bounded integer")
+                response = session.journal.offer_bridge(frame, session.limits.frame_bytes)
+                outbound = _bridge_frame_bytes(response, session.limits.frame_bytes)
+                if outbound_total + len(outbound) > session.limits.outbound_bytes:
+                    raise ValueError("tool bridge outbound stream exceeds configured bound")
+                outbound_total += len(outbound)
+                written = 0
+                state = "writing"
+                selector.register(stdin, selectors.EVENT_WRITE, "stdin")
+            elif kind == "ack":
+                if state != "awaiting_ack":
+                    raise ValueError("tool bridge ACK requires a completely written response")
+                session.journal.acknowledge_bridge(frame)
+                state = "ready"
+            elif kind == "final":
+                if state != "ready":
+                    raise ValueError("tool bridge final requires ready state")
+                response = {key: value for key, value in frame.items() if key not in {"type", "protocol_version"}}
+                try:
+                    if set(frame) - {"type", "protocol_version", "answer", "trace", "usage", "telemetry_scope"} or "answer" not in frame:
+                        raise ValueError("tool bridge final requires exact fields")
+                    validate_subagent_response(response)
+                    if not response["answer"].strip():
+                        raise ValueError("tool bridge final answer must be nonblank")
+                except (TypeError, ValueError) as exc:
+                    error = f"tool bridge final rejected: {exc}"
+                state = "final"
+                stdin.close()
+            else:
+                raise ValueError("unexpected tool bridge frame")
+
+        def pump(duration: float, *, cleanup: bool = False) -> None:
+            nonlocal written, state, stream_total, cleanup_bytes
+            for key, _mask in selector.select(duration):
+                channel = key.data
+                pipe = stdout_pipe if channel == "stdout" else stderr_pipe
+                if channel == "stdin":
+                    try:
+                        count = os.write(stdin.fileno(), outbound[written:written + 16384])
+                    except BlockingIOError:
+                        continue
+                    written += count
+                    if written == len(outbound):
+                        selector.unregister(stdin)
+                        state = "ready" if state == "opening" else "awaiting_ack"
+                    continue
+                try:
+                    data = os.read(pipe.fileno(), 16384)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    selector.unregister(pipe)
+                    pipe.close()
+                    continue
+                streams[channel].extend(data)
+                if cleanup:
+                    cleanup_bytes += len(data)
+                    if cleanup_bytes > 64 * 1024:
+                        raise ValueError("tool bridge cleanup drain exceeds bound")
+                else:
+                    stream_total += len(data)
+                raw_handles[channel].write(data)
+                raw_handles[channel].flush()
+                os.fsync(raw_handles[channel].fileno())
+                if cleanup:
+                    continue
+                if stream_total > session.limits.stream_bytes:
+                    raise ValueError("tool bridge stdout/stderr exceeds configured bound")
+                if channel == "stdout":
+                    buffer.extend(data)
+                    while b"\n" in buffer:
+                        position = buffer.index(b"\n")
+                        if position + 1 > session.limits.frame_bytes:
+                            raise ValueError("tool bridge inbound frame exceeds configured bound")
+                        line = bytes(buffer[:position])
+                        del buffer[:position + 1]
+                        receive(strict_json_loads(line.decode("utf-8", errors="strict")))
+                    if len(buffer) >= session.limits.frame_bytes:
+                        raise ValueError("tool bridge unterminated frame exceeds configured bound")
+
+        try:
+            for channel in streams:
+                raw_handles[channel] = (session.directory / (channel + ".bin")).open("xb")
+                raw_handles[channel].flush()
+                os.fsync(raw_handles[channel].fileno())
+            descriptor = os.open(session.directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            if sys.platform == "linux":
+                for pipe in (stdin, stdout_pipe, stderr_pipe):
+                    os.set_blocking(pipe.fileno(), False)
+            selector.register(stdin, selectors.EVENT_WRITE, "stdin")
+            selector.register(stdout_pipe, selectors.EVENT_READ, "stdout")
+            selector.register(stderr_pipe, selectors.EVENT_READ, "stderr")
+            while True:
+                if _stop_signal is not None:
+                    raise KeyboardInterrupt
+                now = time.monotonic()
+                if process_leader_exited(proc):
+                    leader_seen_at = leader_seen_at or now
+                    if all(key.data == "stdin" for key in selector.get_map().values()):
+                        break
+                    if now - leader_seen_at >= PROCESS_PIPE_DRAIN_GRACE_S:
+                        raise ValueError("tool bridge pipes remained open after leader exit")
+                if now >= deadline:
+                    timed_out = True
+                    raise TimeoutError("tool bridge deadline expired")
+                pump(min(PROCESS_LEADER_POLL_INTERVAL_S, deadline - now))
+            if buffer:
+                raise ValueError("tool bridge has an unterminated final stream tail")
+            if state != "final":
+                raise ValueError("tool bridge EOF without final response")
+        except BaseException as exc:
+            error = f"tool bridge failed: {type(exc).__name__}: {exc}"
+            if not isinstance(exc, Exception):
+                interruption = exc
+        natural_exit = process_leader_exited(proc)
+        group_was_stopped, _observation = recovery_group_stopped(proc.pid)
+        forced = not natural_exit or not group_was_stopped
+        cleanup = kill_process_group(proc.pid)
+        if cleanup.get("status") in {"unsupported", "warning"} and not natural_exit:
+            proc.kill()
+        if not stdin.closed:
+            if stdin in selector.get_map():
+                selector.unregister(stdin)
+            stdin.close()
+        drain_deadline = time.monotonic() + PROCESS_PIPE_DRAIN_GRACE_S
+        try:
+            while selector.get_map() and time.monotonic() < drain_deadline:
+                pump(min(PROCESS_LEADER_POLL_INTERVAL_S, max(0, drain_deadline - time.monotonic())), cleanup=True)
+        except BaseException as exc:
+            error = error or f"tool bridge drain failed: {exc}"
+            if not isinstance(exc, Exception):
+                interruption = interruption or exc
+        drained = not selector.get_map()
+        selector.close()
+        for pipe in (stdout_pipe, stderr_pipe):
+            if not pipe.closed:
+                pipe.close()
+        for handle in raw_handles.values():
+            try:
+                handle.flush()
+                os.fsync(handle.fileno())
+                handle.close()
+            except OSError as exc:
+                error = error or f"tool bridge raw capture failed: {exc}"
+        group_stopped, group_observation = recovery_group_stopped(proc.pid)
+        group_deadline = time.monotonic() + AGENT_STOP_GRACE_S
+        while not group_stopped and time.monotonic() < group_deadline:
+            time.sleep(PROCESS_LEADER_POLL_INTERVAL_S)
+            group_stopped, group_observation = recovery_group_stopped(proc.pid)
+        try:
+            proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            forced = True
+            try:
+                proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+            except subprocess.TimeoutExpired:
+                error = error or "tool bridge leader reap timed out"
+        out, err = bytes(streams["stdout"]), bytes(streams["stderr"])
+        if final is None:
+            for line in out.split(b"\n")[:-1]:
+                try:
+                    if len(line) + 1 > session.limits.frame_bytes:
+                        continue
+                    candidate = strict_json_loads(line.decode("utf-8", errors="strict"))
+                    if isinstance(candidate, dict) and candidate.get("type") == "final" and type(candidate.get("protocol_version")) is int and candidate["protocol_version"] == 1:
+                        final = freeze_json_mapping(candidate, "bridge final candidate")
+                        break
+                except (TypeError, ValueError):
+                    continue
+        stdout, stdout_valid = _wire_text(out, redact_stdout)
+        stderr, stderr_valid = _wire_text(err, redact_stderr)
+        facts = _BridgeProcessFacts(proc.pid, proc.returncode, natural_exit, group_stopped,
+            group_observation, drained, proc.returncode is not None, timed_out, forced, stream_total, cleanup_bytes)
+        if not stdout_valid or not stderr_valid:
+            error = error or "tool bridge streams are not valid UTF-8"
+        if proc.returncode != 0 or not natural_exit or not group_stopped or not drained or forced:
+            error = error or "tool bridge did not complete naturally with a stopped group and drained pipes"
+        retain_raw(out, err, proc.returncode, timed_out=timed_out, communication_complete=drained)
+        process_evidence = {**facts.as_dict(), "error": error, "process_group_cleanup": cleanup,
+                            "raw_sha256": {name + ".bin": hashlib.sha256(data).hexdigest()
+                                           for name, data in streams.items()},
+                            "stdout_utf8_valid": stdout_valid, "stderr_utf8_valid": stderr_valid}
+        try:
+            with (session.directory / "process.json").open("x", encoding="utf-8") as handle:
+                json.dump(process_evidence, handle, ensure_ascii=False, allow_nan=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            descriptor = os.open(session.directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except BaseException as exc:
+            error = error or f"tool bridge process evidence failed: {exc}"
+            if not isinstance(exc, Exception):
+                interruption = interruption or exc
+        metadata = {"tool_bridge_process": process_evidence, "stdout_utf8_valid": stdout_valid,
+                    "stderr_utf8_valid": stderr_valid, "process_group_cleanup": cleanup}
+        if timed_out:
+            outcome = InvocationOutcome.from_timeout(stdout=stdout, stderr=stderr[:4000],
+                elapsed_ms=int((time.time() - start) * 1000), metadata=metadata)
+        elif proc.returncode is None:
+            outcome = InvocationOutcome.harness_failed("tool bridge leader was not reaped", metadata=metadata)
+        else:
+            outcome = InvocationOutcome.from_process(stdout=stdout, stderr=stderr[:4000], returncode=proc.returncode,
+                elapsed_ms=int((time.time() - start) * 1000), metadata=metadata)
+        return _BridgeStoppedAttempt(outcome, final, error, interruption, facts)
+
     try:
         input_bytes = input_text.encode("utf-8") if input_text is not None else None
     except UnicodeEncodeError:
@@ -7527,10 +7900,16 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                                "stderr.bin": hashlib.sha256(b"").hexdigest()}})
             (capture.directory / "stdout.bin").write_bytes(b"")
             (capture.directory / "stderr.bin").write_bytes(b"")
-        return InvocationOutcome.spawn_failed(
+        outcome = InvocationOutcome.spawn_failed(
             stderr=redact_stderr(f"{type(exc).__name__}: {exc}")[:4000],
             elapsed_ms=int((time.time() - start) * 1000),
         )
+        if dialogue is not None:
+            return _BridgeStoppedAttempt(outcome, None, "bridge process failed to spawn", None,
+                _BridgeProcessFacts(None, None, False, False, "not_spawned", False, False, False, False, 0, 0))
+        return outcome
+    if dialogue is not None:
+        return observe_tool_dialogue(proc, dialogue)
     if capture is not None:
         return observe_recovery_process(proc, capture, input_bytes, start)
     deadline = time.monotonic() + timeout
@@ -14957,6 +15336,76 @@ class _ToolReceiptJournal:
             self._commit({"type": "confirmed", "turn": self.turn,
                           "exchange": pending["exchange"], "prepared_sha256": pending["record_sha256"]})
 
+    def offer_bridge(self, frame: Mapping[str, Any], frame_limit: int = 64 * 1024) -> dict[str, Any]:
+        exchange = sum(row["type"] in {"prepared", "offered"} for row in self.rows) + 1
+        _output, resolution = self.store._resolve_mediated(frame["tool"], frame["input"])
+        if resolution is None:
+            raise ValueError("offline tool bridge output has no strict JSON evidence")
+        response = tool_fault_domain.bridge_response(
+            self.identity, self.turn, exchange, frame["tool"], frame["input"], resolution, frame["id"])
+        _bridge_frame_bytes({**response, "payload_sha256": "sha256:" + "0" * 64}, frame_limit)
+        self.pending = self._commit(tool_fault_domain.bridge_offer(
+            self.identity, self.turn, exchange, frame["tool"], frame["input"], resolution, frame["id"]))
+        return thaw_json_value(self.pending["payload"]["response"])
+
+    def acknowledge_bridge(self, frame: Mapping[str, Any]) -> None:
+        if self.pending is None:
+            raise ValueError("tool bridge has no outstanding response")
+        self._commit({"type": "acknowledged", "turn": self.turn,
+                      "exchange": self.pending["exchange"],
+                      "offered_sha256": self.pending["record_sha256"], "ack": dict(frame)})
+        self.pending = None
+
+    def invoke_bridge(self, backend: _ToolBridgeBackend, turn: int, *, prompt: str,
+                      workspace: Path, model: str | None, history: list | None = None,
+                      tool_executor: Any) -> _SubagentTurnResult:
+        self.turn = turn
+        opening = {"type": "opening", "protocol_version": 1, "prompt": prompt, "model": model,
+                   "workspace": str(workspace), "history": history or []}
+        opening_bytes = _bridge_frame_bytes(opening, backend.limits.frame_bytes)
+        if len(opening_bytes) > backend.limits.outbound_bytes:
+            raise ValueError("tool bridge opening exceeds outbound stream bound")
+        self._commit({"type": "turn_opened", "turn": turn})
+        directory = self.path.parent / f"turn-{turn}"
+        directory.mkdir(exist_ok=False)
+        descriptor = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        session = _BridgeSession(self, turn, directory, backend.limits)
+        plan = ProcessInvocationPlan.from_values(backend.argv, input_text=opening_bytes.decode("utf-8"),
+                                                cwd=workspace, timeout_s=backend.timeout)
+        attempt = _invoke_tool_dialogue(plan, session)
+        evidence = _replace(_subagent_paid_evidence(attempt.final), bridge_process=attempt.facts)
+        self.interruption = attempt.interruption
+        if attempt.outcome.returncode is None or attempt.outcome.elapsed_ms is None:
+            return _SubagentResponseRejected(attempt.error or "bridge returned no process result", evidence)
+        process = InvocationResult(stdout=attempt.outcome.stdout, stderr=attempt.outcome.stderr,
+            returncode=attempt.outcome.returncode, elapsed_ms=attempt.outcome.elapsed_ms,
+            invocation_state=attempt.outcome.state, timed_out=attempt.outcome.timed_out,
+            stdout_utf8_valid=attempt.outcome.metadata.get("stdout_utf8_valid") is not False,
+            stderr_utf8_valid=attempt.outcome.metadata.get("stderr_utf8_valid") is not False,
+            adapter_metadata=attempt.outcome.metadata)
+        evidence = _replace(evidence, process=process)
+        error = attempt.error
+        if error is None:
+            try:
+                self._commit({"type": "turn_closed", "turn": turn})
+                if turn == self.identity["expected_turns"]:
+                    self._commit({"type": "closed"})
+            except BaseException as exc:
+                error = f"tool bridge journal closure failed: {exc}"
+                if not isinstance(exc, Exception):
+                    self.interruption = self.interruption or exc
+        if error is not None:
+            self.failure = self.failure or error
+            return _SubagentResponseRejected(error, evidence)
+        response = {key: thaw_json_value(value) for key, value in (attempt.final or {}).items()
+                    if key not in {"type", "protocol_version"}}
+        response.update(returncode=process.returncode, elapsed_ms=process.elapsed_ms, timed_out=process.timed_out)
+        return _classify_subagent_response(response, evidence)
+
     def executor(self, tool: str, payload: Any) -> Any:
         if self.thread != threading.get_ident() or self.executing:
             self.failure = "mediated callable requires synchronous nonreentrant tool execution"
@@ -15047,10 +15496,12 @@ class _SubagentPaidEvidence:
     reported_cost: telemetry_domain.Measurement[telemetry_domain.Money]
     scope: Literal["turn_delta", "conversation_cumulative", "unavailable"]
     process: InvocationResult | None = None
+    bridge_process: _BridgeProcessFacts | None = None
 
     @property
     def incomplete_price(self) -> bool:
-        return self.process is not None and self.process.timed_out
+        return (self.process is not None and self.process.timed_out
+                or self.bridge_process is not None and self.bridge_process.incomplete_billing)
 
     def diagnostic(self) -> dict[str, Any]:
         return {"reported_cost_usd": (None if self.reported_cost.value is None
@@ -15058,6 +15509,7 @@ class _SubagentPaidEvidence:
                 "telemetry_scope": self.scope,
                 "cost_availability": ("unavailable" if self.reported_cost.value is None
                                       else "partial" if self.incomplete_price else "complete"),
+                **({"tool_bridge_process": self.bridge_process.as_dict()} if self.bridge_process is not None else {}),
                 **({"raw_response": self.process.stdout,
                     "stdout_utf8_valid": self.process.stdout_utf8_valid,
                     "stderr_utf8_valid": self.process.stderr_utf8_valid}
@@ -15115,7 +15567,8 @@ def _classify_subagent_response(value: Any, evidence: _SubagentPaidEvidence,
 
 
 def _invoke_paid_subagent(agent_fn: Any, *, requires_delta: bool, journal: _ToolReceiptJournal | None = None, turn: int = 1, **kwargs: Any) -> Priced[_SubagentTurnResult]:
-    value = agent_fn(**kwargs) if journal is None else journal.invoke_callable(agent_fn, turn, **kwargs)
+    value = (agent_fn(**kwargs) if journal is None else journal.invoke_bridge(agent_fn, turn, **kwargs)
+             if isinstance(agent_fn, _ToolBridgeBackend) else journal.invoke_callable(agent_fn, turn, **kwargs))
     paid = (value if isinstance(value, (_SubagentResponseAccepted, _SubagentResponseRejected))
             else _classify_subagent_response(value, _subagent_paid_evidence(value)))
     cost = paid.evidence.reported_cost
@@ -15123,7 +15576,9 @@ def _invoke_paid_subagent(agent_fn: Any, *, requires_delta: bool, journal: _Tool
         cost = telemetry_domain.Measurement.unavailable("subagent_turn_cost_lacks_delta_scope")
     subtotal = cost.value if paid.evidence.incomplete_price else None
     if subtotal is not None:
-        cost = telemetry_domain.Measurement.unavailable("subagent_cost_incomplete_after_timeout")
+        cost = telemetry_domain.Measurement.unavailable("subagent_cost_incomplete_after_stopped_bridge"
+            if paid.evidence.bridge_process is not None and (paid.evidence.process is None or not paid.evidence.process.timed_out) else
+            "subagent_cost_incomplete_after_timeout")
     no_spend = (NoModelSpend("spawn_failed_before_process")
                 if paid.evidence.process is not None
                 and paid.evidence.process.invocation_state is InvocationState.SPAWN_FAILED else None)
@@ -15419,6 +15874,9 @@ def run_subagent_tasks(
     as ``trace`` (the default Claude backend's), so they normalize through that
     provider's trace dialect instead of the generic one."""
     mode = replay_mode or tool_replay_mode()
+    bridge = isinstance(agent_fn, _ToolBridgeBackend)
+    if bridge and (mode != "strict" or live_tools or not _bridge_supported()):
+        die("tool bridge requires strict offline replay, POSIX nonreaping waitid/process-group controls, and Linux procfs")
     workspace_builder = registered_workspace_builder("subagent")
     validated: list[tuple[dict[str, Any], PreparedTask, str | None, Path, tuple[str, ...]]] = []
     seen_identities: set[tuple[str, str | None, str, int, str]] = set()
@@ -15447,12 +15905,14 @@ def run_subagent_tasks(
             if pt.recovery is not None:
                 print(f"capped recovery is unsupported for case {pt.case_id}; omit --max-cost-usd", file=sys.stderr)
                 return 2
-    design = answer_design_from_tasks(tasks, default_model=model)
+    design = answer_design_from_tasks(tasks, default_model=model, tool_bridge=bridge)
     if fault_selection not in {"all", "only", "skip"}:
         raise ValueError("unknown fault selection")
     validated = [item for item in validated if fault_selection == "all" or bool(item[1].tool_faults) == (fault_selection == "only")]
     if not validated:
         return 0
+    if bridge and any(pt.recovery is not None for _, pt, _, _, _ in validated):
+        die("tool bridge does not support recovery tasks")
     if mode == "off" and any(pt.tool_faults for _, pt, _, _, _ in validated):
         die("tool_faults require enabled tool replay on the direct callable route")
     call_sets = tuple(tuple(SubagentTurnCall(
@@ -15462,7 +15922,7 @@ def run_subagent_tasks(
         for _, pt, row_model, _, turns in validated)
     plan = SpendPlan(tuple(call for calls in call_sets for call in calls))
     runs.mkdir(parents=True, exist_ok=True)
-    design = persist_answer_design(runs, tasks, default_model=model)
+    design = persist_answer_design(runs, tasks, default_model=model, tool_bridge=bridge)
     budget_stopped = False
     with SpendAdmission.open(spend_policy, plan, root=runs / "spend") as admission:
         if admission.path is not None:
@@ -15515,7 +15975,7 @@ def run_subagent_tasks(
                 store = ToolReplayStore(replay_path, mode, faults=pt.tool_faults,
                     case_input_sha256=planned_identity["case_input_sha256"]) if mode != "off" else None
                 journal: _ToolReceiptJournal | None = None
-                if pt.tool_faults:
+                if pt.tool_faults or bridge:
                     if store is None:
                         raise AssertionError("fault run lost replay store")
                     evidence_root = runs / ".tool-observations"
@@ -15528,6 +15988,7 @@ def run_subagent_tasks(
                                 "run_number": int(pt.run_number), "population": "answer"},
                         "faults": tool_fault_domain.fault_rows(pt.tool_faults),
                         "expected_turns": len(turns) or 1,
+                        **({"route": "offline_bridge"} if bridge else {}),
                     }, store, live_tools or {})
 
                 def tool_executor(tool: str, payload: Any, replay_store=store) -> Any:
@@ -15878,10 +16339,28 @@ def run_subagent(args: argparse.Namespace) -> int:
             "tool_faults", "tool_fault_task_sha256", "tool_fault_case_input_sha256")) for task in tasks):
         answer_design_from_tasks(tasks, default_model=getattr(args, "model", None))
     selected = [task for task in tasks if selection == "all" or ("tool_faults" in task) == (selection == "only")]
-    if any("tool_faults" in task for task in selected):
+    bridge = getattr(args, "tool_bridge", False)
+    if any("tool_faults" in task for task in selected) and not bridge:
         die("tool_faults execution requires a direct Python callable; built-in CLI backends do not consume tool_executor")
     agent_cmd = getattr(args, "agent_cmd", None)
-    if agent_cmd:
+    if bridge:
+        if not agent_cmd:
+            die("tool bridge requires --agent-cmd")
+        if (getattr(args, "tool_replay", None) or tool_replay_mode()) != "strict":
+            die("tool bridge requires --tool-replay strict")
+        if not _bridge_supported():
+            die("tool bridge requires POSIX nonreaping waitid, process-group controls, and Linux procfs")
+        if any(task.get("recovery") for task in selected):
+            die("tool bridge does not support recovery tasks")
+        try:
+            argv = tuple(shlex.split(agent_cmd))
+            limits = _BridgeLimits(args.tool_bridge_max_frame_bytes, args.tool_bridge_max_stream_bytes,
+                                   args.tool_bridge_max_outbound_bytes)
+            ProcessInvocationPlan.from_values(argv, input_text="", cwd=Path.cwd(), timeout_s=args.timeout)
+        except (TypeError, ValueError) as exc:
+            die(f"invalid tool bridge configuration: {exc}")
+        backend = _ToolBridgeBackend(argv, int(args.timeout), limits)
+    elif agent_cmd:
         backend = shell_agent_backend(agent_cmd, timeout=int(getattr(args, "timeout", DEFAULT_RUNNER_TIMEOUT_S)))
     else:
         claude_bin = getattr(args, "claude_bin", None) or "claude"
@@ -24449,6 +24928,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--runs", required=True, help="output runs directory")
     p.add_argument("--model", help="model id passed to the backend; a row-level model wins")
     p.add_argument("--agent-cmd", help="shell command reading {prompt, model, workspace} JSON on stdin and emitting {answer, trace?, usage?, stop_class?, stop_reason?, served_models?} JSON on stdout")
+    p.add_argument("--tool-bridge", action="store_true", help="use the bounded offline JSONL tool dialogue; requires --agent-cmd and --tool-replay strict")
+    p.add_argument("--tool-bridge-max-frame-bytes", type=int, default=64 * 1024, help="bridge frame bound, at most 65536 bytes including newline")
+    p.add_argument("--tool-bridge-max-stream-bytes", type=int, default=8 * 1024 * 1024, help="bridge combined stdout/stderr bound, at most 8388608 bytes")
+    p.add_argument("--tool-bridge-max-outbound-bytes", type=int, default=8 * 1024 * 1024, help="bridge aggregate stdin bound, at most 8388608 bytes")
     p.add_argument("--claude-bin", default="claude", help="path to the claude executable for the default backend")
     p.add_argument("--timeout", type=int, default=DEFAULT_RUNNER_TIMEOUT_S)
     p.add_argument("--tool-replay", choices=sorted(TOOL_REPLAY_MODES), help=f"tool replay mode; defaults from ${TOOL_REPLAY_ENV} (off)")

@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, TypeVar, overload
+from typing import Any, Generic, Literal, TypedDict, TypeVar, overload
 
 import regex
 
@@ -193,6 +193,43 @@ def callable_preparation(identity: Mapping[str, Any], turn: int, exchange: int,
                         "payload_sha256": _digest("callable-output-v1", resolution.output)}}
 
 
+class BridgeResponseBody(TypedDict):
+    type: Literal["result"]
+    protocol_version: Literal[1]
+    id: int
+    task_sha256: str
+    run: Any
+    turn_number: int
+    exchange_number: int
+    tool: str
+    input_sha256: str
+    source: Literal["fault", "recorded", "live"]
+    fault_id: str | None
+    output: Any
+    error: dict[str, Any]
+
+
+def bridge_response(identity: Mapping[str, Any], turn: int, exchange: int,
+                    tool: str, payload: Any, resolution: _Resolution, request_id: int) -> BridgeResponseBody:
+    return {"type": "result", "protocol_version": 1, "id": _positive(request_id),
+            "task_sha256": identity["task_sha256"], "run": thaw_json_value(identity["run"]),
+            "turn_number": turn, "exchange_number": exchange, "tool": tool,
+            "input_sha256": _digest("tool-input-v1", payload), "source": resolution.source,
+            "fault_id": resolution.fault_id, "output": thaw_json_value(resolution.output),
+            "error": dict(resolution.resolution_error)}
+
+
+def bridge_offer(identity: Mapping[str, Any], turn: int, exchange: int,
+                 tool: str, payload: Any, resolution: _Resolution, request_id: int) -> dict[str, Any]:
+    response = bridge_response(identity, turn, exchange, tool, payload, resolution, request_id)
+    prepared = callable_preparation(identity, turn, exchange, tool, payload, resolution)
+    digest = _digest("tool-bridge-response-v1", response)
+    return {**prepared, "type": "offered", "request_id": request_id,
+            "payload": {"kind": "bridge_response", "output": response["output"],
+                        "delivered_error": response["error"], "payload_sha256": digest,
+                        "response": {**response, "payload_sha256": digest}}}
+
+
 def journal_record(rows: Sequence[Mapping[str, Any]], transition: Mapping[str, Any]) -> dict[str, Any]:
     body = {"version": 1, "sequence": len(rows) + 1,
             "previous_sha256": rows[-1]["record_sha256"] if rows else None,
@@ -203,7 +240,7 @@ def journal_record(rows: Sequence[Mapping[str, Any]], transition: Mapping[str, A
 @dataclass(frozen=True)
 class _ExchangeState:
     prepared: Mapping[str, Any]
-    state: Literal["prepared", "confirmed", "aborted"]
+    state: Literal["prepared", "confirmed", "aborted", "offered", "acknowledged"]
 
 
 @dataclass(frozen=True)
@@ -215,7 +252,8 @@ class ToolObservation:
 
     def __post_init__(self) -> None:
         identity = freeze_json_mapping(self._identity, "tool run identity")
-        if set(identity) != {"task_sha256", "case_input_sha256", "run", "faults", "expected_turns"}:
+        bridge = identity.get("route") == "offline_bridge"
+        if set(identity) != {"task_sha256", "case_input_sha256", "run", "faults", "expected_turns"} | ({"route"} if bridge else set()):
             raise ValueError("invalid tool run identity")
         _sha(identity["task_sha256"])
         _sha(identity["case_input_sha256"])
@@ -226,7 +264,10 @@ class ToolObservation:
             raise ValueError("invalid tool run coordinate values")
         RunCoordinate.of(run["case_id"], run["variant"], run["run_number"], run["model"])
         _positive(identity["expected_turns"])
-        parse_faults(identity["faults"])
+        if identity["faults"] or not bridge:
+            parse_faults(identity["faults"])
+        elif not isinstance(identity["faults"], (list, tuple)):
+            raise ValueError("bridge faults must be an ordered list")
         if self.turn is not None:
             _positive(self.turn)
         object.__setattr__(self, "_identity", identity)
@@ -258,10 +299,12 @@ class ToolObservation:
                 if active is not None or turn in completed or turn != len(completed) + 1 or turn > self._identity["expected_turns"]:
                     raise ValueError("invalid tool turn order")
                 active = turn
-            elif kind == "prepared":
-                if active != row.get("turn") or type(row.get("turn")) is not int or set(row) != common | {"identity", "turn", "exchange", "tool", "input", "input_sha256", "resolution", "payload"} or not strict_json_equal(row["identity"], self._identity):
+            elif kind in {"prepared", "offered"}:
+                if (kind == "offered") != (self._identity.get("route") == "offline_bridge"):
+                    raise ValueError("tool payload route mismatch")
+                if active != row.get("turn") or type(row.get("turn")) is not int or set(row) != common | {"identity", "turn", "exchange", "tool", "input", "input_sha256", "resolution", "payload"} | ({"request_id"} if kind == "offered" else set()) or not strict_json_equal(row["identity"], self._identity):
                     raise ValueError("tool preparation identity mismatch")
-                if any(exchange.state == "prepared" for exchange in exchanges.values()):
+                if any(exchange.state in {"prepared", "offered"} for exchange in exchanges.values()):
                     raise ValueError("callable preparation before prior output confirmation")
                 number = _positive(row["exchange"])
                 if number != len(exchanges) + 1:
@@ -270,7 +313,7 @@ class ToolObservation:
                 if not isinstance(raw, Mapping) or set(raw) != {"source", "fault_id", "output", "resolution_error", "resolution_sha256"}:
                     raise ValueError("invalid tool resolution")
                 resolution = _Resolution(raw["source"], raw["fault_id"], raw["output"], raw["resolution_error"])
-                definitions = parse_faults(self._identity["faults"])
+                definitions = parse_faults(self._identity["faults"]) if self._identity["faults"] else ()
                 used = Counter(e.prepared["resolution"]["fault_id"] for e in exchanges.values())
                 eligible = [(fault_identity(self._identity["case_input_sha256"], n), f) for n, f in enumerate(definitions, 1)
                             if (f.times is None or used[fault_identity(self._identity["case_input_sha256"], n)] < f.times)
@@ -282,9 +325,27 @@ class ToolObservation:
                     if not matched or matched[0].tool != row["tool"] or not strict_json_equal(matched[0].output, resolution.output) or matched[0].declared_error != resolution.resolution_error["value"]:
                         raise ValueError("fault resolution disagrees with declaration")
                 expected = callable_preparation(self._identity, _positive(row["turn"]), number, row["tool"], row["input"], resolution)
+                if kind == "offered":
+                    expected = bridge_offer(self._identity, row["turn"], number, row["tool"], row["input"], resolution, row["request_id"])
+                    if resolution.source == "live" or any(e.prepared.get("request_id") == row["request_id"] and e.prepared["turn"] == active for e in exchanges.values()):
+                        raise ValueError("invalid offline bridge resolution or repeated request")
                 if not strict_json_equal({k: row[k] for k in expected}, expected):
                     raise ValueError("tool resolution or delivered payload mismatch")
-                exchanges[number] = _ExchangeState(row, "prepared")
+                exchanges[number] = _ExchangeState(row, "offered" if kind == "offered" else "prepared")
+            elif kind == "acknowledged":
+                if set(row) != common | {"turn", "exchange", "offered_sha256", "ack"}:
+                    raise ValueError("invalid bridge acknowledgment")
+                number = _positive(row["exchange"])
+                previous = exchanges.get(number)
+                if previous is None or previous.state != "offered" or type(row["turn"]) is not int or row["turn"] != active or previous.prepared["turn"] != active or row["offered_sha256"] != previous.prepared["record_sha256"]:
+                    raise ValueError("invalid bridge receipt conservation")
+                response = previous.prepared["payload"]["response"]
+                expected_ack = {"type": "ack", "protocol_version": 1, "id": response["id"],
+                                "turn_number": active, "exchange_number": number,
+                                "payload_sha256": response["payload_sha256"]}
+                if not strict_json_equal(row["ack"], expected_ack):
+                    raise ValueError("bridge ACK identity mismatch")
+                exchanges[number] = _ExchangeState(previous.prepared, "acknowledged")
             elif kind in {"confirmed", "aborted"}:
                 if set(row) != common | {"turn", "exchange", "prepared_sha256"}:
                     raise ValueError("invalid callable receipt transition")
@@ -301,7 +362,7 @@ class ToolObservation:
                 _sha(row["input_sha256"])
                 gap = row["reason"]
             elif kind == "turn_closed":
-                if set(row) != common | {"turn"} or row["turn"] != active or type(row["turn"]) is not int or any(e.state == "prepared" for e in exchanges.values() if e.prepared["turn"] == active):
+                if set(row) != common | {"turn"} or row["turn"] != active or type(row["turn"]) is not int or any(e.state in {"prepared", "offered"} for e in exchanges.values() if e.prepared["turn"] == active):
                     raise ValueError("invalid tool turn closure")
                 completed.add(_positive(row["turn"]))
                 active = None
@@ -332,7 +393,7 @@ class ToolObservation:
                  "source": e.prepared["resolution"]["source"],
                  "fault_id": e.prepared["resolution"]["fault_id"],
                  "payload": thaw_json_value(e.prepared["payload"])}
-                for number, e in exchanges.items() if e.state == "confirmed"
+                for number, e in exchanges.items() if e.state in {"confirmed", "acknowledged"}
                 and (self.turn is None or e.prepared["turn"] == self.turn)]
 
     def as_member(self, journal_path: str) -> dict[str, Any]:
@@ -361,13 +422,20 @@ class ToolObservation:
             hit = next((row for row in rows if row["exchange"] == claim.exchange_number), None)
             return Observed(freeze_json_value(hit["payload"]["output"], "delivered output")) if hit else Unavailable(reason)
         if isinstance(claim, SuccessfulOperations):
-            return Observed(()) if closed and not rows else Unavailable("output_only_api_has_no_operation_success")
+            return Observed(()) if closed and not rows else Unavailable(
+                "bridge_has_no_operation_semantics" if self._identity.get("route") == "offline_bridge"
+                else "output_only_api_has_no_operation_success")
         if isinstance(claim, Count):
             selected = [row for row in rows if claim.tool is None or row["tool"].casefold() == claim.tool.casefold()]
             if not closed:
                 return Unavailable(reason)
             if claim.metric in {"steps", "tool_calls"}:
                 return Observed(len(selected))
+            if claim.metric == "errors" and selected:
+                error = next((row["payload"]["delivered_error"] for row in selected
+                              if row["payload"]["delivered_error"]["availability"] != "known"), None)
+                return Unavailable(error["reason"]) if error else Observed(sum(
+                    row["payload"]["delivered_error"]["value"] for row in selected))
             if not selected:
                 return Observed(False if claim.metric == "skill_invoked" else 0)
             return Unavailable("output_only_api" if claim.metric == "errors" else "output_only_api_has_no_operation_semantics")
@@ -377,16 +445,23 @@ class ToolObservation:
             return Unavailable("output_only_api_has_no_operation_semantics")
         tool = assertion.get("tool")
         selected = [row for row in rows if not tool or row["tool"].casefold() == str(tool).casefold()]
-        if "is_error" in assertion:
-            if assertion.get("expected_no_call"):
-                raise ValueError("expected_no_call cannot use is_error")
-            if selected:
-                return Unavailable("output_only_api")
-        names = [row["tool"].casefold() for row in rows]
         case_insensitive = bool(assertion.get("ci", True))
         def hit(pattern: str, text: str) -> bool:
             return regex.search(pattern, text, regex.VERSION0 | (regex.IGNORECASE if case_insensitive else 0),
                                 timeout=FAULT_MATCH_TIMEOUT_SECONDS) is not None
+        if "is_error" in assertion:
+            if assertion.get("expected_no_call"):
+                raise ValueError("expected_no_call cannot use is_error")
+            if atype == "tool_call" and assertion.get("pattern") and not any(
+                    assertion.get(key) for key in ("required_calls", "call_set", "order")):
+                selected = [row for row in selected if hit(str(assertion["pattern"]),
+                    row["input"] if isinstance(row["input"], str) else canonical_input(row["input"]))]
+            error = next((row["payload"]["delivered_error"] for row in selected
+                          if row["payload"]["delivered_error"]["availability"] != "known"), None)
+            if error:
+                return Unavailable(error["reason"])
+            selected = [row for row in selected if row["payload"]["delivered_error"]["value"] == assertion["is_error"]]
+        names = [row["tool"].casefold() for row in (selected if "is_error" in assertion else rows)]
         text = [row["input"] if isinstance(row["input"], str) else canonical_input(row["input"]) for row in selected]
         score: float | None = None
         sequence_detail: str | None = None

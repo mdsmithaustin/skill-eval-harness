@@ -208,9 +208,19 @@ Pairing checks effort too. Every comparison pairs through a declared contrast (`
 
 ## Run subagent tasks (in-process seam, tool replay, multi-turn)
 
+Use `--tool-bridge --agent-cmd '<argv>' --tool-replay strict` for finite offline JSONL exchanges.
+The bridge supports declarations and replay-v1 output only. It refuses live fallback and recovery tasks.
+It requires POSIX nonreaping `waitid`, process-group controls, and Linux procfs before spawn.
+The ordinary shell and Claude backends retain their existing one-response contracts.
+The bridge's exact final keys are `type`, `protocol_version`, `answer`, and optional `trace`, `usage`, `telemetry_scope`.
+Its frame, outbound, and combined stdout/stderr limits can be lowered through
+`--tool-bridge-max-frame-bytes`, `--tool-bridge-max-outbound-bytes`, and `--tool-bridge-max-stream-bytes`.
+See [the offline dialogue walkthrough](offline-tool-dialogue.md) for the protocol, lifecycle, evidence, and pricing rules.
+
 `--only-fault-cases` and `--skip-fault-cases` are mutually exclusive. The complete prepared
 design is validated before either filter. Selected `tool_faults` require the direct Python
-callable seam. Built-in shell and Claude backends refuse them before writes or launch.
+callable seam or the explicit offline bridge. Ordinary shell and Claude backends refuse
+them before writes or launch.
 See [simulated output declarations](authoring-evals.md#declare-simulated-tool-outputs).
 
 

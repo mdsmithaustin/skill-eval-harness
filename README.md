@@ -635,7 +635,9 @@ For manifest or grading changes, add or update `tests/test_skill_benchmark.py`. 
 - A passing answer benchmark does not prove autonomous skill loading; run `skill-trigger-matrix` (any adapter-backed agent × model; `skill-pi-trigger-eval` is its Pi-only form) for that.
 
 Prepared answer cases can declare ordered `tool_faults` for direct Python callable output challenges.
-`prepare` validates and commits the declarations across arms and repetitions. The built-in CLI
+`run-subagent --tool-bridge` supports finite offline JSONL exchanges with explicit delivered-error
+availability. See [the local child walkthrough](docs/offline-tool-dialogue.md) for protocol and lifecycle limits.
+`prepare` validates and commits the declarations across arms and repetitions. The ordinary shell and Claude CLI
 backends refuse selected fault cases before launch because they do not consume `tool_executor`.
 See [simulated tool output declarations](docs/authoring-evals.md#declare-simulated-tool-outputs).
 
