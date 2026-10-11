@@ -31,7 +31,6 @@ import re
 import selectors
 import shlex
 import shutil
-import signal
 import stat
 import statistics
 import subprocess
@@ -56,6 +55,244 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal, NoReturn, Protocol, cast
 
 import tool_fault_contracts as tool_fault_domain
+from agent_clis import (
+    _CODEX_FILE_URL_SAFE,
+    _CODEX_PATH_TAIL,
+    _CODEX_SKILL_TAG_PATTERNS,
+    _CODEX_URL_DROPPED,
+    CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS,
+    CODEX_HOME_FILES,
+    CODEX_ROLLOUT_SKILL_TAG,
+    CODEX_SESSIONS_DIRNAME,
+    VIBE_READ_ONLY_TOOLS,
+    CodexHostPathRedactor,
+    CodexRollout,
+    _codex_path_spellings,
+    _codex_skill_tag,
+    _rust_debug_escape,
+    _walk_codex_host_skills,
+    build_vibe_cli_argv,
+    codex_env_for_home,
+    codex_host_path_redactor,
+    codex_host_skill_paths,
+    codex_rollout_path,
+    codex_rollout_skill_loads,
+    codex_thread_id,
+    codex_trigger_context_isolation_args,
+    locate_codex_rollout,
+    redact_vibe_prompt_arg,
+    seed_codex_home,
+    seed_vibe_home,
+    toml_basic_string,
+    vibe_env_for_home,
+)
+from cli_contracts import die, native_spend_policy
+from content_digests import canonical_json_sha256
+from json_contracts import iter_json_objects, write_json
+from process_runtime import (
+    AGENT_STOP_GRACE_S,
+    PROCESS_LEADER_POLL_INTERVAL_S,
+    PROCESS_PIPE_DRAIN_GRACE_S,
+    _bridge_frame_bytes,
+    _bridge_supported,
+    _BridgeLimits,
+    _BridgeProcessFacts,
+    _BridgeSession,
+    _BridgeStoppedAttempt,
+    _invoke_process,
+    _invoke_tool_dialogue,
+    _stderr_with_warning,
+    _stop_run,
+    _stop_signal,
+    _ToolBridgeBackend,
+    invoke_argv_with_timeout,
+    recovery_file_bytes,
+    recovery_group_stopped,
+    run_argv_with_timeout,
+    skill_benchmark_stopped,
+    stops_on_signal,
+)
+from skill_inputs import (
+    _COPY_EXCLUDE,
+    COMPONENT_CLASSES,
+    DISCOVERY_FIELDS,
+    MECHANISM_CLASSES,
+    REQUIRED_FRONTMATTER_FIELDS,
+    SKILL_MECHANISMS,
+    VALID_SPLITS,
+    AblationError,
+    UniqueKeySafeLoader,
+    ValidatedAblation,
+    _apply_edits,
+    _check_disjoint,
+    _construct_unique_yaml_mapping,
+    _copy_skill_root,
+    _detect_newline,
+    _expected_component,
+    _fenced_char_spans,
+    _fenced_mask,
+    _in_spans,
+    _inline_code_spans,
+    _line_starts,
+    _locate_section,
+    _reject_output_root_overlap,
+    _reject_overlapping_skill_roots,
+    _required_target_keys,
+    _resolve_component_ops,
+    _safe_under,
+    _verify_hunks_match_class,
+    _write_text_preserving_newlines,
+    ablation_by_id,
+    ablation_components,
+    apply_dataset_row,
+    build_canonical_skill_tree,
+    canonical_skill_tree_hash,
+    canonical_trigger_query,
+    component_class,
+    derived_population,
+    expected_provenance_for_ablation,
+    expected_provenance_from_trigger_identity,
+    expected_trigger_polarity,
+    frontmatter_field_span,
+    frontmatter_value,
+    is_trigger_case,
+    iter_cases,
+    list_item_ops,
+    load_json,
+    load_manifest_source,
+    materialize,
+    materialize_ablation,
+    materialize_dataset_cases,
+    materialize_trigger_ablation,
+    materialized_tree_for_variant,
+    mount_skill_tree,
+    mounted_skills_by_id,
+    parse_frontmatter,
+    patch_delete_ops,
+    preprocess_ops,
+    reference_pointer_ops,
+    reject_nonfinite_numbers,
+    repo_root_for_manifest,
+    required_fields_present,
+    resolve_skill_root,
+    section_span,
+    skill_root_key,
+    skill_root_keys_for,
+    skill_tree_hash,
+    split_frontmatter,
+    trigger_manifest_identity,
+    validate_ablation_removal,
+)
+from trace_normalization import (
+    _RAW_TYPE_WORD_BOUNDARY,
+    CLAUDE_SESSION_CONTENT_RECORD_TYPES,
+    CLAUDE_TRACE_DIALECT,
+    CODEX_TRACE_DIALECT,
+    COST_PART_ALIASES,
+    EVENT_TEXT_KEYS,
+    GEMINI_READ_ONLY_TOOLS,
+    GEMINI_TRACE_DIALECT,
+    GENERIC_TRACE_DIALECT,
+    JETTY_TRACE_DIALECT,
+    PI_TRACE_DIALECT,
+    TRACE_DIALECTS,
+    TRAJECTORY_STEP_TYPES,
+    USAGE_ALIASES,
+    VIBE_HISTORY_CONTENT_ENTRY_TYPES,
+    VIBE_HISTORY_METADATA_ENTRY_TYPES,
+    VIBE_TRACE_DIALECT,
+    PiStream,
+    TraceDialect,
+    TraceFlattener,
+    _claude_protocol_error,
+    _claude_tool_flat_record,
+    _claude_trace_protocol_error,
+    _codex_trace_protocol_error,
+    _cost_value_from_record,
+    _flatten_event_text,
+    _gemini_records_text,
+    _gemini_stream_semantics,
+    _gemini_tool_flat_record,
+    _gemini_trace_protocol_error,
+    _gemini_usage_and_cost_blocks,
+    _generic_stream_usage_and_cost,
+    _generic_trace_protocol_error,
+    _generic_usage_and_cost_blocks,
+    _is_cumulative_usage_record,
+    _jetty_trace_protocol_error,
+    _no_retry_observation,
+    _no_stream_semantics,
+    _num,
+    _pi_final_agent_end,
+    _pi_final_message,
+    _pi_retries,
+    _pi_stream_semantics,
+    _pi_terminal_error,
+    _pi_terminal_usage,
+    _pi_trace_protocol_error,
+    _pi_usage_and_cost_blocks,
+    _stream_usage_doc,
+    _sum_stream_usage,
+    _tool_measurements,
+    _vibe_content_text,
+    _vibe_tool_flat_record,
+    _vibe_trace_protocol_error,
+    claude_stream_flat_records,
+    claude_terminal_result_index,
+    codex_stream_flat_records,
+    coerce_text,
+    command_events,
+    command_text,
+    detect_trigger,
+    detect_trigger_detection,
+    detect_trigger_records,
+    event_mentions_skill_file,
+    event_texts_for_tool_input,
+    gemini_stream_flat_records,
+    identity_flat_records,
+    load_trace_jsonl,
+    nested_item_type,
+    normalize_cost,
+    normalize_trace_record,
+    normalize_trace_records,
+    normalize_usage,
+    otel_attributes_for_event,
+    parse_trace_jsonl_text,
+    parse_trace_jsonl_text_with_lines,
+    parse_vibe_messages,
+    parse_vibe_messages_with_errors,
+    pi_stream_flat_records,
+    pi_stream_terminal_error,
+    raw_trace_has_key,
+    raw_trace_input_value,
+    raw_trace_value,
+    raw_type_tokens,
+    repeated_command_max,
+    safe_trace_label,
+    stream_duplicate_keys,
+    stream_usage_and_cost,
+    string_keyed_dict,
+    stringify_trace_value,
+    text_mentions_mounted_skill,
+    trace_dialect_for,
+    trace_event_counts,
+    usage_number,
+    vibe_entry_text,
+    vibe_final_answer,
+    vibe_history_entry_flat_records,
+    vibe_llm_message_flat_records,
+    vibe_records_are_history_entries,
+    vibe_skill_tool_evidence,
+    vibe_stream_flat_records,
+    vibe_trace_text,
+    vibe_usage_and_cost,
+    write_trace_artifacts,
+)
+from trigger_identity import (
+    TRIGGER_HARNESS_IDENTITY_VERSION,
+    trigger_harness_identity,
+    validate_trigger_harness_identity,
+)
 
 # Direct ``python skill_benchmark.py`` execution must share the canonical module
 # identity used by lazy backend references. Otherwise importing
@@ -308,7 +545,6 @@ from workspace_contracts import (
     workspace_changes_state,
 )
 
-VALID_SPLITS = frozenset(Split.values())
 # Where a case came from (eval-health mark 1). Sources other than real use are
 # fine to have; an eval built only from synthesized cases is the risk.
 CASE_SOURCES = frozenset({"production", "bug-report", "hand-written", "synthesized", "imported"})
@@ -318,31 +554,6 @@ KNOWN_ANSWER_ASSERTIONS = frozenset({
 # A capability suite whose without_skill arm already passes this share of runs
 # has little room to show lift; quality at lower cost is the better objective.
 SUITE_HEADROOM_CEILING = 0.95
-TRIGGER_HARNESS_IDENTITY_VERSION = 3
-# Conservative at module granularity: skill_benchmark.py still combines trigger
-# and non-trigger orchestration, so every edit to that monolith invalidates the
-# trigger identity until its owners are extracted.
-TRIGGER_IDENTITY_MODULES = (
-    "ablation_model.py",
-    "agent_capabilities.py",
-    "completion_contracts.py",
-    "content_digests.py",
-    "experimental_pairs.py",
-    "invocation_contracts.py",
-    "json_contracts.py",
-    "manifest_contracts.py",
-    "observation_contracts.py",
-    "run_pi_trigger_eval.py",
-    "run_trigger_matrix.py",
-    "skill_benchmark.py",
-    "spend_contracts.py",
-    "spend_runtime.py",
-    "tool_fault_contracts.py",
-    "telemetry.py",
-    "trace_contracts.py",
-    "trigger_contracts.py",
-    "trigger_reporting.py",
-)
 DEFAULT_VARIANTS = list(DEFAULT_EXECUTION_VARIANTS)
 _ResultPair = pair_domain.ExperimentalPair[Mapping[str, Any]]
 _ResultPairConstruction = pair_domain.PairConstruction[Mapping[str, Any]]
@@ -481,9 +692,6 @@ FORGETTABLE_GRADED_THRESHOLD = 0.75
 # still leave plugin/git group members alive, so the group is force-killed
 # after capture. Pipe draining and Codex-home removal are both bounded so an
 # escaped process cannot stall a benchmark worker indefinitely.
-PROCESS_LEADER_POLL_INTERVAL_S = 0.05
-PROCESS_PIPE_DRAIN_GRACE_S = 0.25
-AGENT_STOP_GRACE_S = 2.0
 CODEX_TEMP_CLEANUP_RETRY_DELAYS_S = (0.05, 0.1, 0.2, 0.4, 0.8)
 
 
@@ -522,76 +730,6 @@ def oracle_tier(assertion: dict[str, Any]) -> str:
     if atype == "script":
         return "demo"
     return "strong"
-
-
-def die(msg: str) -> NoReturn:
-    print(f"FAIL: {msg}", file=sys.stderr)
-    raise SystemExit(1)
-
-
-def reject_nonfinite_numbers(value: Any, *, location: str = "$") -> None:
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{location} contains a non-finite number")
-    if isinstance(value, dict):
-        for key, child in value.items():
-            reject_nonfinite_numbers(child, location=f"{location}.{key}")
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            reject_nonfinite_numbers(child, location=f"{location}[{index}]")
-
-
-def string_keyed_dict(value: Any, label: str) -> dict[str, Any]:
-    """Reify an untrusted JSON/YAML object without coercing or losing keys."""
-    if not isinstance(value, dict):
-        raise TypeError(f"{label} must be an object")
-    if not all(isinstance(key, str) for key in value):
-        raise TypeError(f"{label} object keys must be strings")
-    return {
-        key: item for key, item in value.items() if isinstance(key, str)
-    }
-
-
-class UniqueKeySafeLoader(yaml.SafeLoader):
-    """PyYAML safe loader that rejects duplicate mapping keys."""
-
-
-def _construct_unique_yaml_mapping(
-    loader: UniqueKeySafeLoader, node: yaml.nodes.MappingNode, deep: bool = False,
-) -> dict[Any, Any]:
-    loader.flatten_mapping(node)
-    result: dict[Any, Any] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        if key in result:
-            raise ConstructorError(
-                "while constructing a mapping", node.start_mark,
-                f"found duplicate key {key!r}", key_node.start_mark)
-        result[key] = loader.construct_object(value_node, deep=deep)
-    return result
-
-
-UniqueKeySafeLoader.add_constructor(
-    BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_unique_yaml_mapping,
-)
-
-
-def load_json(path: Path) -> dict[str, Any]:
-    try:
-        data = strict_json_loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        die(f"no such file: {path}")
-    except json.JSONDecodeError as exc:
-        die(f"invalid JSON in {path}: {exc}")
-    if not isinstance(data, dict):
-        die(f"{path} must contain a JSON object")
-    return data
-
-
-def write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(
-        data, indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -656,104 +794,6 @@ def emit_text(text: str, out: str | Path | None) -> None:
         print(text)
 
 
-def iter_json_objects(text: str, *, strict: bool = True):
-    """Yield each parseable JSON value found line-by-line in a runner's stream,
-    silently skipping non-JSON lines. The one scanning loop shared by trigger
-    detection, stream telemetry, and the agent adapters — previously five
-    hand-rolled copies of the same try/except.
-
-    `strict=True` applies the artifact rule (a repeated object key raises);
-    `strict=False` applies the external-CLI stream rule (`stream_json_loads`:
-    last value wins), for bytes an agent CLI emitted and the harness does not
-    control. A line that is not JSON is skipped either way."""
-    loads = strict_json_loads if strict else stream_json_loads
-    for line in text.splitlines():
-        try:
-            yield loads(line)
-        except StrictJSONViolation as exc:
-            raise ValueError(exc.msg) from exc
-        except json.JSONDecodeError as exc:
-            if exc.__cause__ is not None:
-                raise ValueError(exc.msg) from exc
-            continue
-
-
-def apply_dataset_row(value: Any, row: dict[str, Any]) -> Any:
-    """Fill {key} placeholders from a dataset row throughout a case template.
-    Plain replace, not str.format — prompts and regex assertions legitimately
-    contain braces ({output_dir}, quantifiers) that format() would explode on."""
-    if isinstance(value, str):
-        out = value
-        for key, cell in row.items():
-            out = out.replace("{" + str(key) + "}", str(cell))
-        return out
-    if isinstance(value, list):
-        return [apply_dataset_row(item, row) for item in value]
-    if isinstance(value, dict):
-        return {key: apply_dataset_row(item, row) for key, item in value.items()}
-    return value
-
-
-def materialize_dataset_cases(manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    """The dataset abstraction (roadmap 2.5): a case with `template: <dataset>`
-    fans one template over the dataset's rows into concrete cases — stable ids
-    (`<case>-<row id or 1-based index>`), materialized EARLY so validation,
-    leakage lint, prepare, grade, and report all see ordinary cases."""
-    cases = manifest.get("cases", [])
-    if not isinstance(cases, list):
-        die("manifest.cases must be a list")
-    datasets = manifest.get("datasets") or {}
-    out: list[dict[str, Any]] = []
-    for case_index, case in enumerate(cases, 1):
-        if (not isinstance(case, dict)
-                or not all(isinstance(key, str) for key in case)):
-            die(f"manifest case #{case_index} must be an object with string keys")
-        case_row = {
-            key: value for key, value in case.items() if isinstance(key, str)
-        }
-        dataset_id = case_row.get("template")
-        if not dataset_id:
-            out.append(case_row)
-            continue
-        rows = datasets.get(str(dataset_id))
-        if not isinstance(rows, list) or not rows:
-            die(f"case {case.get('id')!r}: template references unknown or empty dataset {dataset_id!r}")
-        for i, row in enumerate(rows, 1):
-            if (not isinstance(row, dict)
-                    or not all(isinstance(key, str) for key in row)):
-                die(f"dataset {dataset_id!r}: row #{i} must be an object with string keys")
-            dataset_row = {
-                key: value for key, value in row.items() if isinstance(key, str)
-            }
-            materialized = {
-                key: apply_dataset_row(value, dataset_row)
-                for key, value in case_row.items() if key != "template"
-            }
-            materialized["id"] = f"{case_row.get('id')}-{dataset_row.get('id', i)}"
-            materialized["dataset"] = str(dataset_id)
-            out.append(materialized)
-    return out
-
-
-def iter_cases(manifest: dict[str, Any], split: str | None = None) -> list[dict[str, Any]]:
-    cases = materialize_dataset_cases(manifest)
-    if split:
-        return [c for c in cases if c.get("split") == split]
-    return cases
-
-
-def is_trigger_case(case: dict[str, Any]) -> bool:
-    """Trigger/discovery cases belong to the autonomous-trigger runners, whose
-    output is a raw_autonomous_trigger_measurement — a different population from
-    answer runs. Every grading path (benchmark, grade, judge) must exclude them
-    through THIS predicate so the boundary cannot drift per-command."""
-    try:
-        kind = CaseKind.parse(case.get("kind", "behavior"))
-    except ValueError:
-        return False
-    return kind.population is CasePopulation.TRIGGER
-
-
 def is_judge_only_case(case: dict[str, Any]) -> bool:
     """A case whose every assertion needs a model judge (judge/rubric/factuality).
     Shared by eval-readiness and the manifest audit so their 'judge-only' cost
@@ -783,19 +823,6 @@ def case_prompt_from_dir(case: dict[str, Any], manifest_dir: Path,
 
 def case_prompt(case: dict[str, Any], manifest_path: Path, allow_missing: bool = False) -> str:
     return case_prompt_from_dir(case, manifest_path.parent, allow_missing=allow_missing)
-
-
-def repo_root_for_manifest(manifest_path: Path) -> Path:
-    """A skill installer copies a skill directory verbatim, so a manifest under
-    <base>/evals/<skill>/ (not just <base>/evals/) lets eval files sit outside
-    the tree that reaches consumers."""
-    if manifest_path.name == "shared-benchmark.json":
-        evals_dir = manifest_path.parent
-        if evals_dir.name != "evals":
-            evals_dir = evals_dir.parent
-        if evals_dir.name == "evals":
-            return evals_dir.parent.resolve()
-    return manifest_path.parent.resolve()
 
 
 def skill_root_rule(manifest_path: Path) -> str:
@@ -1348,62 +1375,6 @@ def validate_case_assertion(cid: str, label: str, index: int, assertion: Any, pa
             die(f"{where} qualitative assertion needs an anchored rubric or prompt")
     if atype == "script":
         validate_script_assertion(assertion, path, cid, index)
-
-
-def load_manifest_source(path: Path) -> dict[str, Any]:
-    """The no-code registry loader (roadmap 3.3): a manifest may be authored in
-    YAML (compiled to the JSON manifest shape in memory), and `dataset_files`
-    may point at JSONL row files loaded into `datasets`. Everything downstream
-    of this loader — validation, leakage lint, prepare, grading — is unchanged."""
-    if path.suffix.lower() in {".yaml", ".yml"}:
-        try:
-            manifest = yaml.load(
-                path.read_text(encoding="utf-8"), Loader=UniqueKeySafeLoader)
-        except FileNotFoundError:
-            die(f"no such file: {path}")
-        except yaml.YAMLError as exc:
-            die(f"invalid YAML in {path}: {exc}")
-        if not isinstance(manifest, dict):
-            die(f"{path} must contain a YAML mapping")
-    else:
-        manifest = load_json(path)
-    try:
-        reject_nonfinite_numbers(manifest)
-    except ValueError as exc:
-        die(f"invalid manifest numeric value: {exc}")
-    dataset_files = manifest.pop("dataset_files", None)
-    if dataset_files is not None:
-        if not isinstance(dataset_files, dict):
-            die(f"{path}: dataset_files must map dataset ids to JSONL paths")
-        datasets = dict(manifest.get("datasets") or {})
-        for dataset_id, rel in dataset_files.items():
-            rows_path = path.parent / str(rel)
-            if not rows_path.is_file():
-                die(f"{path}: dataset_files[{dataset_id!r}] does not exist: {rows_path}")
-            rows = []
-            for n, line in enumerate(rows_path.read_text(encoding="utf-8").splitlines(), 1):
-                if not line.strip():
-                    continue
-                try:
-                    row = strict_json_loads(line)
-                except json.JSONDecodeError as exc:
-                    die(f"{rows_path}: line {n} is not valid JSON: {exc}")
-                rows.append(row)
-            datasets[str(dataset_id)] = rows
-        manifest["datasets"] = datasets
-    for case in iter_cases(manifest):
-        if is_trigger_case(case) and ("expected_skills" in case or "forbidden_skills" in case):
-            skill_paths = manifest.get("skill_paths")
-            if not isinstance(skill_paths, list) or not all(isinstance(value, str) for value in skill_paths):
-                die("manifest.skill_paths must be a list of strings for scoped trigger cases")
-            try:
-                parse_skill_constraints(
-                    {**case, "should_trigger": expected_trigger_polarity(case) == "TRIGGER"},
-                    frozenset(SkillId(value) for value in skill_paths),
-                )
-            except (TypeError, ValueError) as exc:
-                die(f"case {case.get('id')!r}: {exc}")
-    return manifest
 
 
 SUPPORTED_MANIFEST_VERSIONS = {1, 2}
@@ -2431,9 +2402,7 @@ JETTY_SUBMIT_TIMEOUT_HINT_S = 60
 # request must carry a real User-Agent.
 JETTY_USER_AGENT = "skill-eval-harness"
 
-CODEX_HOME_FILES = ("auth.json", "config.toml")
 
-VIBE_READ_ONLY_TOOLS = ("skill", "read_file", "grep")
 VIBE_NO_TOOLS = ("re:^$",)
 
 GEMINI_AUTH_ENV = (
@@ -2468,9 +2437,6 @@ GEMINI_NONPREFIX_CONTROL_ENV = frozenset({
     "GOOGLE_GENAI_API_VERSION", "OAUTH_CALLBACK_HOST",
     "OAUTH_CALLBACK_PORT", "BROWSER", "NO_BROWSER",
 })
-GEMINI_READ_ONLY_TOOLS = (
-    "glob", "grep_search", "list_directory", "read_file", "read_many_files",
-)
 GEMINI_WIRE_CONTRACT_COMMIT = "d55e366f6ab393e024c613d940fead3696d56eac"
 GEMINI_WIRE_CONTRACT_PACKAGE_VERSION = "0.55.0-nightly.20260729.g3499c84f7"
 # Mirrors the pinned CLI's atCommandProcessor path grammar. Any unescaped
@@ -2492,125 +2458,12 @@ GEMINI_ACTIVE_AT_PATH = re.compile(
 # ---------------------------------------------------------------------------
 
 ABLATION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-COMPONENT_CLASSES = {item.value for item in ComponentClass}
-SKILL_MECHANISMS = {item.value for item in Mechanism}
 # Which component classes each mechanism is allowed to declare (a declared class
 # is not trusted blindly — a section may not claim class: discovery to route to
 # trigger cases).
-MECHANISM_CLASSES = {
-    "frontmatter_field": {"discovery", "runtime"},
-    "section": {"instructions"}, "list_item": {"instructions"},
-    "patch": {"instructions", "discovery", "runtime"},
-    "reference": {"resource"}, "script": {"resource"}, "asset": {"resource"},
-    "preprocess": {"preprocess"},
-}
 # Frontmatter fields that govern activation/discovery; everything else a
 # frontmatter_field ablation can touch is treated as runtime configuration.
-DISCOVERY_FIELDS = {"name", "description", "when_to_use", "paths", "disable-model-invocation", "user-invocable"}
-REQUIRED_FRONTMATTER_FIELDS = ("name", "description")
-_COPY_EXCLUDE = {"evals", ".git"}
 _ABLATION_MARKER = ".skill-ablation-dir"
-
-
-class AblationError(Exception):
-    """Raised when an ablation cannot be validated or materialized."""
-
-
-def ablation_by_id(manifest: dict[str, Any], aid: str) -> dict[str, Any] | None:
-    """The one manifest→ablation lookup (previously five inline `next(...)` copies)."""
-    return next((a for a in manifest.get("ablations", []) if a.get("id") == aid), None)
-
-
-def ablation_components(ablation: dict[str, Any]) -> list[dict[str, Any]]:
-    """Normalize an ablation entry to a list of components. Returns [] when the
-    entry declares no removal — that absence IS the instruction-simulated mode."""
-    if ablation.get("components"):
-        return list(ablation["components"])
-    if ablation.get("mechanism"):
-        return [{"mechanism": ablation["mechanism"], "class": ablation.get("class"), "target": ablation.get("target", {})}]
-    return []
-
-
-def component_class(comp: dict[str, Any]) -> str | None:
-    """The declared class, or one inferred from the mechanism/field."""
-    if comp.get("class"):
-        return comp["class"]
-    mech, tgt = comp.get("mechanism"), comp.get("target", {})
-    if mech == "frontmatter_field":
-        return "discovery" if tgt.get("field") in DISCOVERY_FIELDS else "runtime"
-    if mech in {"section", "list_item", "patch"}:
-        return "instructions"
-    if mech in {"reference", "script", "asset"}:
-        return "resource"
-    if mech == "preprocess":
-        return "preprocess"
-    return None
-
-
-def resolve_skill_root(comp: dict[str, Any], skill_paths: list[str]) -> str | None:
-    """The ONE default for a component's skill_root: the declared target.skill_root,
-    else the first skill path. Used by both materialize() (which records the
-    fingerprint) and _expected_component() (which rebuilds the expected fingerprint),
-    so the recorded and expected skill_root cannot drift and silently downgrade every
-    confirmation to INDETERMINATE."""
-    r = (comp.get("target") or {}).get("skill_root")
-    return r if r is not None else (skill_paths[0] if skill_paths else None)
-
-
-def skill_root_key(repo_root: Path, rel: str) -> str:
-    """Directory name a skill root is mounted under inside every built tree (the
-    canonical with_skill tree, a materialized ablation's pre-edit and edited trees,
-    an answer workspace's skills/, and the skills dir every trigger adapter mounts).
-
-    The key is the skill's own directory name: the parent directory of a SKILL.md
-    path, or the directory itself when the path names one. The Agent Skills
-    specification discovers a skill through a directory named after it, so
-    sanitizing the manifest string instead (`skills_good-pr_SKILL.md`, and
-    `SKILL.md/SKILL.md` for a per-skill manifest's `SKILL.md`) broke discovery for
-    every layout. A root that IS the repo root has no directory segment of its own;
-    its key is the SKILL.md frontmatter `name`, never the checkout's basename, so
-    the tree hash cannot depend on where the repo was cloned.
-
-    This is the ONE owner of the key. _hash_tree includes this directory name, so
-    any second derivation would make canonical_skill_tree_hash != the ablation's
-    parent_skill_hash and break TreeIdentity.same_revision_as. skill_root_keys_for
-    adds the collision gate on top of it."""
-    src = Path(repo_root) / rel
-    rel_dir = PurePosixPath(rel) if src.is_dir() else PurePosixPath(rel).parent
-    name = rel_dir.name
-    if name in {"", "."}:
-        skill_md = src / "SKILL.md" if src.is_dir() else src
-        if skill_md.name != "SKILL.md" or not skill_md.is_file():
-            raise AblationError(
-                f"skill root {rel!r} is the repo root itself, so its mount name comes from "
-                f"SKILL.md frontmatter, but {skill_md} is not a SKILL.md file")
-        value = frontmatter_value(skill_md.read_text(encoding="utf-8", errors="replace"), "name")
-        if not isinstance(value, str) or not value.strip():
-            raise AblationError(
-                f"skill root {rel!r} is the repo root itself, so its mount name comes from "
-                f"SKILL.md frontmatter, but {skill_md} has no non-empty name field")
-        name = value.strip()
-    key = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
-    if not key or key in {".", ".."}:
-        raise AblationError(f"skill root {rel!r} does not yield a usable mount directory name ({key!r})")
-    return key
-
-
-def skill_root_keys_for(repo_root: Path, skill_paths: Sequence[str]) -> list[str]:
-    """Mount keys for skill roots, in declaration order, refusing two roots that
-    would share a directory in the built tree (the copier would otherwise raise an
-    unwrapped FileExistsError mid-materialization)."""
-    keys: list[str] = []
-    seen: dict[str, str] = {}
-    for rel in skill_paths:
-        key = skill_root_key(repo_root, rel)
-        if key in seen:
-            raise AblationError(
-                f"skill roots {seen[key]!r} and {rel!r} both mount as {key!r}; each skill "
-                "directory name must be unique across skill_paths, so rename one skill directory")
-        seen[key] = rel
-        keys.append(key)
-    return keys
 
 
 def skill_root_key_collisions(repo_root: Path, paths: Sequence[str]) -> list[tuple[str, str, str]]:
@@ -2623,480 +2476,6 @@ def skill_root_key_collisions(repo_root: Path, paths: Sequence[str]) -> list[tup
             collisions.append((seen[key], root, key))
         seen.setdefault(key, root)
     return collisions
-
-
-def mounted_skills_by_id(
-    root_keys: Mapping[SkillId, str], copied: Sequence[Path],
-) -> dict[SkillId, Path]:
-    mounted = {(path.parent if path.name == "SKILL.md" else path).name: path for path in copied}
-    if len(mounted) != len(copied) or set(mounted) != set(root_keys.values()):
-        raise ValueError("mounted skill roots disagree with the declared catalog")
-    return {identity: mounted[key] for identity, key in root_keys.items()}
-
-
-def derived_population(components: list[dict[str, Any]]) -> str:
-    """trigger if every component is discovery, else answer. Mixing the two is a
-    cohesion error (different case populations, unattributable regression)."""
-    classes = {component_class(c) for c in components}
-    if "discovery" in classes and classes - {"discovery"}:
-        raise AblationError("layer cohesion: discovery components cannot mix with answer-population components")
-    return "trigger" if classes == {"discovery"} else "answer"
-
-
-def split_frontmatter(text: str) -> tuple[str, str]:
-    """Return (frontmatter_block_including_fences, body)."""
-    if text.startswith("---\n"):
-        i = text.find("\n---\n", 3)
-        if i != -1:
-            return text[: i + 5], text[i + 5:]
-    return "", text
-
-
-def parse_frontmatter(text: str) -> dict[str, Any]:
-    """Parse the YAML frontmatter mapping with a real YAML parser, so block
-    scalars, folded values, and empty values are handled correctly. {} if
-    absent or not a mapping."""
-    fm, _ = split_frontmatter(text)
-    if not fm:
-        return {}
-    try:
-        data = yaml.safe_load(fm[4:-5])
-    except yaml.YAMLError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def frontmatter_value(text: str, field: str) -> Any:
-    return parse_frontmatter(text).get(field)
-
-
-def required_fields_present(text: str) -> bool:
-    # REQUIRED_FRONTMATTER_FIELDS is the single owner of which fields are required;
-    # this predicate iterates it rather than hardcoding name/description.
-    data = parse_frontmatter(text)
-    for field in REQUIRED_FRONTMATTER_FIELDS:
-        value = data.get(field)
-        if not isinstance(value, str) or not value.strip():
-            return False
-    return True
-
-
-def _line_starts(text: str) -> tuple[list[str], list[int]]:
-    lines = text.splitlines(keepends=True)
-    starts, pos = [], 0
-    for ln in lines:
-        starts.append(pos)
-        pos += len(ln)
-    starts.append(pos)  # sentinel: end of text
-    return lines, starts
-
-
-def _fenced_mask(lines: list[str]) -> list[bool]:
-    """True for lines inside a fenced code block (``` or ~~~), delimiters
-    included. Per CommonMark, a fence is closed only by a fence of the SAME
-    character that is at least as long as the opener and has nothing but
-    whitespace after it — so a ```` (4-tick) block is not closed by ``` (3)."""
-    mask: list[bool] = []
-    open_fence: tuple[str, int] | None = None   # (char, length)
-    for ln in lines:
-        if open_fence is None:
-            m = re.match(r"^\s*(`{3,}|~{3,})", ln)   # opener may carry an info string
-            mask.append(bool(m))
-            if m:
-                open_fence = (m.group(1)[0], len(m.group(1)))
-        else:
-            mask.append(True)
-            c = re.match(r"^\s*(`{3,}|~{3,})\s*$", ln)   # closer: only whitespace after
-            if c and c.group(1)[0] == open_fence[0] and len(c.group(1)) >= open_fence[1]:
-                open_fence = None
-    return mask
-
-
-def _fenced_char_spans(text: str) -> list[tuple[int, int]]:
-    lines, starts = _line_starts(text)
-    return [(starts[i], starts[i + 1]) for i, masked in enumerate(_fenced_mask(lines)) if masked]
-
-
-def _in_spans(pos: int, spans: list[tuple[int, int]]) -> bool:
-    return any(s <= pos < e for s, e in spans)
-
-
-def _inline_code_spans(text: str) -> list[tuple[int, int]]:
-    """Char spans of inline code: a run of N backticks closed by the next run of
-    exactly N backticks (CommonMark). Lets link/reference parsing ignore code
-    samples like `` `[x](path)` `` so they are never treated as real links."""
-    spans: list[tuple[int, int]] = []
-    i, n = 0, len(text)
-    while i < n:
-        if text[i] != "`":
-            i += 1
-            continue
-        j = i
-        while j < n and text[j] == "`":
-            j += 1
-        ticks = j - i
-        k, closed = j, False
-        while k < n:
-            if text[k] == "`":
-                m = k
-                while m < n and text[m] == "`":
-                    m += 1
-                if m - k == ticks:
-                    spans.append((i, m))
-                    i, closed = m, True
-                    break
-                k = m
-            else:
-                k += 1
-        if not closed:
-            i = j   # unterminated run: not inline code, skip past the run
-    return spans
-
-
-def frontmatter_field_span(text: str, field: str) -> tuple[int, int] | None:
-    """Char span of a top-level frontmatter field line plus any indented
-    block-scalar continuation lines."""
-    if not text.startswith("---\n"):
-        return None
-    lines, starts = _line_starts(text)
-    field_re = re.compile(rf"^{re.escape(field)}:")
-    start_i = None
-    for idx in range(1, len(lines)):
-        if lines[idx].rstrip("\n") == "---":
-            break
-        if field_re.match(lines[idx]):
-            start_i = idx
-            break
-    if start_i is None:
-        return None
-    # Consume continuation lines: blanks and indented lines (a block scalar body
-    # may contain internal blank lines), stopping only at the closing fence or
-    # the next top-level key.
-    end_i = start_i + 1
-    while end_i < len(lines):
-        ln = lines[end_i]
-        if ln.rstrip("\n") == "---":
-            break
-        if ln.strip() == "" or re.match(r"^[ \t]", ln):
-            end_i += 1
-        else:
-            break
-    return (starts[start_i], starts[end_i])
-
-
-def _locate_section(lines: list[str], mask: list[bool], heading: str, *, err_context: str = "") -> tuple[int, int, int]:
-    """(heading_line, end_line, level) of a markdown section within pre-split,
-    fence-masked lines: the heading line through the next heading of
-    equal-or-higher level (a '##' inside a ``` block is code, never a heading).
-    If the target carries '#' markers, that exact heading LEVEL is required — so
-    a '## Foo' target does not accidentally match a '### Foo' subheading with
-    the same text; a bare-text target (no '#') matches any level. The one
-    section scan shared by section_span and list_item_ops (previously two
-    hand-synced copies)."""
-    h = heading.strip()
-    want_level = (len(h) - len(h.lstrip("#"))) if h.startswith("#") else None
-    want = h.lstrip("#").strip().lower()
-    start_i: int | None = None
-    level: int | None = None
-    for i, ln in enumerate(lines):
-        if mask[i]:
-            continue
-        m = re.match(r"^(#{1,6})\s+(.*)$", ln)
-        if m and m.group(2).strip().lower() == want and (want_level is None or len(m.group(1)) == want_level):
-            start_i, level = i, len(m.group(1))
-            break
-    if start_i is None or level is None:
-        raise AblationError(f"section not found{err_context}: {heading!r}")
-    end_i = len(lines)
-    for j in range(start_i + 1, len(lines)):
-        if mask[j]:
-            continue
-        m = re.match(r"^(#{1,6})\s+", lines[j])
-        if m and len(m.group(1)) <= level:
-            end_i = j
-            break
-    return start_i, end_i, level
-
-
-def section_span(text: str, heading: str) -> tuple[int, int]:
-    """Char span of a markdown section: heading line through the next heading of
-    equal-or-higher level. Fence-aware: a '##' inside a ``` block is code."""
-    fm, body = split_frontmatter(text)
-    base = len(fm)
-    lines, starts = _line_starts(body)
-    mask = _fenced_mask(lines)
-    start_i, end_i, _ = _locate_section(lines, mask, heading)
-    return (base + starts[start_i], base + starts[end_i])
-
-
-def list_item_ops(text: str, section: str, contains: list[str]) -> list[tuple[int, int, str]]:
-    fm, body = split_frontmatter(text)
-    base = len(fm)
-    lines, starts = _line_starts(body)
-    mask = _fenced_mask(lines)
-    start_i, section_end, _ = _locate_section(lines, mask, section, err_context=" for list_item")
-    body_start = start_i + 1
-    ops = []
-    k = body_start
-    while k < section_end:
-        if mask[k]:
-            k += 1
-            continue
-        stripped = lines[k].lstrip()
-        indent = len(lines[k]) - len(stripped)
-        is_bullet = stripped.startswith(("- ", "* ", "+ ")) or re.match(r"^\d+\.\s", stripped)
-        if is_bullet and any(c.lower() in lines[k].lower() for c in contains):
-            j = k + 1
-            while j < section_end:
-                if mask[j]:
-                    # A fenced code block belongs to the item only if its opening
-                    # fence is indented under the bullet; consume the whole block so
-                    # the item is removed in full, not truncated at the fence.
-                    open_indent = len(lines[j]) - len(lines[j].lstrip())
-                    if open_indent > indent:
-                        j += 1
-                        while j < section_end and mask[j]:
-                            j += 1
-                        continue
-                    break
-                nstripped = lines[j].lstrip()
-                nindent = len(lines[j]) - len(nstripped)
-                if nstripped == "" or nindent > indent:
-                    j += 1
-                else:
-                    break
-            ops.append((base + starts[k], base + starts[j], ""))
-            k = j
-        else:
-            k += 1
-    if not ops:
-        raise AblationError(f"no matching list items in {section!r}")
-    return ops
-
-
-def preprocess_ops(text: str, contains: list[str]) -> list[tuple[int, int, str]]:
-    """Remove inline `` !`command` `` spans and ```! fenced blocks whose command
-    text matches any of `contains`. These preprocessing commands execute before
-    the skill body reaches the model."""
-    def matches(s: str) -> bool:
-        return any(c.lower() in s.lower() for c in contains)
-    ops: list[tuple[int, int, str]] = []
-    for m in re.finditer(r"(?ms)^[ \t]*```!.*?\n[ \t]*`{3,}[ \t]*\n?", text):
-        if matches(m.group(0)):
-            ops.append((m.start(), m.end(), ""))
-    covered = [(s, e) for s, e, _ in ops] + _fenced_char_spans(text) + _inline_code_spans(text)
-    for m in re.finditer(r"!`[^`]*`", text):
-        if _in_spans(m.start(), covered) or not matches(m.group(0)):
-            continue  # skip inline commands inside ordinary code (fenced or inline examples)
-        line_start = text.rfind("\n", 0, m.start()) + 1
-        line_end = text.find("\n", m.end())
-        line_end = line_end + 1 if line_end != -1 else len(text)
-        if text[line_start:m.start()].strip() == "" and text[m.end():line_end].strip() == "":
-            ops.append((line_start, line_end, ""))   # command is alone on its line
-        else:
-            ops.append((m.start(), m.end(), ""))
-    if not ops:
-        raise AblationError(f"no preprocess command matched: {contains!r}")
-    return ops
-
-
-def reference_pointer_ops(text: str, relpath: str) -> list[tuple[int, int, str]]:
-    """Unlink markdown links whose target is relpath: [text](relpath) -> text.
-    Keeps the existing visible text, so no new prose is introduced (removal,
-    not substitution)."""
-    # Exclude both fenced blocks and inline code, so a link literal shown as a
-    # code sample is never silently unlinked.
-    spans = _fenced_char_spans(text) + _inline_code_spans(text)
-    ops = [(m.start(), m.end(), m.group(1)) for m in re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", text)
-           if m.group(2).strip() == relpath and not _in_spans(m.start(), spans)]
-    if not ops:
-        raise AblationError(f"reference pointer not found outside code: {relpath!r}")
-    return ops
-
-
-def patch_delete_ops(text: str, patch: str) -> list[tuple[int, int, str]]:
-    """Resolve a deletion-only unified diff to char-span deletions. A '+' line
-    means the patch adds content — that is a swap, not an ablation."""
-    lines, starts = _line_starts(text)
-    ops, idx, saw = [], 0, False
-    plines = patch.split("\n")
-    k = 0
-    while k < len(plines):
-        h = re.match(r"^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@", plines[k])
-        if not h:
-            k += 1
-            continue
-        idx = int(h.group(1)) - 1
-        k += 1
-        while k < len(plines) and plines[k][:1] in (" ", "-", "+"):
-            tag, content = plines[k][0], plines[k][1:]
-            if tag == "+":
-                raise AblationError("ablation patch is deletion-only; '+' lines indicate a swap (use swap:<id>)")
-            cur = lines[idx].rstrip("\n") if idx < len(lines) else None
-            if cur != content:
-                raise AblationError(f"patch context mismatch at line {idx + 1}: {content!r}")
-            if tag == "-":
-                ops.append((starts[idx], starts[idx + 1], ""))
-                saw = True
-            idx += 1
-            k += 1
-    if not saw:
-        raise AblationError("patch removed nothing")
-    return ops
-
-
-def _verify_hunks_match_class(text: str, spans: list[tuple[int, int, str]], declared_class: str) -> None:
-    """A patch may delete from the frontmatter (a discovery edit) or the body (an
-    instructions edit). Verify every hunk lands in the region the declared class
-    names, so a frontmatter edit can't be mislabeled `instructions` (or a body
-    edit `discovery`) and routed to the wrong case population. A hunk that
-    straddles the boundary, or a set of hunks split across both regions, is
-    rejected — declare two single-region patch components instead."""
-    fm, _ = split_frontmatter(text)
-    fm_end = len(fm)
-    # Spans are whole-line deletions and fm_end is a line boundary, so each hunk
-    # is wholly inside the frontmatter (e <= fm_end) or wholly in the body.
-    in_fm = any(e <= fm_end for s, e, _ in spans)
-    in_body = any(s >= fm_end for s, e, _ in spans)
-    if in_fm and in_body:
-        raise AblationError("patch deletes from both the frontmatter and the body; split it into separate frontmatter and instructions patch components")
-    if declared_class in ("discovery", "runtime"):
-        # A frontmatter patch. It must stay in the frontmatter AND only touch fields
-        # of the right kind: discovery patches route to trigger cases, so they must
-        # not silently delete a RUNTIME field (allowed-tools/model/effort/...) — and
-        # vice versa — which would change the wrong behavior for the wrong population.
-        if in_body:
-            raise AblationError(f"patch declares class {declared_class!r} (a frontmatter edit) but a hunk deletes body content")
-        # STRUCTURAL ownership, not a regex on the deleted text: map each deleted
-        # line to the parsed top-level field whose span CONTAINS it. A block-scalar
-        # body line that merely looks like `key:` is correctly attributed to its
-        # enclosing field, and gutting a discovery field's multi-line value can no
-        # longer slip through as a runtime edit. Every deleted byte must belong to a
-        # field of the declared kind.
-        field_spans = []
-        for name in parse_frontmatter(text):
-            fsp = frontmatter_field_span(text, str(name))
-            if fsp is not None:
-                field_spans.append((str(name), fsp[0], fsp[1]))
-        for s, e, _ in spans:
-            owner = next((nm for nm, fs, fe in field_spans if fs <= s and e <= fe), None)
-            if owner is None:
-                raise AblationError("patch deletes frontmatter content outside any field (a fence or blank line); patch a specific field instead")
-            owner_is_discovery = owner in DISCOVERY_FIELDS
-            if declared_class == "discovery" and not owner_is_discovery:
-                raise AblationError(f"discovery patch deletes non-discovery field {owner!r}; use class 'runtime' for runtime fields or split the patch")
-            if declared_class == "runtime" and owner_is_discovery:
-                raise AblationError(f"runtime patch deletes discovery frontmatter field {owner!r}; use class 'discovery' for discovery fields")
-    elif in_fm:
-        raise AblationError(f"patch declares class {declared_class!r} but a hunk deletes frontmatter content")
-
-
-def _check_disjoint(ops: list[tuple[int, int, str]]) -> None:
-    spans = sorted((s, e) for s, e, _ in ops)
-    for i in range(1, len(spans)):
-        if spans[i][0] < spans[i - 1][1]:
-            raise AblationError(f"components overlap near char {spans[i][0]}")
-
-
-def _apply_edits(text: str, ops: list[tuple[int, int, str]]) -> str:
-    for s, e, r in sorted(ops, key=lambda o: o[0], reverse=True):
-        text = text[:s] + r + text[e:]
-    return text
-
-
-def _detect_newline(raw: bytes) -> str:
-    """The line ending to write back with: CRLF if the file's bytes contain any
-    CRLF, else LF. Parsing/editing happens on LF-normalized text (what read_text
-    returns), so a removal-only edit must restore the original EOL on write —
-    otherwise a CRLF skill file would be silently rewritten LF on every line."""
-    return "\r\n" if b"\r\n" in raw else "\n"
-
-
-def _write_text_preserving_newlines(path: Path, text_lf: str) -> None:
-    """Write LF-normalized text back to `path`, restoring the EOL style the file
-    on disk currently uses (read before this call, so it reflects the original)."""
-    nl = _detect_newline(path.read_bytes()) if path.exists() else "\n"
-    out = text_lf.replace("\n", nl) if nl != "\n" else text_lf
-    path.write_bytes(out.encode("utf-8"))
-
-
-def skill_tree_hash(root: Path) -> str:
-    """Hash an already-built skill tree at the attestation boundary.
-
-    Producers must identify the exact immutable snapshot they mount. Rebuilding
-    mutable sources to derive the hash would let the report name bytes no model
-    actually observed.
-    """
-    root = Path(root)
-    if not root.is_dir():
-        raise ValueError(f"skill tree is not a directory: {root}")
-    return directory_tree_sha256(root)
-
-
-def _safe_under(base: Path, path: Path) -> Path:
-    base_r = base.resolve()
-    p = path.resolve()
-    if p != base_r and base_r not in p.parents:
-        raise AblationError(f"path escapes {base_r}: {path}")
-    return p
-
-
-def _reject_output_root_overlap(out_root: Path, repo_root: Path, manifest: dict[str, Any]) -> None:
-    """Refuse an output directory that equals, sits inside, or contains any source
-    skill root. Writing the materialized tree into (or around) a source root could
-    clobber the original skill or recursively copy our own output, corrupting both
-    the with_skill oracle and the ablated arm."""
-    out = out_root.resolve()
-    for r in manifest.get("skill_paths", []):
-        src = (repo_root / r).resolve()
-        src_dir = src if src.is_dir() else src.parent
-        if out == src_dir:
-            raise AblationError(f"output dir {out} is a source skill root; choose a directory outside the skill")
-        if src_dir in out.parents:
-            raise AblationError(f"output dir {out} is inside source skill root {src_dir}; choose a directory outside the skill")
-        if out in src_dir.parents:
-            raise AblationError(f"output dir {out} contains source skill root {src_dir}; choose a directory outside the skill tree")
-
-
-def _reject_overlapping_skill_roots(repo_root: Path, manifest: dict[str, Any]) -> None:
-    """Refuse a manifest whose skill_paths roots nest. Each root's parent directory
-    is copied wholesale, so if one root's copy-dir is an ancestor of (or identical
-    to) another's, the ancestor copy contains an UNABLATED duplicate of the
-    descendant — a runner could read that duplicate and the ablation would not
-    actually be removed. Declare non-overlapping roots (point at each skill's own
-    directory, not a shared ancestor such as the repo root)."""
-    dirs: list[tuple[str, Path]] = []
-    for r in manifest.get("skill_paths", []):
-        src = (repo_root / r).resolve()
-        dirs.append((r, src if src.is_dir() else src.parent))
-    for i, (ri, di) in enumerate(dirs):
-        for j, (rj, dj) in enumerate(dirs):
-            if i == j:
-                continue
-            if di == dj:
-                raise AblationError(f"skill roots {ri!r} and {rj!r} are copied from the same directory {di}; the ablated copy and an unablated copy would coexist — declare a single root")
-            if di in dj.parents:
-                raise AblationError(f"skill root {ri!r} (dir {di}) is an ancestor of skill root {rj!r}; copying it would include an unablated duplicate of {rj!r} — declare non-overlapping roots")
-    skill_root_keys_for(repo_root, manifest.get("skill_paths", []))
-
-
-def _copy_skill_root(src_dir: Path, dst_dir: Path) -> None:
-    """Copy a skill's complete directory (arbitrary files, not a 3-dir
-    whitelist), excluding eval answers, VCS, and dotfiles. Reject any symlink
-    that resolves outside the root — copytree would otherwise pull external
-    (possibly private) content into the materialized tree."""
-    src_real = src_dir.resolve()
-    for root, dirs, files in os.walk(src_dir):
-        dirs[:] = [d for d in dirs if d not in _COPY_EXCLUDE and not d.startswith(".")]
-        for name in [*dirs, *files]:
-            p = Path(root) / name
-            if p.is_symlink():
-                target = p.resolve()
-                if target != src_real and src_real not in target.parents:
-                    raise AblationError(f"skill root contains a symlink escaping the root: {p}")
-    def ignore(_dir: str, names: list[str]) -> list[str]:
-        return [n for n in names if n in _COPY_EXCLUDE or n.startswith(".")]
-    shutil.copytree(src_dir, dst_dir, ignore=ignore)
 
 
 def _ensure_ablation_dir(path: Path) -> Path:
@@ -3135,421 +2514,6 @@ def _ensure_ablation_dir_guarded(out_dir: Path | str, repo_root: Path, manifest:
     return _ensure_ablation_dir(out)
 
 
-def _required_target_keys(mech: str) -> list[str]:
-    return {
-        "frontmatter_field": ["field"], "section": ["heading"],
-        "list_item": ["section"], "patch": ["patch"], "reference": ["path"],
-        "script": ["path"], "asset": ["path"], "preprocess": ["contains"],
-    }.get(mech, [])
-
-
-def validate_ablation_removal(ablation: dict[str, Any], manifest: dict[str, Any]) -> None:
-    """Shape + safety validation for a declared removal. Apply-time gates
-    (effect, disjointness, required-field preservation) run at materialize time."""
-    if ablation.get("components") and ablation.get("mechanism"):
-        raise AblationError("declare either mechanism+target or components, not both")
-    comps = ablation_components(ablation)
-    if not comps:
-        return  # instruction-simulated
-    skill_paths = manifest.get("skill_paths", [])
-    classes: set[str | None] = set()
-    for comp in comps:
-        mech = comp.get("mechanism")
-        if mech not in SKILL_MECHANISMS:
-            raise AblationError(f"unknown mechanism {mech!r}")
-        cls = component_class(comp)
-        if cls not in COMPONENT_CLASSES:
-            raise AblationError(f"invalid component class {cls!r}")
-        classes.add(cls)
-        tgt = comp.get("target", {})
-        if not isinstance(tgt, dict):
-            raise AblationError("target must be an object")
-        root = tgt.get("skill_root")
-        if root is None and len(skill_paths) != 1:
-            raise AblationError(f"component target missing skill_root (manifest has {len(skill_paths)} skill_paths)")
-        if root is not None and root not in skill_paths:
-            raise AblationError(f"skill_root {root!r} is not in manifest.skill_paths")
-        for key in _required_target_keys(mech):
-            if not tgt.get(key):
-                raise AblationError(f"{mech} target missing {key!r}")
-        for key in ("path", "patch"):
-            v = tgt.get(key)
-            if v and (Path(v).is_absolute() or ".." in Path(v).parts):
-                raise AblationError(f"unsafe path (absolute or traversal): {v!r}")
-        if comp.get("class") and comp["class"] not in MECHANISM_CLASSES.get(mech, COMPONENT_CLASSES):
-            raise AblationError(f"mechanism {mech!r} is incompatible with declared class {comp['class']!r} (allowed: {sorted(MECHANISM_CLASSES.get(mech, []))})")
-        if mech == "frontmatter_field":
-            inferred = component_class({**comp, "class": None})   # the one inference owner
-            if comp.get("class") and comp["class"] != inferred:
-                raise AblationError(f"frontmatter_field {tgt.get('field')!r} is class {inferred}, not {comp['class']!r}")
-        if mech in ("reference", "script", "asset") and Path(str(tgt.get("path", ""))).name == "SKILL.md":
-            raise AblationError(f"{mech} may not target the skill's SKILL.md (use a frontmatter/section/patch mechanism)")
-    if "discovery" in classes and classes - {"discovery"}:
-        raise AblationError("layer cohesion: discovery cannot mix with answer-population components")
-
-
-def _resolve_component_ops(comp: dict[str, Any], main_file: Path, root_dir: Path, repo_root: Path, aid: str) -> tuple[dict[Path, list[tuple[int, int, str]]], set[Path]]:
-    mech = comp.get("mechanism")
-    tgt = comp.get("target", {})
-    text = main_file.read_text(encoding="utf-8-sig")   # tolerate a UTF-8 BOM (Windows editors)
-    ops: dict[Path, list[tuple[int, int, str]]] = {}
-    deletes: set[Path] = set()
-    if mech == "frontmatter_field":
-        span = frontmatter_field_span(text, tgt["field"])
-        if span is None:
-            raise AblationError(f"frontmatter field not found: {tgt['field']!r}")
-        ops[main_file] = [(span[0], span[1], "")]
-    elif mech == "section":
-        s, e = section_span(text, tgt["heading"])
-        ops[main_file] = [(s, e, "")]
-    elif mech == "list_item":
-        ops[main_file] = list_item_ops(text, tgt["section"], tgt.get("contains", []))
-    elif mech == "preprocess":
-        ops[main_file] = preprocess_ops(text, tgt["contains"])
-    elif mech == "patch":
-        patch_file = _safe_under(repo_root, repo_root / tgt["patch"])
-        spans = patch_delete_ops(text, patch_file.read_text(encoding="utf-8"))
-        declared_class = component_class(comp)
-        if declared_class is None:
-            raise AblationError("patch component has no resolvable class")
-        _verify_hunks_match_class(text, spans, declared_class)
-        ops[main_file] = spans
-    elif mech == "reference":
-        mode = tgt.get("remove", "both")
-        if mode in ("pointer", "both"):
-            ops[main_file] = reference_pointer_ops(text, tgt["path"])
-        if mode in ("content", "both"):
-            deletes.add(_safe_under(root_dir, root_dir / tgt["path"]))
-    elif mech in ("script", "asset"):
-        deletes.add(_safe_under(root_dir, root_dir / tgt["path"]))
-    else:
-        raise AblationError(f"unknown mechanism {mech!r}")
-    return ops, deletes
-
-
-@_dataclass(frozen=True)
-class ValidatedAblation:
-    """The gate pile as a SMART CONSTRUCTOR. The only way to obtain one is
-    ValidatedAblation.validate(), which runs every declaration-time gate
-    (removal declared, mechanism/class/field consistency, path safety,
-    non-overlapping skill roots, layer cohesion). Its existence is therefore proof
-    the ablation is well-formed, so materialize() can take a ValidatedAblation
-    instead of a raw dict — you cannot materialize an unvalidated ablation."""
-
-    repo_root: Path
-    manifest: dict[str, Any]
-    ablation: dict[str, Any]
-    components: tuple[dict[str, Any], ...]
-    population: CasePopulation
-
-    @classmethod
-    def validate(cls, repo_root: Path, manifest: dict[str, Any], ablation: dict[str, Any]) -> ValidatedAblation:
-        comps = ablation_components(ablation)
-        if not comps:
-            raise AblationError(f"ablation {ablation.get('id')!r} declares no removal (instruction-simulated)")
-        validate_ablation_removal(ablation, manifest)
-        _reject_overlapping_skill_roots(repo_root, manifest)
-        population = CasePopulation(derived_population(comps))   # runs the layer-cohesion gate
-        return cls(repo_root=repo_root, manifest=manifest, ablation=ablation, components=tuple(comps), population=population)
-
-
-def materialize_ablation(repo_root: Path, manifest: dict[str, Any], ablation: dict[str, Any], out_root: Path) -> dict[str, Any]:
-    """Backward-compatible dict facade over the typed core: validate, materialize,
-    serialize. New code should use ValidatedAblation.validate() + materialize()."""
-    return materialize(ValidatedAblation.validate(repo_root, manifest, ablation), out_root).as_legacy_dict()
-
-
-def materialize_trigger_ablation(repo_root: Path, manifest: dict[str, Any], ablation_id: str, out_root: Path) -> dict[str, Any]:
-    """Materialize a discovery/trigger-population ablation for autonomous trigger
-    runners. This is the shared gate for Pi trigger and the trigger matrix, so
-    they cannot diverge on which ablations are valid to mount."""
-    ablation = ablation_by_id(manifest, ablation_id)
-    if ablation is None:
-        raise AblationError(f"unknown ablation: {ablation_id}")
-    components = ablation_components(ablation)
-    if not components:
-        raise AblationError(f"ablation {ablation_id} is instruction-simulated; trigger ablations must declare a materialized removal")
-    if derived_population(components) != "trigger":
-        raise AblationError(f"ablation {ablation_id} is an answer-population ablation; trigger ablations must target discovery/trigger behavior")
-    return materialize_ablation(repo_root, manifest, ablation, out_root)
-
-
-def canonical_json_sha256(value: Any) -> str:
-    """Stable JSON identity used by persisted experiment contracts."""
-    encoded = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
-
-
-def canonical_trigger_query(query: str) -> str:
-    """Conservative inference identity for authored trigger prompts.
-
-    Raw text is still executed and persisted, but Unicode compatibility forms,
-    case-only variants, and whitespace-only edits are one experimental unit.
-    Treating those cosmetic aliases as independent samples would manufacture
-    replication without adding evidence.
-    """
-    if not isinstance(query, str) or not query.strip():
-        raise ValueError("trigger query must be non-empty text")
-    normalized = unicodedata.normalize("NFKC", query).casefold()
-    normalized = "".join(
-        char for char in normalized
-        if (unicodedata.category(char) != "Cf"
-            and not 0x180B <= ord(char) <= 0x180F
-            and not 0xFE00 <= ord(char) <= 0xFE0F
-            and not 0xE0100 <= ord(char) <= 0xE01EF)
-    )
-    return " ".join(normalized.split())
-
-
-def trigger_harness_identity() -> dict[str, Any]:
-    """Identity of every local module that can change trigger evidence semantics."""
-    module_dir = Path(__file__).resolve().parent
-    modules: dict[str, str] = {}
-    for name in TRIGGER_IDENTITY_MODULES:
-        path = module_dir / name
-        try:
-            content = path.read_bytes()
-        except OSError as exc:
-            raise RuntimeError(f"cannot identify trigger dependency {name}: {exc}") from exc
-        modules[name] = "sha256:" + hashlib.sha256(content).hexdigest()
-    payload = {
-        "schema_version": TRIGGER_HARNESS_IDENTITY_VERSION,
-        "modules": modules,
-    }
-    return {**payload, "identity_sha256": canonical_json_sha256(payload)}
-
-
-def validate_trigger_harness_identity(identity: Any, label: str) -> dict[str, Any]:
-    """Reject partial or internally inconsistent dependency manifests."""
-    if not isinstance(identity, dict):
-        raise TypeError(f"{label} harness_identity must be an object")
-    payload = {key: value for key, value in identity.items() if key != "identity_sha256"}
-    version = identity.get("schema_version")
-    if type(version) is int and version != TRIGGER_HARNESS_IDENTITY_VERSION:
-        raise ValueError(
-            f"{label} was produced by trigger harness identity v{version}; this harness "
-            f"reads v{TRIGGER_HARNESS_IDENTITY_VERSION}. Regenerate the report.")
-    if (type(version) is not int
-            or canonical_json_sha256(payload) != identity.get("identity_sha256")):
-        raise ValueError(f"{label} harness_identity does not match its identity_sha256")
-    modules = identity.get("modules")
-    if not isinstance(modules, dict) or set(modules) != set(TRIGGER_IDENTITY_MODULES):
-        raise ValueError(
-            f"{label} harness_identity must identify exactly "
-            f"{list(TRIGGER_IDENTITY_MODULES)}")
-    if any(not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
-           for digest in modules.values()):
-        raise ValueError(f"{label} harness_identity contains an invalid module digest")
-    return identity
-
-
-def expected_provenance_for_ablation(
-    manifest: dict[str, Any], ablation_id: str,
-) -> ExpectedProvenance:
-    """Authoritative treatment identity derived from one manifest declaration."""
-    ablation = ablation_by_id(manifest, ablation_id)
-    if ablation is None:
-        raise ValueError(f"manifest does not declare ablation {ablation_id!r}")
-    components = ablation_components(ablation)
-    if not components:
-        raise ValueError(f"ablation {ablation_id!r} has no materialized components")
-    raw_skill_paths = manifest.get("skill_paths", [])
-    if (not isinstance(raw_skill_paths, list)
-            or not all(isinstance(path, str) for path in raw_skill_paths)):
-        raise ValueError("manifest skill_paths must be a list of strings")
-    skill_paths = [path for path in raw_skill_paths if isinstance(path, str)]
-    return ExpectedProvenance(
-        id=ablation_id,
-        mode=(AblationMode.INVALID_SKILL if ablation.get("invalid_skill")
-              else AblationMode.MATERIALIZED),
-        population=CasePopulation(derived_population(components)),
-        components=tuple(
-            _expected_component(component, skill_paths)
-            for component in components),
-    )
-
-
-def trigger_manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Self-verifying manifest treatment snapshot for trigger reports.
-
-    The full loaded-manifest digest binds cases and dataset expansion; embedded
-    expected-provenance records let an offline comparer verify that a runner's
-    recorded edit is the edit the manifest declared.
-    """
-    trigger_ablations = []
-    for ablation in manifest.get("ablations", []):
-        if not isinstance(ablation, dict) or not isinstance(ablation.get("id"), str):
-            continue
-        components = ablation_components(ablation)
-        if not components or derived_population(components) != "trigger":
-            continue
-        expected = expected_provenance_for_ablation(manifest, ablation["id"])
-        trigger_ablations.append({
-            "id": expected.id,
-            "mode": expected.mode.value,
-            "population": expected.population.value,
-            "components": [component.fingerprint() for component in expected.components],
-        })
-    payload = {
-        "schema_version": 1,
-        "manifest_sha256": canonical_json_sha256(manifest),
-        "skill_name": str(manifest.get("skill_name") or "skill-under-test"),
-        "skill_paths": list(manifest.get("skill_paths", [])),
-        "trigger_ablations": sorted(trigger_ablations, key=lambda item: item["id"]),
-    }
-    return {**payload, "identity_sha256": canonical_json_sha256(payload)}
-
-
-def expected_provenance_from_trigger_identity(
-    identity: dict[str, Any], ablation_id: str,
-) -> ExpectedProvenance:
-    """Parse one expected treatment from a validated trigger identity block."""
-    entries = identity.get("trigger_ablations") if isinstance(identity, dict) else None
-    if not isinstance(entries, list):
-        raise TypeError("trigger manifest identity has no trigger_ablations list")
-    matches = [entry for entry in entries
-               if isinstance(entry, dict) and entry.get("id") == ablation_id]
-    if len(matches) != 1:
-        raise ValueError(
-            f"trigger manifest identity must declare ablation {ablation_id!r} exactly once")
-    entry = matches[0]
-    components = entry.get("components")
-    if not isinstance(components, list):
-        raise TypeError("trigger manifest identity components must be a list")
-    return ExpectedProvenance(
-        id=entry.get("id"), mode=entry.get("mode"),
-        population=entry.get("population"),
-        components=tuple(Component.from_dict(component) for component in components),
-    )
-
-
-def materialize(validated: ValidatedAblation, out_root: Path) -> MaterializedArm:
-    """Produce out_root/<id>/ holding the altered skill tree for a VALIDATED
-    ablation, and return a MaterializedArm (which itself cannot exist without an
-    edited tree + provenance). Runs the apply-time gates (output containment,
-    net-deletion, disjointness, required-field). Raises AblationError on any gate."""
-    repo_root, manifest, ablation = validated.repo_root, validated.manifest, validated.ablation
-    comps = list(validated.components)
-    population = validated.population
-    _reject_output_root_overlap(out_root, repo_root, manifest)
-    aid = ablation["id"]
-    skill_paths = manifest.get("skill_paths", [])
-
-    def root_for(comp: dict[str, Any]) -> str:
-        root = resolve_skill_root(comp, skill_paths)
-        if root is None:
-            raise AblationError("ablation component has no resolvable skill_root")
-        return root
-
-    dest = out_root / aid
-    if dest.exists():
-        raise AblationError(f"output already exists: {dest}")
-    out_root.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(prefix=f".ablation-{aid}-", dir=out_root))
-    try:
-        roots: dict[str, tuple[Path, Path]] = {}
-        # Copy EVERY manifest root (not just the ones a component touches) so the
-        # ablated arm has the same file surface as with_skill, differing only by
-        # the declared edits.
-        rels = list(skill_paths or dict.fromkeys(root_for(c) for c in comps))
-        for r, key in zip(rels, skill_root_keys_for(repo_root, rels), strict=True):
-            src = _safe_under(repo_root, repo_root / r)
-            src_dir = src if src.is_dir() else src.parent
-            dst_dir = tmp / key
-            _copy_skill_root(src_dir, dst_dir)
-            main = dst_dir / "SKILL.md" if (src.is_dir() or src.name == "SKILL.md") else dst_dir / src.name
-            roots[r] = (main, dst_dir)
-
-        # Hash the canonical (pre-edit) tree: the with_skill arm's oracle. Both arms
-        # record this so the report can prove they share a skill revision.
-        parent_skill_hash = skill_tree_hash(tmp)
-
-        file_text: dict[Path, str] = {}
-        file_ops: dict[Path, list[tuple[int, int, str]]] = {}
-        delete_owner: dict[Path, int] = {}
-        removed_by_component: list[int] = []
-        isolation_warnings: list[str] = []
-        for ci, comp in enumerate(comps):
-            main, rdir = roots[root_for(comp)]
-            ops, deletes = _resolve_component_ops(comp, main, rdir, repo_root, aid)
-            removed = 0
-            for f, edits in ops.items():
-                file_text.setdefault(f, f.read_text(encoding="utf-8-sig"))   # BOM-consistent with span computation
-                file_ops.setdefault(f, []).extend(edits)
-                edit_removed = sum((e - s) - len(rep) for s, e, rep in edits)
-                removed += edit_removed
-                orig_len = len(file_text[f])
-                if orig_len and edit_removed / orig_len > 0.6:
-                    isolation_warnings.append(f"component #{ci} ({comp.get('mechanism')}) removed {edit_removed}/{orig_len} bytes ({edit_removed / orig_len:.0%}) of {f.name} — large for one declared component")
-            for d in deletes:
-                if not d.exists():
-                    raise AblationError(f"component #{ci}: file to remove not found: {d}")
-                if d in delete_owner:
-                    raise AblationError(f"components #{delete_owner[d]} and #{ci} both delete {d.name} (overlap)")
-                delete_owner[d] = ci
-                removed += d.stat().st_size
-            if removed <= 0:
-                raise AblationError(f"component #{ci} ({comp.get('mechanism')}) removed nothing (net-deletion gate)")
-            removed_by_component.append(removed)
-
-        for d in delete_owner:
-            if d in file_ops:
-                raise AblationError(f"{d.name} is both edited and deleted by the ablation (overlap)")
-        for f, edits in file_ops.items():
-            _check_disjoint(edits)
-            # Detect the EOL from the still-original copied file, then restore it.
-            _write_text_preserving_newlines(f, _apply_edits(file_text[f], edits))
-        for d in delete_owner:
-            d.unlink()
-
-        # Every root must keep a regular SKILL.md with required fields, unless this
-        # is an explicit invalid-skill experiment.
-        if not ablation.get("invalid_skill"):
-            for main, _ in roots.values():
-                if not (main.exists() and main.is_file()):
-                    raise AblationError(f'ablation removed the skill main file {main.name!r}; set "invalid_skill": true to run that as an invalid-skill experiment')
-                if not required_fields_present(main.read_text(encoding="utf-8-sig")):
-                    raise AblationError('required frontmatter field (name/description) became empty or missing; set "invalid_skill": true to run that as an invalid-skill experiment')
-
-        skill_hash = skill_tree_hash(tmp)
-        tmp.rename(dest)
-    except BaseException:
-        shutil.rmtree(tmp, ignore_errors=True)
-        raise
-
-    for w in isolation_warnings:
-        print(f"WARN ablation {aid}: {w}", file=sys.stderr)
-    # The recorded provenance schema is defined ONCE, by Provenance.as_dict() — not
-    # re-spelled here. The materialize-only fields (where the tree lives, isolation
-    # warnings) are merged on top.
-    prov = Provenance(
-        id=aid,
-        mode=(AblationMode.INVALID_SKILL if ablation.get("invalid_skill")
-              else AblationMode.MATERIALIZED),
-        population=population,
-        identity=TreeIdentity(canonical=parent_skill_hash, edited=skill_hash),
-        components=tuple(
-            Component(cls=ComponentClass(component_class(c)),
-                      mechanism=Mechanism(c.get("mechanism")),
-                      skill_root=root_for(c), target=c.get("target", {}),
-                      removed_bytes=removed_by_component[i])
-            for i, c in enumerate(comps)
-        ),
-    )
-    # A blind Arm carrying the provenance + edited identity, wrapped in a
-    # MaterializedArm — whose constructor refuses anything that isn't a real edit.
-    arm = Arm(variant_truth=f"ablation:{aid}", blind=True, identity=prov.identity, provenance=prov)
-    return MaterializedArm(
-        arm=arm,
-        dir=str(dest),
-        skill_files={r: str(dest / main.relative_to(tmp)) for r, (main, _) in roots.items()},
-        isolation_warnings=tuple(isolation_warnings),
-    )
-
-
 def expected_regression_summaries(ablation: dict[str, Any]) -> list[str]:
     """Human summaries of an ablation's expected regressions, accepting both the
     legacy list[str] form and the structured list[{summary, cases, assertions}]."""
@@ -3557,50 +2521,6 @@ def expected_regression_summaries(ablation: dict[str, Any]) -> list[str]:
     for r in ablation.get("expected_regressions", []):
         out.append(r.get("summary", "") if isinstance(r, dict) else str(r))
     return [s for s in out if s]
-
-
-def materialized_tree_for_variant(repo_root: Path, manifest: dict[str, Any], variant: str, out_root: Path) -> dict[str, Any] | None:
-    """For an ablation:<id> variant that declares a removal, materialize the tree
-    and return its provenance (with skill_files). Returns None for non-ablation
-    variants and for instruction-simulated ablations (no removal declared)."""
-    aid = ablation_id_of(variant)
-    if aid is None:
-        return None
-    ablation = ablation_by_id(manifest, aid)
-    if ablation is None:
-        raise AblationError(f"unknown ablation variant: {variant}")
-    if not ablation_components(ablation):
-        return None
-    return materialize_ablation(repo_root, manifest, ablation, out_root)
-
-
-def build_canonical_skill_tree(repo_root: Path, manifest: dict[str, Any], dest_dir: Path) -> Path:
-    """Copy every manifest skill root into dest_dir/<key> with no edits — the
-    canonical surface for with_skill, so it matches a materialized ablation arm
-    file-for-file (the only difference being the ablation's declared edit)."""
-    dest_dir = Path(dest_dir)
-    _reject_overlapping_skill_roots(repo_root, manifest)
-    _reject_output_root_overlap(dest_dir, repo_root, manifest)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    rels = list(manifest.get("skill_paths", []))
-    for r, key in zip(rels, skill_root_keys_for(repo_root, rels), strict=True):
-        src = _safe_under(repo_root, repo_root / r)
-        src_dir = src if src.is_dir() else src.parent
-        _copy_skill_root(src_dir, dest_dir / key)
-    return dest_dir
-
-
-def canonical_skill_tree_hash(repo_root: Path, manifest: dict[str, Any]) -> str:
-    """Hash of the canonical (unedited) skill tree — the with_skill oracle. Built by
-    the same copier and key-naming as materialize_ablation's pre-edit tree, so it
-    equals a materialized ablation's parent_skill_hash. Both arms record it so the
-    report can prove they were derived from the same skill revision."""
-    tmp = Path(tempfile.mkdtemp(prefix=".canon-hash-"))
-    try:
-        build_canonical_skill_tree(repo_root, manifest, tmp / "tree")
-        return skill_tree_hash(tmp / "tree")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def enumerate_tree(root_dir: Path) -> list[tuple[Path, str]]:
@@ -6039,25 +4959,6 @@ def jetty_trace_records(record: dict[str, Any], artifacts: list[dict[str, Any]],
     return records
 
 
-def _jetty_trace_protocol_error(
-    records: list[dict[str, Any]], pi_stream: PiStream | None,
-) -> str | None:
-    aggregate = next((record.get("total_tool_calls") for record in records
-                      if record.get("type") == "usage"), None)
-    if aggregate is None:
-        if not any(str(record.get("type") or "").casefold() in {
-                "command", "tool_call", "tool_use", "file_read", "file_write",
-                "skill_load"} for record in records):
-            return "Jetty trajectory has no event stream or explicit zero aggregate"
-        return None
-    detailed = sum(1 for record in records if str(record.get("type") or "").casefold()
-                   in {"command", "tool_call", "tool_use", "file_read", "file_write", "skill_load"})
-    if detailed != aggregate:
-        return ("Jetty aggregate total_tool_calls has no complete matching "
-                "event-level trajectory")
-    return None
-
-
 def jsonl_from_records(records: list[dict[str, Any]]) -> str:
     return "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
 
@@ -6774,17 +5675,6 @@ def read_tool_observation_base(base: Path, raw_events: Any = None) -> tool_fault
         return tool_fault_domain.ToolObservation(expected, (), turn, reason)
 
 
-def _tool_measurements(observation: tool_fault_domain.ToolObservation,
-                       basis: Mapping[str, Any] | None = None) -> dict[str, telemetry_domain.Measurement[Any]]:
-    result: dict[str, telemetry_domain.Measurement[Any]] = {}
-    for key in tool_fault_domain.TOOL_METRIC_KEYS:
-        assessed = observation.assess(tool_fault_domain.Count(key))
-        result[key] = (telemetry_domain.Measurement.available(assessed.value, provenance="trace_normalized", basis=basis)
-                       if isinstance(assessed, tool_fault_domain.Observed) else
-                       telemetry_domain.Measurement.unavailable(assessed.reason, basis=basis))
-    return result
-
-
 def read_event_log_base(base: Path) -> EventLogObservation:
     path = base / "events.json"
     try:
@@ -6870,51 +5760,8 @@ def raw_trace_record_for_event(run_base: Path | None, event: dict[str, Any]) -> 
     return raw_trace_record_for_ref(run_base, event.get("raw_ref"))
 
 
-def command_text(event: dict[str, Any]) -> str:
-    parts: list[str] = []
-    for key in ["input_summary", "command", "cmd", "name"]:
-        value = event.get(key)
-        if isinstance(value, str):
-            parts.append(value)
-        elif isinstance(value, list):
-            parts.append(" ".join(str(v) for v in value))
-    details = event.get("details")
-    if isinstance(details, dict):
-        for key in ["command", "cmd", "input", "args"]:
-            value = details.get(key)
-            if isinstance(value, str):
-                parts.append(value)
-            elif isinstance(value, list):
-                parts.append(" ".join(str(v) for v in value))
-    return " ".join(p for p in parts if p).strip()
-
-
-def command_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Commands proven completed; failed/unknown/start events never satisfy execution."""
-    return [e for e in events if e.get("type") == "command" and event_is_completed(e)]
-
-
-def event_mentions_skill_file(event: dict[str, Any]) -> bool:
-    if event.get("type") not in {"skill_load", "file_read", "tool_call", "command"}:
-        return False
-    # Gemini's discovery/read-many stream results are flattened text without a
-    # structured, attributable processed-file list. A matching name in their
-    # query or display output proves discovery intent, not that SKILL.md was
-    # opened. Only a direct read_file target remains positive tool evidence.
-    if str(event.get("name") or "").casefold() in {
-            "glob", "grep_search", "list_directory", "read_many_files"}:
-        return False
-    # Arbitrary tool/command output mentioning a path is not attributable
-    # proof that the path was opened. Positive evidence comes from a typed
-    # skill/file-read target or an operation input that itself names the file.
-    hay = " ".join(str(event.get(key, ""))
-                   for key in ["input_summary", "name"])
-    return "SKILL.md" in hay or "/skills/" in hay or "\\skills\\" in hay
-
-
 # The step-shaped trajectory events: the completed actions a per-step judge
 # grades and the trajectory diff counts. Messages/metrics are context.
-TRAJECTORY_STEP_TYPES = {"command", "tool_call", "file_read", "file_write", "skill_load"}
 
 
 def event_tool_key(event: dict[str, Any]) -> str:
@@ -6939,1144 +5786,11 @@ def event_tool_key(event: dict[str, Any]) -> str:
     return str(event.get("type") or "unknown_tool").casefold()
 
 
-def trace_event_counts(events: list[dict[str, Any]], *, mediated_tools: tool_fault_domain.ToolObservation | None = None) -> dict[str, Any]:
-    """Single owner of the completed-events-only counting rules. metrics.json
-    (normalize_trace_records) and the report's trajectory diff both derive
-    their counters here, so the two surfaces cannot drift: a diff delta is a
-    delta of exactly the numbers metrics.json reports. Errors count over ALL
-    events — a failed operation is an error precisely because it never
-    completed."""
-    if mediated_tools is not None:
-        measured = _tool_measurements(mediated_tools)
-        return {key: value.value for key, value in measured.items()}
-
-    completed = [e for e in events if event_is_completed(e)]
-    commands = command_events(events)
-    return {
-        "steps": sum(1 for e in completed if e.get("type") in TRAJECTORY_STEP_TYPES),
-        # File and skill operations are provider tool calls too.  Keeping their
-        # finer taxonomy must not make them disappear from the aggregate call
-        # count or from tool-call assertions.
-        "tool_calls": sum(1 for e in completed
-                          if e.get("type") in TRAJECTORY_STEP_TYPES),
-        "commands": len(commands),
-        "file_reads": sum(1 for e in completed if e.get("type") in {"file_read", "skill_load"}),
-        "file_writes": sum(1 for e in completed if e.get("type") == "file_write"),
-        "errors": sum(1 for e in events if e.get("type") == "error" or e.get("is_error") is True),
-        "skill_events": [e for e in completed if e.get("type") == "skill_load" or event_mentions_skill_file(e)],
-    }
-
-
-EVENT_TEXT_KEYS = {"file_path", "path", "skill", "input", "input_summary", "partial_json", "command", "cmd", "args", "argv"}
-
-
-def _flatten_event_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return " ".join(_flatten_event_text(item) for item in value).strip()
-    return ""
-
-
-def event_texts_for_tool_input(obj: Any) -> list[str]:
-    """Recursively collect file-path-ish strings from a runner event (tool inputs),
-    used to detect whether the model actually opened a mounted skill file."""
-    out: list[str] = []
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            if key in EVENT_TEXT_KEYS:
-                text = _flatten_event_text(value)
-                if text:
-                    out.append(text)
-            out.extend(event_texts_for_tool_input(value))
-    elif isinstance(obj, list):
-        for item in obj:
-            out.extend(event_texts_for_tool_input(item))
-    return out
-
-
-def text_mentions_mounted_skill(text: str, copied_paths: Sequence[Path]) -> bool:
-    for path in copied_paths:
-        root = path.parent if path.name == "SKILL.md" else path
-        pattern = r"(?<![\w./-])" + re.escape(str(root)) + r"(?=$|[/\s\"'<>),;])"
-        if re.search(pattern, text):
-            return True
-    return False
-
-
-def detect_trigger_records(records: Iterable[dict[str, Any]], copied_paths: list[Path],
-                           *, source: str = "generic",
-                           pi_stream: PiStream | None = None, mediated_tools: tool_fault_domain.ToolObservation | None = None) -> TriggerDetection:
-    """Derive mounted-path evidence from provider-aware completed operations."""
-    if mediated_tools is not None:
-        assessed = mediated_tools.assess(tool_fault_domain.SuccessfulOperations())
-        if isinstance(assessed, tool_fault_domain.Unavailable):
-            return TriggerDetection.absent()
-        return TriggerDetection.from_texts(TriggerEvidenceKind.MOUNTED_PATH, assessed.value)
-
-    evidence: list[str] = []
-    materialized = list(records)
-    event_doc, _ = normalize_trace_records(
-        materialized, source=source, pi_stream=pi_stream)
-    for event in event_doc["events"]:
-        if not event_is_completed(event) or event.get("is_error") is True:
-            continue
-        exit_code = event.get("exit_code")
-        if exit_code is not None and (type(exit_code) is not int or exit_code != 0):
-            continue
-        if event.get("type") not in {"skill_load", "file_read", "command"}:
-            continue
-        for text in event_texts_for_tool_input(event):
-            if text_mentions_mounted_skill(text, copied_paths):
-                evidence.append(text[:500])
-    return TriggerDetection.from_texts(TriggerEvidenceKind.MOUNTED_PATH, evidence[:5])
-
-
-def detect_trigger_detection(stdout: str, copied_paths: list[Path],
-                             *, source: str = "generic") -> TriggerDetection:
-    """Typed skill-invocation detector for a raw JSON event stream."""
-    records = [event for event in iter_json_objects(stdout, strict=False) if isinstance(event, dict)]
-    return detect_trigger_records(records, copied_paths, source=source)
-
-
-def detect_trigger(stdout: str, copied_paths: list[Path]) -> tuple[bool, list[str]]:
-    """Compatibility wire helper; internal trigger runners use TriggerDetection."""
-    detection = detect_trigger_detection(stdout, copied_paths)
-    return detection.triggered, detection.legacy_evidence
-
-
-def safe_trace_label(text: str, fallback: str) -> str:
-    label = re.sub(r"[^a-zA-Z0-9_.-]+", "-", text)[:80].strip("-")
-    return label or fallback
-
-
-def mount_skill_tree(tree_dir: Path, skills_dir: Path) -> list[Path]:
-    """Copy each per-root subdir of a canonical/materialized skill tree into an
-    agent's skills dir. EVERY trigger arm (baseline and ablation, every adapter)
-    mounts through here, so all arms expose an identical file surface under
-    identical names — the only difference is the bytes a declared ablation edit
-    removed. Returns the copied SKILL.md (or root dir) paths, which double as
-    the skill-load detection needles for detect_trigger."""
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    copied: list[Path] = []
-    for root_dir in sorted(p for p in tree_dir.iterdir() if p.is_dir()):
-        dest = skills_dir / root_dir.name
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(root_dir, dest)
-        copied.append(dest / "SKILL.md" if (dest / "SKILL.md").exists() else dest)
-    return copied
-
-
-def recovery_file_bytes(workspace: Path, relative: str) -> bytes:
-    path = workspace / relative
-    resolved = path.resolve()
-    if workspace.resolve() not in resolved.parents:
-        raise ValueError(f"recovery path escapes workspace: {relative}")
-    parts = Path(relative).parts
-    directory_flag, nofollow_flag, nonblock_flag = (
-        getattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK"))
-    directory_flags = os.O_RDONLY | directory_flag | nofollow_flag
-    file_flags = os.O_RDONLY | nofollow_flag | nonblock_flag
-    descriptors = [os.open(workspace, directory_flags)]
-    try:
-        for part in parts[:-1]:
-            descriptors.append(os.open(part, directory_flags, dir_fd=descriptors[-1]))
-        descriptor = os.open(parts[-1], file_flags, dir_fd=descriptors[-1])
-        descriptors.append(descriptor)
-        with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise ValueError(f"recovery path is not a regular file: {relative}")
-            return handle.read()
-    finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
-
-
-def recovery_group_stopped(pgid: int) -> tuple[bool, str]:
-    if Path("/proc").is_dir():
-        for entry in Path("/proc").iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-            except (FileNotFoundError, ProcessLookupError):
-                continue
-            if int(fields[2]) == pgid and fields[0] not in {"Z", "X"}:
-                return False, "procfs_live_member"
-        return True, "procfs_no_live_members"
-    killpg = getattr(os, "killpg", None)
-    if not callable(killpg):
-        return False, "unsupported"
-    try:
-        killpg(pgid, 0)
-    except ProcessLookupError:
-        return True, "killpg_no_members"
-    return False, "killpg_members_remain"
-
-
-# Only the main thread receives signals, so worker threads read the stop from here.
-_stop_signal: int | None = None
-
-
-def _stop_run(signum: int, frame: object) -> None:
-    global _stop_signal
-    if _stop_signal is None:
-        _stop_signal = signum
-        raise KeyboardInterrupt
-
-
-def stops_on_signal(main: Callable[[], int]) -> Callable[[], int]:
-    """Make SIGINT and SIGTERM stop a CLI entrypoint and every agent it runs.
-
-    The entrypoint then prints one line and returns 128 + the signal number. A
-    signal ignored at startup stays ignored."""
-    @functools.wraps(main)
-    def run() -> int:
-        global _stop_signal
-        _stop_signal = None
-        previous = {signum: signal.signal(signum, _stop_run)
-                    for signum in (signal.SIGINT, signal.SIGTERM)
-                    if signal.getsignal(signum) not in (signal.SIG_IGN, None)}
-        try:
-            return main()
-        except KeyboardInterrupt:
-            if _stop_signal is None:
-                raise
-            print(f"stopped by {signal.Signals(_stop_signal).name}", file=sys.stderr)
-            return 128 + _stop_signal
-        finally:
-            _stop_signal = None
-            for signum, handler in previous.items():
-                signal.signal(signum, handler)
-    return run
-
-
-def skill_benchmark_stopped() -> bool:
-    return _stop_signal is not None
-
-
-@_dataclass(frozen=True)
-class _BridgeLimits:
-    frame_bytes: int = 64 * 1024
-    stream_bytes: int = 8 * 1024 * 1024
-    outbound_bytes: int = 8 * 1024 * 1024
-
-    def __post_init__(self) -> None:
-        for value, maximum in ((self.frame_bytes, 64 * 1024),
-                               (self.stream_bytes, 8 * 1024 * 1024),
-                               (self.outbound_bytes, 8 * 1024 * 1024)):
-            if type(value) is not int or not 1 <= value <= maximum:
-                raise ValueError("tool bridge limits must be positive integers within the default bounds")
-
-
-@_dataclass(frozen=True)
-class _BridgeSession:
-    journal: _ToolReceiptJournal
-    turn: int
-    directory: Path
-    limits: _BridgeLimits
-
-
-@_dataclass(frozen=True)
-class _BridgeProcessFacts:
-    pid: int | None
-    os_returncode: int | None
-    natural_exit: bool
-    group_stopped: bool
-    group_observation: str
-    drained: bool
-    reaped: bool
-    timed_out: bool
-    forced_termination: bool
-    stream_bytes: int
-    cleanup_bytes: int
-
-    @property
-    def incomplete_billing(self) -> bool:
-        return self.pid is not None and (self.forced_termination or not self.group_stopped or not self.drained or not self.reaped)
-
-    def as_dict(self) -> dict[str, Any]:
-        return {"pid": self.pid, "os_returncode": self.os_returncode,
-                "natural_exit": self.natural_exit, "group_stopped": self.group_stopped,
-                "group_observation": self.group_observation, "drained": self.drained,
-                "reaped": self.reaped, "timed_out": self.timed_out,
-                "forced_termination": self.forced_termination,
-                "stream_bytes": self.stream_bytes, "cleanup_bytes": self.cleanup_bytes}
-
-
-@_dataclass(frozen=True)
-class _BridgeStoppedAttempt:
-    outcome: InvocationOutcome
-    final: Mapping[str, Any] | None
-    error: str | None
-    interruption: BaseException | None
-    facts: _BridgeProcessFacts
-
-
-@_dataclass(frozen=True)
-class _ToolBridgeBackend:
-    argv: tuple[str, ...]
-    timeout: int
-    limits: _BridgeLimits
-
-
-def _invoke_tool_dialogue(plan: ProcessInvocationPlan, session: _BridgeSession) -> _BridgeStoppedAttempt:
-    if not _bridge_supported():
-        raise ValueError("tool bridge requires POSIX nonreaping waitid, process-group controls, and Linux procfs")
-    result = _invoke_process(plan, session)
-    if not isinstance(result, _BridgeStoppedAttempt):
-        raise TypeError("dialogue invocation returned an ordinary outcome")
-    return result
-
-
-def _bridge_supported() -> bool:
-    return sys.platform == "linux" and Path("/proc/self/stat").is_file() and all(callable(getattr(os, name, None)) for name in
-        ("waitid", "killpg", "set_blocking")) and all(isinstance(getattr(os, name, None), int)
-        for name in ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT"))
-
-
-def _bridge_frame_bytes(frame: Mapping[str, Any], limit: int) -> bytes:
-    remaining = limit - 1
-    pending: list[Iterator[Any]] = [iter((frame,))]
-    while pending:
-        try:
-            value = next(pending[-1])
-        except StopIteration:
-            pending.pop()
-            continue
-        if isinstance(value, str):
-            remaining -= len(value) + 2
-        elif isinstance(value, dict):
-            remaining -= 2 + len(value) + max(0, len(value) - 1)
-            pending.append(part for pair in value.items() for part in pair)
-        elif isinstance(value, (list, tuple)):
-            remaining -= 2 + max(0, len(value) - 1)
-            pending.append(iter(value))
-        elif isinstance(value, int) and not isinstance(value, bool):
-            remaining -= max(1, value.bit_length() // 4) + (value < 0)
-        else:
-            remaining -= 1
-        if remaining < 0:
-            raise ValueError("tool bridge outbound frame exceeds configured bound")
-    encoded = bytearray()
-    for text in json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":")).iterencode(frame):
-        for index in range(0, len(text), 4096):
-            chunk = text[index:index + 4096].encode("utf-8", errors="strict")
-            if len(encoded) + len(chunk) + 1 > limit:
-                raise ValueError("tool bridge outbound frame exceeds configured bound")
-            encoded.extend(chunk)
-    encoded.extend(b"\n")
-    return bytes(encoded)
-
-
-def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
-    """Typed subprocess owner for every spawned runner/adapter process.
-
-    The owner accepts one fully validated plan, so internal callers cannot
-    bypass cwd, timeout, argv, environment, or stdin construction. Completion
-    state is classified once here; consumers cannot independently assemble
-    contradictory returncode/timeout/completeness booleans."""
-    result = _invoke_process(plan)
-    if not isinstance(result, InvocationOutcome):
-        raise TypeError("ordinary invocation returned a dialogue attempt")
-    return result
-
-
-def _invoke_process(plan: ProcessInvocationPlan, dialogue: _BridgeSession | None = None) -> InvocationOutcome | _BridgeStoppedAttempt:
-    if not isinstance(plan, ProcessInvocationPlan):
-        raise TypeError("invoke_argv_with_timeout requires a ProcessInvocationPlan")
-    argv = list(plan.argv)
-    cwd = plan.cwd
-    env = None if plan.environment is None else dict(plan.environment)
-    timeout = int(plan.timeout_s)
-    input_text = plan.input_text
-    redact_stderr = plan.redact_output or (lambda text: text)
-    redact_stdout = redact_stderr if plan.redact_stdout else (lambda text: text)
-
-    def retain_raw(out: bytes | str | None, err: bytes | str | None,
-                   returncode: int | None, *, timed_out: bool,
-                   communication_complete: bool = False) -> None:
-        if plan.raw_capture is not None:
-            plan.raw_capture.facts = RawProcessFacts(
-                out, err, returncode, int((time.time() - start) * 1000), timed_out,
-                communication_complete)
-
-    def _wire_text(value: Any, redact: Callable[[str], str]) -> tuple[str, bool]:
-        if value is None:
-            return "", True
-        if isinstance(value, bytes):
-            try:
-                return redact(value.decode("utf-8", errors="strict")), True
-            except UnicodeDecodeError:
-                # Keep an artifact-safe representation, but carry the failed
-                # strict-decode bit separately so no parser can promote it.
-                return redact(value.decode("utf-8", errors="backslashreplace")), False
-        return redact(str(value)), True
-
-    def kill_process_group(pgid: int) -> dict[str, Any]:
-        """Force-kill remaining members of the CLI's original POSIX process group.
-
-        A completed group leader has no legitimate background work in the eval
-        harness. Use one immediate signal instead of a TERM/poll/KILL sequence:
-        this minimizes both the post-reap PGID-reuse window and the time a plugin
-        helper can continue changing its isolated home. Cleanup retries absorb
-        the short interval between signal delivery and filesystem quiescence.
-        """
-        killpg = getattr(os, "killpg", None)
-        sigkill = getattr(signal, "SIGKILL", None)
-        if not callable(killpg) or not isinstance(sigkill, int):
-            return {"status": "unsupported"}
-        try:
-            killpg(pgid, sigkill)
-        except ProcessLookupError:
-            return {"status": "not_needed"}
-        except OSError as exc:
-            return {"status": "warning", "signal": "SIGKILL",
-                    "error": errno.errorcode.get(exc.errno, type(exc).__name__)}
-        return {"status": "kill_sent", "signal": "SIGKILL"}
-
-    def stop_session(proc: subprocess.Popen[bytes], signum: int) -> None:
-        killpg = getattr(os, "killpg", None)
-        sigkill = getattr(signal, "SIGKILL", None)
-        if not callable(killpg) or not isinstance(sigkill, int):
-            proc.kill()
-            return
-        # The unreaped leader keeps the group id reserved until SIGKILL is sent.
-        try:
-            killpg(proc.pid, signum)
-            deadline = time.monotonic() + AGENT_STOP_GRACE_S
-            while not process_leader_exited(proc) and time.monotonic() < deadline:
-                time.sleep(PROCESS_LEADER_POLL_INTERVAL_S)
-            killpg(proc.pid, sigkill)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
-        except subprocess.TimeoutExpired:
-            pass
-
-    def process_leader_exited(proc: subprocess.Popen[bytes]) -> bool:
-        """Observe POSIX leader exit without reaping it when the OS supports that."""
-        if proc.returncode is not None:
-            return True
-        waitid = getattr(os, "waitid", None)
-        p_pid = getattr(os, "P_PID", None)
-        wexited = getattr(os, "WEXITED", None)
-        wnohang = getattr(os, "WNOHANG", None)
-        wnowait = getattr(os, "WNOWAIT", None)
-        if (hasattr(os, "killpg") and callable(waitid)
-                and isinstance(p_pid, int)
-                and isinstance(wexited, int)
-                and isinstance(wnohang, int)
-                and isinstance(wnowait, int)):
-            try:
-                status = waitid(p_pid, proc.pid,
-                                wexited | wnohang | wnowait)
-            except (ChildProcessError, OSError):
-                if dialogue is not None:
-                    return False
-            else:
-                return status is not None
-        return proc.poll() is not None
-
-    def observe_recovery_process(proc: subprocess.Popen[bytes], capture: RecoveryCapture,
-                                 input_bytes: bytes | None, start: float) -> InvocationOutcome:
-        deadline = time.monotonic() + timeout
-        state = RecoveryProcessState.COMPLETE
-        error: str | None = None
-        observed: bytes | None = None
-        out, err = b"", b""
-        started = False
-        drained = False
-        signal_sent: int | None = None
-        checkpoint_live = False
-        interruption: BaseException | None = None
-        try:
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    state = RecoveryProcessState.DEADLINE
-                    break
-                if process_leader_exited(proc):
-                    state = (RecoveryProcessState.NATURAL_COMPLETION if capture.checkpoint
-                             else RecoveryProcessState.COMPLETE)
-                    break
-                if capture.checkpoint is not None:
-                    try:
-                        candidate = recovery_file_bytes(cwd, capture.checkpoint.checkpoint_path)
-                    except FileNotFoundError:
-                        candidate = None
-                    if candidate is not None:
-                        if not capture.checkpoint.matches(candidate):
-                            state = RecoveryProcessState.CHECKPOINT_MISMATCH
-                            break
-                        observed = candidate
-                        try:
-                            (capture.directory / "checkpoint-observed.bin").write_bytes(observed)
-                        except OSError as exc:
-                            state = RecoveryProcessState.CAPTURE_FAILED
-                            error = f"{type(exc).__name__}: {exc}"
-                            break
-                        if time.monotonic() >= deadline:
-                            state = RecoveryProcessState.DEADLINE
-                            break
-                        if process_leader_exited(proc):
-                            state = RecoveryProcessState.NATURAL_COMPLETION
-                            break
-                        checkpoint_live = True
-                        state = RecoveryProcessState.CHECKPOINT_STOP
-                        break
-                try:
-                    out, err = proc.communicate(
-                        input=input_bytes if not started else None,
-                        timeout=min(PROCESS_LEADER_POLL_INTERVAL_S, remaining))
-                except subprocess.TimeoutExpired as exc:
-                    started = True
-                    out, err = exc.output or b"", exc.stderr or b""
-                except Exception as exc:
-                    state = RecoveryProcessState.CAPTURE_FAILED
-                    error = f"{type(exc).__name__}: {exc}"
-                    break
-                else:
-                    drained = True
-                    state = (RecoveryProcessState.NATURAL_COMPLETION if capture.checkpoint
-                             else RecoveryProcessState.COMPLETE)
-                    break
-        except BaseException as exc:
-            state = RecoveryProcessState.OBSERVER_FAILED
-            error = f"{type(exc).__name__}: {exc}"
-            if not isinstance(exc, Exception):
-                interruption = exc
-        deadline_observed = (state is RecoveryProcessState.DEADLINE
-                             or (state is RecoveryProcessState.CHECKPOINT_STOP
-                                 and time.monotonic() >= deadline))
-        try:
-            if state is RecoveryProcessState.CHECKPOINT_STOP:
-                if deadline_observed:
-                    state = RecoveryProcessState.DEADLINE
-                elif process_leader_exited(proc):
-                    state = RecoveryProcessState.NATURAL_COMPLETION
-                else:
-                    try:
-                        killpg = getattr(os, "killpg", None)
-                        if not callable(killpg):
-                            raise OSError("intentional checkpoint stop requires POSIX process groups")
-                        killpg(proc.pid, signal.SIGTERM)
-                        signal_sent = int(signal.SIGTERM)
-                    except OSError as exc:
-                        if isinstance(exc, ProcessLookupError) or exc.errno == errno.ESRCH:
-                            state = RecoveryProcessState.NATURAL_COMPLETION
-                        else:
-                            state = RecoveryProcessState.SIGNAL_FAILED
-                            error = f"{type(exc).__name__}: {exc}"
-            if state is RecoveryProcessState.CHECKPOINT_STOP:
-                try:
-                    out, err = proc.communicate(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
-                    drained = True
-                except subprocess.TimeoutExpired as exc:
-                    out, err = exc.output or out, exc.stderr or err
-                except Exception as exc:
-                    state = RecoveryProcessState.CAPTURE_FAILED
-                    error = f"{type(exc).__name__}: {exc}"
-            group_cleanup = kill_process_group(proc.pid)
-            if group_cleanup["status"] in {"unsupported", "warning"}:
-                if proc.poll() is None:
-                    proc.kill()
-                if state in {RecoveryProcessState.COMPLETE, RecoveryProcessState.CHECKPOINT_STOP}:
-                    state = RecoveryProcessState.CLEANUP_FAILED
-            if not drained:
-                try:
-                    out, err = proc.communicate(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
-                    drained = True
-                except subprocess.TimeoutExpired as exc:
-                    out, err = exc.output or out, exc.stderr or err
-                    for pipe in (proc.stdout, proc.stderr):
-                        if pipe is not None:
-                            pipe.close()
-                    if state in {RecoveryProcessState.COMPLETE, RecoveryProcessState.CHECKPOINT_STOP}:
-                        state = RecoveryProcessState.CAPTURE_FAILED
-                except Exception as exc:
-                    state = RecoveryProcessState.CAPTURE_FAILED
-                    error = f"{type(exc).__name__}: {exc}"
-                    for pipe in (proc.stdout, proc.stderr):
-                        if pipe is not None:
-                            pipe.close()
-            proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
-            group_deadline = time.monotonic() + PROCESS_PIPE_DRAIN_GRACE_S
-            while True:
-                group_stopped, group_observation = recovery_group_stopped(proc.pid)
-                if group_stopped or time.monotonic() >= group_deadline:
-                    break
-                time.sleep(PROCESS_LEADER_POLL_INTERVAL_S)
-            if not group_stopped and state in {RecoveryProcessState.COMPLETE, RecoveryProcessState.CHECKPOINT_STOP}:
-                state = RecoveryProcessState.CLEANUP_FAILED
-            if state is RecoveryProcessState.CHECKPOINT_STOP:
-                assert capture.checkpoint is not None
-                sigkill = getattr(signal, "SIGKILL", None)
-                signal_exits = {-int(signal.SIGTERM)}
-                if isinstance(sigkill, int):
-                    signal_exits.add(-sigkill)
-                if proc.returncode not in signal_exits:
-                    state = RecoveryProcessState.NATURAL_COMPLETION
-                else:
-                    try:
-                        stable_checkpoint = recovery_file_bytes(cwd, capture.checkpoint.checkpoint_path)
-                    except FileNotFoundError:
-                        state = RecoveryProcessState.CHECKPOINT_MISMATCH
-                    except Exception as exc:
-                        state = RecoveryProcessState.OBSERVER_FAILED
-                        error = f"{type(exc).__name__}: {exc}"
-                    else:
-                        if stable_checkpoint != observed:
-                            state = RecoveryProcessState.CHECKPOINT_MISMATCH
-        except BaseException as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            if not isinstance(exc, Exception):
-                interruption = exc
-            if state in {RecoveryProcessState.COMPLETE, RecoveryProcessState.CHECKPOINT_STOP}:
-                state = RecoveryProcessState.CLEANUP_FAILED
-            group_cleanup = {"status": "warning", "error": error}
-            group_stopped, group_observation = False, "cleanup_exception"
-            try:
-                kill_process_group(proc.pid)
-            except Exception as exc:
-                group_cleanup["retry_error"] = f"{type(exc).__name__}: {exc}"
-            try:
-                if proc.poll() is None:
-                    proc.kill()
-                try:
-                    out, err = proc.communicate(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
-                    drained = True
-                except subprocess.TimeoutExpired as exc:
-                    out, err = exc.output or out, exc.stderr or err
-                    for pipe in (proc.stdout, proc.stderr):
-                        if pipe is not None:
-                            pipe.close()
-                proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
-            except Exception as exc:
-                group_cleanup["drain_error"] = f"{type(exc).__name__}: {exc}"
-        if state is RecoveryProcessState.COMPLETE and proc.returncode != 0:
-            state = RecoveryProcessState.PROCESS_FAILED
-        facts = {"state": state.value, "pid": proc.pid, "process_group": proc.pid,
-                 "os_returncode": proc.returncode, "signal_sent": signal_sent,
-                 "leader_reaped": proc.returncode is not None, "pipes_drained": drained,
-                 "group_stopped": group_stopped, "group_observation": group_observation,
-                 "process_group_cleanup": group_cleanup,
-                 "checkpoint_observed_live": checkpoint_live,
-                 "checkpoint_sha256": hashlib.sha256(observed).hexdigest() if observed is not None else None,
-                 "compatibility_returncode": 124 if deadline_observed else proc.returncode,
-                 "error": error}
-        for name, content in (("stdout.bin", out), ("stderr.bin", err)):
-            try:
-                (capture.directory / name).write_bytes(content)
-            except Exception as exc:
-                state = RecoveryProcessState.CAPTURE_FAILED
-                facts["state"] = state.value
-                facts["error"] = f"{type(exc).__name__}: {exc}"
-        facts["raw_sha256"] = {"stdout.bin": hashlib.sha256(out).hexdigest(),
-                               "stderr.bin": hashlib.sha256(err).hexdigest()}
-        facts["raw_files_present"] = {
-            name: (capture.directory / name).is_file() for name in ("stdout.bin", "stderr.bin")}
-        try:
-            write_json(capture.directory / "process.json", facts)
-        except Exception as exc:
-            state = RecoveryProcessState.CAPTURE_FAILED
-            facts["state"] = state.value
-            facts["error"] = f"{type(exc).__name__}: {exc}"
-        capture.state = state
-        if interruption is not None:
-            raise interruption
-        if proc.returncode is None:
-            return InvocationOutcome.harness_failed("recovery process leader was not reaped", metadata=facts)
-        stdout, stdout_valid = _wire_text(out, redact_stdout)
-        stderr, stderr_valid = _wire_text(err, redact_stderr)
-        metadata = {"recovery_process": facts, "process_group_cleanup": group_cleanup,
-                    "stdout_utf8_valid": stdout_valid, "stderr_utf8_valid": stderr_valid}
-        elapsed = int((time.time() - start) * 1000)
-        if deadline_observed:
-            return InvocationOutcome.from_timeout(stdout=stdout, stderr=stderr[:4000],
-                                                  elapsed_ms=elapsed, metadata=metadata)
-        return InvocationOutcome.from_process(stdout=stdout, stderr=stderr[:4000],
-                                              returncode=proc.returncode,
-                                              elapsed_ms=elapsed, metadata=metadata)
-
-    def observe_tool_dialogue(proc: subprocess.Popen[bytes], session: _BridgeSession) -> _BridgeStoppedAttempt:
-        if proc.stdin is None or proc.stdout is None or proc.stderr is None:
-            raise AssertionError("bridge lost its owned pipes")
-        stdin, stdout_pipe, stderr_pipe = proc.stdin, proc.stdout, proc.stderr
-        deadline = time.monotonic() + timeout
-        streams = {"stdout": bytearray(), "stderr": bytearray()}
-        buffer = bytearray()
-        outbound = input_bytes or b""
-        written = 0
-        outbound_total = len(outbound)
-        state: Literal["opening", "ready", "writing", "awaiting_ack", "final"] = "opening"
-        final: Mapping[str, Any] | None = None
-        error: str | None = None
-        interruption: BaseException | None = None
-        timed_out = False
-        stream_total = 0
-        cleanup_bytes = 0
-        leader_seen_at: float | None = None
-        raw_handles: dict[str, Any] = {}
-        selector = selectors.DefaultSelector()
-
-        def receive(frame: Any) -> None:
-            nonlocal state, final, outbound, written, outbound_total, error
-            if not isinstance(frame, dict) or type(frame.get("protocol_version")) is not int or frame["protocol_version"] != 1:
-                raise ValueError("tool bridge requires a version 1 object frame")
-            kind = frame.get("type")
-            if kind == "final" and final is None:
-                final = freeze_json_mapping(frame, "bridge final candidate")
-            if kind == "call":
-                if set(frame) != {"type", "protocol_version", "id", "tool", "input"} or state != "ready":
-                    raise ValueError("tool bridge call requires ready state and exact fields")
-                if type(frame["id"]) is not int or not 1 <= frame["id"] <= 2**63 - 1:
-                    raise ValueError("tool bridge request id must be a positive bounded integer")
-                response = session.journal.offer_bridge(frame, session.limits.frame_bytes)
-                outbound = _bridge_frame_bytes(response, session.limits.frame_bytes)
-                if outbound_total + len(outbound) > session.limits.outbound_bytes:
-                    raise ValueError("tool bridge outbound stream exceeds configured bound")
-                outbound_total += len(outbound)
-                written = 0
-                state = "writing"
-                selector.register(stdin, selectors.EVENT_WRITE, "stdin")
-            elif kind == "ack":
-                if state != "awaiting_ack":
-                    raise ValueError("tool bridge ACK requires a completely written response")
-                session.journal.acknowledge_bridge(frame)
-                state = "ready"
-            elif kind == "final":
-                if state != "ready":
-                    raise ValueError("tool bridge final requires ready state")
-                response = {key: value for key, value in frame.items() if key not in {"type", "protocol_version"}}
-                try:
-                    if set(frame) - {"type", "protocol_version", "answer", "trace", "usage", "telemetry_scope"} or "answer" not in frame:
-                        raise ValueError("tool bridge final requires exact fields")
-                    validate_subagent_response(response)
-                    if not response["answer"].strip():
-                        raise ValueError("tool bridge final answer must be nonblank")
-                except (TypeError, ValueError) as exc:
-                    error = f"tool bridge final rejected: {exc}"
-                state = "final"
-                stdin.close()
-            else:
-                raise ValueError("unexpected tool bridge frame")
-
-        def pump(duration: float, *, cleanup: bool = False) -> None:
-            nonlocal written, state, stream_total, cleanup_bytes
-            for key, _mask in selector.select(duration):
-                channel = key.data
-                pipe = stdout_pipe if channel == "stdout" else stderr_pipe
-                if channel == "stdin":
-                    try:
-                        count = os.write(stdin.fileno(), outbound[written:written + 16384])
-                    except BlockingIOError:
-                        continue
-                    written += count
-                    if written == len(outbound):
-                        selector.unregister(stdin)
-                        state = "ready" if state == "opening" else "awaiting_ack"
-                    continue
-                try:
-                    data = os.read(pipe.fileno(), 16384)
-                except BlockingIOError:
-                    continue
-                if not data:
-                    selector.unregister(pipe)
-                    pipe.close()
-                    continue
-                streams[channel].extend(data)
-                if cleanup:
-                    cleanup_bytes += len(data)
-                    if cleanup_bytes > 64 * 1024:
-                        raise ValueError("tool bridge cleanup drain exceeds bound")
-                else:
-                    stream_total += len(data)
-                raw_handles[channel].write(data)
-                raw_handles[channel].flush()
-                os.fsync(raw_handles[channel].fileno())
-                if cleanup:
-                    continue
-                if stream_total > session.limits.stream_bytes:
-                    raise ValueError("tool bridge stdout/stderr exceeds configured bound")
-                if channel == "stdout":
-                    buffer.extend(data)
-                    while b"\n" in buffer:
-                        position = buffer.index(b"\n")
-                        if position + 1 > session.limits.frame_bytes:
-                            raise ValueError("tool bridge inbound frame exceeds configured bound")
-                        line = bytes(buffer[:position])
-                        del buffer[:position + 1]
-                        receive(strict_json_loads(line.decode("utf-8", errors="strict")))
-                    if len(buffer) >= session.limits.frame_bytes:
-                        raise ValueError("tool bridge unterminated frame exceeds configured bound")
-
-        try:
-            for channel in streams:
-                raw_handles[channel] = (session.directory / (channel + ".bin")).open("xb")
-                raw_handles[channel].flush()
-                os.fsync(raw_handles[channel].fileno())
-            descriptor = os.open(session.directory, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            if sys.platform == "linux":
-                for pipe in (stdin, stdout_pipe, stderr_pipe):
-                    os.set_blocking(pipe.fileno(), False)
-            selector.register(stdin, selectors.EVENT_WRITE, "stdin")
-            selector.register(stdout_pipe, selectors.EVENT_READ, "stdout")
-            selector.register(stderr_pipe, selectors.EVENT_READ, "stderr")
-            while True:
-                if _stop_signal is not None:
-                    raise KeyboardInterrupt
-                now = time.monotonic()
-                if process_leader_exited(proc):
-                    leader_seen_at = leader_seen_at or now
-                    if all(key.data == "stdin" for key in selector.get_map().values()):
-                        break
-                    if now - leader_seen_at >= PROCESS_PIPE_DRAIN_GRACE_S:
-                        raise ValueError("tool bridge pipes remained open after leader exit")
-                if now >= deadline:
-                    timed_out = True
-                    raise TimeoutError("tool bridge deadline expired")
-                pump(min(PROCESS_LEADER_POLL_INTERVAL_S, deadline - now))
-            if buffer:
-                raise ValueError("tool bridge has an unterminated final stream tail")
-            if state != "final":
-                raise ValueError("tool bridge EOF without final response")
-        except BaseException as exc:
-            error = f"tool bridge failed: {type(exc).__name__}: {exc}"
-            if not isinstance(exc, Exception):
-                interruption = exc
-        natural_exit = process_leader_exited(proc)
-        group_was_stopped, _observation = recovery_group_stopped(proc.pid)
-        forced = not natural_exit or not group_was_stopped
-        cleanup = kill_process_group(proc.pid)
-        if cleanup.get("status") in {"unsupported", "warning"} and not natural_exit:
-            proc.kill()
-        if not stdin.closed:
-            if stdin in selector.get_map():
-                selector.unregister(stdin)
-            stdin.close()
-        drain_deadline = time.monotonic() + PROCESS_PIPE_DRAIN_GRACE_S
-        try:
-            while selector.get_map() and time.monotonic() < drain_deadline:
-                pump(min(PROCESS_LEADER_POLL_INTERVAL_S, max(0, drain_deadline - time.monotonic())), cleanup=True)
-        except BaseException as exc:
-            error = error or f"tool bridge drain failed: {exc}"
-            if not isinstance(exc, Exception):
-                interruption = interruption or exc
-        drained = not selector.get_map()
-        selector.close()
-        for pipe in (stdout_pipe, stderr_pipe):
-            if not pipe.closed:
-                pipe.close()
-        for handle in raw_handles.values():
-            try:
-                handle.flush()
-                os.fsync(handle.fileno())
-                handle.close()
-            except OSError as exc:
-                error = error or f"tool bridge raw capture failed: {exc}"
-        group_stopped, group_observation = recovery_group_stopped(proc.pid)
-        group_deadline = time.monotonic() + AGENT_STOP_GRACE_S
-        while not group_stopped and time.monotonic() < group_deadline:
-            time.sleep(PROCESS_LEADER_POLL_INTERVAL_S)
-            group_stopped, group_observation = recovery_group_stopped(proc.pid)
-        try:
-            proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            forced = True
-            try:
-                proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
-            except subprocess.TimeoutExpired:
-                error = error or "tool bridge leader reap timed out"
-        out, err = bytes(streams["stdout"]), bytes(streams["stderr"])
-        if final is None:
-            for line in out.split(b"\n")[:-1]:
-                try:
-                    if len(line) + 1 > session.limits.frame_bytes:
-                        continue
-                    candidate = strict_json_loads(line.decode("utf-8", errors="strict"))
-                    if isinstance(candidate, dict) and candidate.get("type") == "final" and type(candidate.get("protocol_version")) is int and candidate["protocol_version"] == 1:
-                        final = freeze_json_mapping(candidate, "bridge final candidate")
-                        break
-                except (TypeError, ValueError):
-                    continue
-        stdout, stdout_valid = _wire_text(out, redact_stdout)
-        stderr, stderr_valid = _wire_text(err, redact_stderr)
-        facts = _BridgeProcessFacts(proc.pid, proc.returncode, natural_exit, group_stopped,
-            group_observation, drained, proc.returncode is not None, timed_out, forced, stream_total, cleanup_bytes)
-        if not stdout_valid or not stderr_valid:
-            error = error or "tool bridge streams are not valid UTF-8"
-        if proc.returncode != 0 or not natural_exit or not group_stopped or not drained or forced:
-            error = error or "tool bridge did not complete naturally with a stopped group and drained pipes"
-        retain_raw(out, err, proc.returncode, timed_out=timed_out, communication_complete=drained)
-        process_evidence = {**facts.as_dict(), "error": error, "process_group_cleanup": cleanup,
-                            "raw_sha256": {name + ".bin": hashlib.sha256(data).hexdigest()
-                                           for name, data in streams.items()},
-                            "stdout_utf8_valid": stdout_valid, "stderr_utf8_valid": stderr_valid}
-        try:
-            with (session.directory / "process.json").open("x", encoding="utf-8") as handle:
-                json.dump(process_evidence, handle, ensure_ascii=False, allow_nan=False)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            descriptor = os.open(session.directory, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        except BaseException as exc:
-            error = error or f"tool bridge process evidence failed: {exc}"
-            if not isinstance(exc, Exception):
-                interruption = interruption or exc
-        metadata = {"tool_bridge_process": process_evidence, "stdout_utf8_valid": stdout_valid,
-                    "stderr_utf8_valid": stderr_valid, "process_group_cleanup": cleanup}
-        if timed_out:
-            outcome = InvocationOutcome.from_timeout(stdout=stdout, stderr=stderr[:4000],
-                elapsed_ms=int((time.time() - start) * 1000), metadata=metadata)
-        elif proc.returncode is None:
-            outcome = InvocationOutcome.harness_failed("tool bridge leader was not reaped", metadata=metadata)
-        else:
-            outcome = InvocationOutcome.from_process(stdout=stdout, stderr=stderr[:4000], returncode=proc.returncode,
-                elapsed_ms=int((time.time() - start) * 1000), metadata=metadata)
-        return _BridgeStoppedAttempt(outcome, final, error, interruption, facts)
-
-    try:
-        input_bytes = input_text.encode("utf-8") if input_text is not None else None
-    except UnicodeEncodeError:
-        return InvocationOutcome.spawn_failed(
-            stderr="subprocess stdin is not valid UTF-8", elapsed_ms=0)
-    start = time.time()
-    capture = plan.recovery_capture
-    if capture is not None:
-        execution_environment = os.environ if env is None else env
-        if os.path.dirname(argv[0]):
-            executable_path = Path(argv[0])
-            if not executable_path.is_absolute():
-                executable_path = cwd / executable_path
-            executable = shutil.which(str(executable_path))
-        else:
-            search_path = os.pathsep.join(
-                str(Path(part) if Path(part).is_absolute() else cwd / part)
-                for part in execution_environment.get("PATH", os.defpath).split(os.pathsep))
-            executable = shutil.which(argv[0], path=search_path)
-        wrapper = {"client_argv": argv, "cwd": str(cwd), "executable": executable,
-                   "executable_observation": "resolved from client cwd and PATH before spawn",
-                   "executable_sha256": None, "version": None,
-                   "effective_exec_argv": None, "effective_exec_argv_source": None,
-                   "execution_boundary": (
-                       "existing backend client subprocess; original POSIX process group"
-                       if callable(getattr(os, "killpg", None)) else
-                       "existing backend client subprocess; process-group control unavailable"),
-                   "evidence_directory": str(capture.directory.resolve()),
-                   "evidence_write_protection": "not established by the runner"}
-        if executable is not None:
-            try:
-                wrapper["executable_sha256"] = hashlib.sha256(Path(executable).read_bytes()).hexdigest()
-            except OSError:
-                pass
-        write_json(capture.directory / "invocation.json", wrapper)
-    try:
-        proc = subprocess.Popen(
-            argv,
-            cwd=str(cwd) if cwd is not None else None,
-            env=env,
-            stdin=subprocess.PIPE if input_text is not None else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-    except (OSError, ValueError) as exc:
-        if capture is not None:
-            capture.state = RecoveryProcessState.SPAWN_FAILED
-            write_json(capture.directory / "process.json", {
-                "state": capture.state.value, "os_returncode": None, "pid": None,
-                "error": f"{type(exc).__name__}: {exc}",
-                "raw_sha256": {"stdout.bin": hashlib.sha256(b"").hexdigest(),
-                               "stderr.bin": hashlib.sha256(b"").hexdigest()}})
-            (capture.directory / "stdout.bin").write_bytes(b"")
-            (capture.directory / "stderr.bin").write_bytes(b"")
-        outcome = InvocationOutcome.spawn_failed(
-            stderr=redact_stderr(f"{type(exc).__name__}: {exc}")[:4000],
-            elapsed_ms=int((time.time() - start) * 1000),
-        )
-        if dialogue is not None:
-            return _BridgeStoppedAttempt(outcome, None, "bridge process failed to spawn", None,
-                _BridgeProcessFacts(None, None, False, False, "not_spawned", False, False, False, False, 0, 0))
-        return outcome
-    if dialogue is not None:
-        return observe_tool_dialogue(proc, dialogue)
-    if capture is not None:
-        return observe_recovery_process(proc, capture, input_bytes, start)
-    deadline = time.monotonic() + timeout
-    communication_started = False
-    communication_complete = False
-    communication_timeout: subprocess.TimeoutExpired | None = None
-    leader_exited = False
-    try:
-        while True:
-            if _stop_signal is not None:
-                raise KeyboardInterrupt
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                if communication_timeout is None:
-                    communication_timeout = subprocess.TimeoutExpired(argv, timeout)
-                leader_exited = process_leader_exited(proc)
-                break
-            try:
-                out, err = proc.communicate(
-                    input=(input_bytes
-                           if input_bytes is not None and not communication_started
-                           else None),
-                    timeout=min(PROCESS_LEADER_POLL_INTERVAL_S, remaining),
-                )
-            except subprocess.TimeoutExpired as exc:
-                communication_started = True
-                communication_timeout = exc
-                # ``communicate`` waits for pipe EOF as well as leader exit. Poll in
-                # short slices so a successful leader is not charged the full task
-                # timeout merely because one of its helpers inherited a capture fd.
-                leader_exited = process_leader_exited(proc)
-                if leader_exited:
-                    break
-            else:
-                retain_raw(out, err, proc.returncode, timed_out=False, communication_complete=True)
-                stdout, stdout_utf8_valid = _wire_text(out, redact_stdout)
-                stderr, stderr_utf8_valid = _wire_text(err, redact_stderr)
-                stderr, returncode, _timed_out = stderr[:4000], proc.returncode, False
-                communication_complete = True
-                break
-    except KeyboardInterrupt:
-        if communication_timeout is not None:
-            retain_raw(communication_timeout.output, communication_timeout.stderr,
-                       proc.returncode, timed_out=False)
-        stop_session(proc, _stop_signal or signal.SIGINT)
-        if communication_timeout is not None:
-            retain_raw(communication_timeout.output, communication_timeout.stderr,
-                       proc.returncode, timed_out=False)
-        raise
-    except BaseException:
-        stop_session(proc, signal.SIGTERM)
-        raise
-    if not communication_complete:
-        assert communication_timeout is not None
-        exc = communication_timeout
-        retain_raw(exc.output, exc.stderr, proc.returncode, timed_out=not leader_exited)
-        try:
-            group_cleanup = kill_process_group(proc.pid)
-        except Exception as cleanup_exc:
-            group_cleanup = {"status": "warning", "signal": None,
-                             "error": errno.errorcode.get(getattr(cleanup_exc, "errno", None), type(cleanup_exc).__name__)}
-        if not leader_exited and group_cleanup.get("status") in {"unsupported", "warning"}:
-            proc.kill()
-        drain_complete = False
-        try:
-            out, err = proc.communicate(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
-            drain_complete = True
-        except subprocess.TimeoutExpired as drain_exc:
-            # A detached child can outlive the original group and keep the pipe
-            # write ends open forever. Preserve the partial capture, close our
-            # read ends, and reap the group leader without waiting for that child.
-            out, err = drain_exc.output or exc.output, drain_exc.stderr or exc.stderr
-            posix_pipe_close = hasattr(os, "killpg")
-            if posix_pipe_close:
-                for pipe in (proc.stdout, proc.stderr):
-                    if pipe is not None:
-                        pipe.close()
-            try:
-                proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                try:
-                    proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
-                except subprocess.TimeoutExpired:
-                    group_cleanup = {**group_cleanup, "leader_reap": "timed_out"}
-            pipe_action = "closed" if posix_pipe_close else "abandoned"
-            pipe_warning = (
-                "capture pipes remained open after process-group termination"
-                if posix_pipe_close else
-                "capture pipes remained open; non-POSIX reader threads were abandoned"
-            )
-            group_cleanup = {**group_cleanup, "pipe_drain": pipe_action, "warning": pipe_warning}
-        retain_raw(out or exc.stdout, err if err is not None else exc.stderr,
-                   proc.returncode, timed_out=not leader_exited,
-                   communication_complete=drain_complete)
-        stdout, stdout_utf8_valid = _wire_text(out or exc.stdout, redact_stdout)
-        captured_stderr = err if err is not None else exc.stderr
-        if not leader_exited:
-            captured_stderr = captured_stderr or exc.stderr or str(exc)
-        stderr, stderr_utf8_valid = _wire_text(
-            captured_stderr, redact_stderr)
-        stderr = stderr[:4000]
-        returncode = proc.returncode if leader_exited and proc.returncode is not None else 124
-    else:
-        try:
-            group_cleanup = kill_process_group(proc.pid)
-        except Exception as exc:  # descendant cleanup cannot replace captured output
-            group_cleanup = {"status": "warning", "signal": None,
-                             "error": errno.errorcode.get(getattr(exc, "errno", None), type(exc).__name__)}
-    if group_cleanup.get("status") == "warning":
-        detail = str(group_cleanup.get("error") or "unknown error")
-        warning = f"process-group cleanup warning: {detail}"
-        stderr = _stderr_with_warning(stderr, warning)
-    if group_cleanup.get("warning"):
-        stderr = _stderr_with_warning(stderr, str(group_cleanup["warning"]))
-    outcome_metadata = {
-        "process_group_cleanup": group_cleanup,
-        "stdout_utf8_valid": stdout_utf8_valid,
-        "stderr_utf8_valid": stderr_utf8_valid,
-    }
-    if not communication_complete and not leader_exited:
-        return InvocationOutcome.from_timeout(
-            stdout=stdout, stderr=stderr,
-            elapsed_ms=int((time.time() - start) * 1000),
-            metadata=outcome_metadata,
-        )
-    return InvocationOutcome.from_process(
-        stdout=stdout, stderr=stderr, returncode=returncode,
-        elapsed_ms=int((time.time() - start) * 1000),
-        metadata=outcome_metadata,
-    )
-
-
-def run_argv_with_timeout(argv: list[str], *, cwd: Path | str | None = None,
-                          env: dict[str, str] | None = None, timeout: int,
-                          input_text: str | None = None) -> dict[str, Any]:
-    """Legacy dictionary boundary for external callers; internal code uses the typed owner."""
-    plan = ProcessInvocationPlan.from_values(
-        argv,
-        input_text=input_text,
-        cwd=Path.cwd() if cwd is None else cwd,
-        timeout_s=timeout,
-        environment=env,
-    )
-    return invoke_argv_with_timeout(plan).as_legacy_dict()
 
 
 def regex_hit(pattern: str, text: str, ci: bool = True) -> bool:
     flags = re.IGNORECASE if ci else 0
     return re.search(pattern, text, flags) is not None
-
-
-def repeated_command_max(commands: list[str]) -> int:
-    last = None
-    current = 0
-    best = 0
-    for command in commands:
-        normed = re.sub(r"\s+", " ", command.strip().casefold())
-        if normed and normed == last:
-            current += 1
-        else:
-            last = normed
-            current = 1 if normed else 0
-        best = max(best, current)
-    return best
 
 
 def metric_number(metrics: dict[str, Any], *keys: str) -> int | float | None:
@@ -8109,122 +5823,6 @@ def metric_number(metrics: dict[str, Any], *keys: str) -> int | float | None:
     return None
 
 
-# Every normalizer reads the leaf telemetry domain's token-usage alias table, so
-# provider payloads cannot be classified differently by two paths.
-USAGE_ALIASES = telemetry_domain.USAGE_ALIASES
-COST_PART_ALIASES: dict[str, tuple[str, ...]] = {
-    "input_cost": ("input_cost", "prompt_cost"),
-    "output_cost": ("output_cost", "completion_cost"),
-    "cache_read_cost": ("cache_read_cost",),
-    "cache_write_cost": ("cache_write_cost", "cache_creation_cost"),
-    "reasoning_cost": ("reasoning_cost",),
-}
-
-
-def _num(value: Any) -> float | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    try:
-        number = float(value)
-    except (OverflowError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
-def normalize_usage(raw: Any, *, source: str = "provider_reported") -> dict[str, Any]:
-    """The per-run usage_normalized block (issue #21): alias-normalized token
-    counts with explicit provenance. No usable numbers means {"source":
-    "missing"} — missing telemetry is never silently zero."""
-    if source not in USAGE_SOURCES:
-        raise ValueError(f"unknown usage source {source!r}; expected one of {sorted(USAGE_SOURCES)}")
-    out: dict[str, Any] = telemetry_domain.canonical_usage_counts(raw)
-    if source == "not_applicable":
-        return {"source": "not_applicable"}
-    if ("total_tokens" not in out and "input_tokens" in out
-            and "output_tokens" in out):
-        out["total_tokens"] = out["input_tokens"] + out["output_tokens"]
-    if not out:
-        return {"source": "missing"}
-    out["source"] = source
-    return out
-
-
-def normalize_cost(raw: Any, *, source: str = "provider_reported", currency: str = "USD",
-                   pricing_model: str | None = None, pricing_table_version: str | None = None,
-                   pricing_notes: list[str] | None = None) -> dict[str, Any]:
-    """The per-run cost_normalized block (issue #21): a provider-reported number
-    or cost object, or a price-table estimate, with currency and provenance.
-    Missing cost is marked missing, never zero."""
-    if source not in COST_SOURCES:
-        raise ValueError(f"unknown cost source {source!r}; expected one of {sorted(COST_SOURCES)}")
-    if source == "not_applicable":
-        return {"source": "not_applicable"}
-    if isinstance(raw, (int, float)) and (isinstance(raw, bool) or _num(raw) is None):
-        raise ValueError("cost measurement must be a finite number")
-    total = _num(raw)
-    parts: dict[str, float] = {}
-    resolved_currency = currency
-    if isinstance(raw, dict):
-        if raw.get("currency") is not None:
-            raw_currency = raw.get("currency")
-            if not isinstance(raw_currency, str) or not re.fullmatch(r"[A-Z]{3}", raw_currency):
-                raise ValueError("cost currency must be a three-letter uppercase code")
-            resolved_currency = raw_currency
-        total_observations: list[tuple[str, float]] = []
-        for key in ("total_cost", "total_cost_usd", "cost_usd", "total", "cost", "amount"):
-            if key not in raw or raw[key] is None:
-                continue
-            value = _num(raw[key])
-            if value is None:
-                raise ValueError(f"cost.{key} must be a finite number")
-            if key.endswith("_usd") and resolved_currency != "USD":
-                raise ValueError(f"cost.{key} cannot be labelled {resolved_currency}")
-            total_observations.append((key, value))
-        if total_observations:
-            values = {value for _, value in total_observations}
-            if len(values) != 1:
-                raise ValueError(
-                    f"conflicting total cost aliases: {dict(total_observations)}")
-            total = total_observations[0][1]
-        for norm_key, aliases in COST_PART_ALIASES.items():
-            observations: list[tuple[str, float]] = []
-            for alias in aliases:
-                if alias not in raw or raw[alias] is None:
-                    continue
-                value = _num(raw[alias])
-                if value is None:
-                    raise ValueError(f"cost.{alias} must be a finite number")
-                observations.append((alias, value))
-            if observations:
-                values = {value for _, value in observations}
-                if len(values) != 1:
-                    raise ValueError(
-                        f"conflicting aliases for {norm_key}: {dict(observations)}")
-                parts[norm_key] = observations[0][1]
-        if "components_complete" in raw and not isinstance(raw["components_complete"], bool):
-            raise ValueError("cost.components_complete must be boolean")
-        if total is None and parts and raw.get("components_complete") is True:
-            total = sum(parts.values())
-        elif total is not None and parts and raw.get("components_complete") is True:
-            component_total = sum(parts.values())
-            if not math.isclose(total, component_total, rel_tol=1e-12, abs_tol=1e-12):
-                raise ValueError(
-                    "complete cost components do not sum to the reported total")
-    if total is None:
-        return ({"source": "missing", "currency": resolved_currency,
-                 "observed_parts": parts, "reason": "partial_cost_components"}
-                if parts else {"source": "missing"})
-    if total < 0 or any(value < 0 for value in parts.values()):
-        raise ValueError("cost measurements must be nonnegative")
-    out: dict[str, Any] = {"currency": resolved_currency, **parts,
-                           "total_cost": total, "source": source}
-    if pricing_model:
-        out["pricing_model"] = pricing_model
-    if pricing_table_version:
-        out["pricing_table_version"] = pricing_table_version
-    if pricing_notes:
-        out["pricing_notes"] = list(pricing_notes)
-    return out
 
 
 def run_cost_facts(merged: dict[str, Any]) -> dict[str, Any]:
@@ -8573,1514 +6171,11 @@ def process_or_efficiency_assertion_result(
     return None, f"unsupported trace assertion {atype!r}"
 
 
-def raw_trace_value(record: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if key in record:
-            return record[key]
-    for container_key in ["message", "delta", "data", "item"]:
-        nested = record.get(container_key)
-        if isinstance(nested, dict):
-            for key in keys:
-                if key in nested:
-                    return nested[key]
-    return None
 
-
-def raw_trace_input_value(record: dict[str, Any], *keys: str) -> Any:
-    """Invocation arguments may supply paths/commands, never lifecycle facts."""
-    value = raw_trace_value(record, *keys)
-    if value is not None:
-        return value
-    for container_key in ("tool_input", "input", "details", "args"):
-        nested = record.get(container_key)
-        if isinstance(nested, dict):
-            for key in keys:
-                if key in nested:
-                    return nested[key]
-    return None
-
-
-def raw_trace_has_key(record: dict[str, Any], *keys: str) -> bool:
-    if any(key in record for key in keys):
-        return True
-    for container_key in ["message", "delta", "data", "item"]:
-        nested = record.get(container_key)
-        if isinstance(nested, dict) and any(key in nested for key in keys):
-            return True
-    return False
-
-
-def stringify_trace_value(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return " ".join(stringify_trace_value(v) for v in value)
-    if isinstance(value, dict):
-        for key in ["command", "cmd", "content", "text", "path"]:
-            if key in value:
-                return stringify_trace_value(value[key])
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
-    return str(value)
-
-
-def parse_trace_jsonl_text_with_lines(
-    text: str, *, strict_json_errors: bool = True, strict: bool = True,
-) -> tuple[list[dict[str, Any]], list[str], list[int], list[str]]:
-    """Parse JSONL while retaining each object's physical source line.
-
-    Blank, malformed, and non-object lines do not become records, but they do
-    occupy source lines. Keeping that mapping makes every emitted raw_ref
-    resolvable against the original trace.jsonl rather than a filtered ordinal.
-
-    `strict=True` is the artifact rule (`strict_json_loads`: a repeated object
-    key is a defect). `strict=False` is the external-CLI stream rule
-    (`parse_stream_json`: a repeated key resolves last-value-wins and is
-    reported in the fourth result as `line N: key`), so a valid line an agent
-    CLI emitted is never dropped. Every other failure is unchanged: a line that
-    is not JSON is skipped and recorded, and a non-finite constant raises (or
-    is recorded when `strict_json_errors` is off).
-    """
-    records: list[dict[str, Any]] = []
-    errors: list[str] = []
-    record_lines: list[int] = []
-    duplicate_keys: list[str] = []
-    for line_number, line in enumerate(text.splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            if strict:
-                obj = strict_json_loads(line)
-            else:
-                parsed = parse_stream_json(line)
-                obj = parsed.value
-                duplicate_keys.extend(f"line {line_number}: {key}" for key in parsed.duplicate_keys)
-        except json.JSONDecodeError as exc:
-            if isinstance(exc, StrictJSONViolation) and strict_json_errors:
-                raise ValueError(exc.msg) from exc
-            errors.append(f"line {line_number}: {exc}")
-            continue
-        except (TypeError, ValueError, RecursionError) as exc:
-            if strict_json_errors:
-                raise ValueError(f"line {line_number}: {exc}") from exc
-            errors.append(f"line {line_number}: {type(exc).__name__}: {exc}")
-            continue
-        if isinstance(obj, dict):
-            records.append(obj)
-            record_lines.append(line_number)
-        else:
-            errors.append(f"line {line_number}: JSON value is not an object")
-    return records, errors, record_lines, duplicate_keys
-
-
-def parse_trace_jsonl_text(
-    text: str, *, strict: bool = True,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    records, errors, _, _ = parse_trace_jsonl_text_with_lines(text, strict=strict)
-    return records, errors
-
-
-def stream_duplicate_keys(text: str) -> list[str]:
-    """`line N: key` for every duplicate object key the stream rule resolved in
-    an external CLI stream; empty when the strict rule would have accepted
-    every line. Never raises: it only annotates a row."""
-    _, _, _, duplicates = parse_trace_jsonl_text_with_lines(
-        text, strict_json_errors=False, strict=False)
-    return duplicates
-
-
-def load_trace_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
-    # trace.jsonl is the provider's stream preserved verbatim, so it is read
-    # with the stream rule the writer used; the harness-authored sidecars
-    # (events.json, metrics.json, metadata.json) stay on the strict rule.
-    return parse_trace_jsonl_text(path.read_text(encoding="utf-8", errors="replace"), strict=False)
-
-
-def nested_item_type(record: dict[str, Any]) -> str:
-    item = record.get("item")
-    if isinstance(item, dict):
-        value = item.get("type") or item.get("kind") or item.get("name")
-        return str(value or "")
-    return ""
-
-
-_RAW_TYPE_WORD_BOUNDARY = re.compile(r"[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
-
-
-def raw_type_tokens(raw_type: str) -> frozenset[str]:
-    """Whole-word tokens of a provider type name, split on non-alphanumerics
-    and camelCase boundaries, each casefolded. Pass the original-case string;
-    casefolding first collapses the camelCase boundary this exists to find."""
-    return frozenset(part.casefold() for part in _RAW_TYPE_WORD_BOUNDARY.split(raw_type) if part)
-
-
-def usage_number(usage: dict[str, Any], *keys: str) -> int | None:
-    normalized = normalize_usage(usage, source="trace_normalized")
-    for key in keys:
-        value = normalized.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
-            return value
-    return None
-
-
-def normalize_trace_record(record: dict[str, Any], *, source: str, index: int, line: int) -> dict[str, Any]:
-    top_type = str(raw_trace_value(record, "type", "event", "name", "kind") or "")
-    item_type = nested_item_type(record)
-    raw_type = f"{top_type} {item_type}".casefold()
-    raw_type_tok = raw_type_tokens(f"{top_type} {item_type}")
-
-    def has_keyword(keyword: str) -> bool:
-        return any(token.startswith(keyword) for token in raw_type_tok)
-
-    path = stringify_trace_value(raw_trace_input_value(record, "path", "file", "file_path"))
-    command = stringify_trace_value(raw_trace_input_value(record, "command", "cmd", "args"))
-    content = stringify_trace_value(raw_trace_value(record, "content", "text", "message"))
-    raw_status = raw_trace_value(record, "status", "state")
-    parsed_state = parse_event_state(
-        raw_status, raw_type=top_type or item_type,
-        status_present=raw_trace_has_key(record, "status", "state"))
-    status = parsed_state.state.value
-    # Unknown session/lifecycle events are not tool calls. Defaulting them to
-    # tool_call inflated Pi's process telemetry even when its trace had no
-    # model tool use at all.
-    event_type = TraceEventKind.EVENT
-    name = stringify_trace_value(raw_trace_value(
-        record, "tool", "tool_name", "toolName", "name"))
-    tool_name = name.casefold()
-    is_write = (has_keyword("write") or has_keyword("edit")
-                or tool_name in {"write", "edit", "multiedit", "notebookedit", "write_file"})
-    is_read = (has_keyword("read") or tool_name in {"read", "read_file"})
-    skill_path = path.endswith("SKILL.md") or "/SKILL.md" in path or "\\SKILL.md" in path
-    explicit_skill_load = has_keyword("skill") and (has_keyword("load") or has_keyword("read"))
-    if is_write:
-        event_type = TraceEventKind.FILE_WRITE
-    elif explicit_skill_load or (is_read and skill_path):
-        event_type = TraceEventKind.SKILL_LOAD
-    elif has_keyword("command") or has_keyword("exec") or command:
-        event_type = TraceEventKind.COMMAND
-        name = name or "bash"
-    elif is_read:
-        event_type = TraceEventKind.FILE_READ
-    elif has_keyword("tool") or raw_trace_value(
-            record, "tool", "tool_name", "toolName", "tool_call_id") is not None:
-        event_type = TraceEventKind.TOOL_CALL
-    elif has_keyword("error") or str(status).casefold() in {"failed", "error", "errored"}:
-        event_type = TraceEventKind.ERROR
-    elif raw_trace_value(record, "role") or content or "agent_message" in raw_type:
-        event_type = TraceEventKind.MESSAGE
-    elif has_keyword("usage") or has_keyword("metric") or raw_trace_value(record, "usage", "tokens"):
-        event_type = TraceEventKind.METRIC
-    input_summary = command or path or content[:500]
-    output_summary = stringify_trace_value(raw_trace_value(record, "output", "stdout", "stderr", "result"))[:1000]
-    raw_call_line = record.get("_raw_call_line")
-    raw_line = raw_call_line if isinstance(raw_call_line, int) and not isinstance(raw_call_line, bool) and raw_call_line > 0 else line
-    event = {
-        "index": index,
-        "type": event_type.value,
-        "status": status,
-        "state_source": parsed_state.source.value,
-        "raw_ref": {"file": "trace.jsonl", "line": raw_line},
-    }
-    raw_result_line = record.get("_raw_result_line")
-    if isinstance(raw_result_line, int) and not isinstance(raw_result_line, bool) and raw_result_line > 0:
-        event["raw_result_ref"] = {"file": "trace.jsonl", "line": raw_result_line}
-    if record.get("is_error") is True:
-        event["is_error"] = True
-    if isinstance(raw_status, str) and raw_status.casefold() != status:
-        event["raw_status"] = raw_status
-    role = raw_trace_value(record, "role")
-    if not role and "agent_message" in raw_type:
-        role = "assistant"
-    if role:
-        event["role"] = str(role)
-    if name:
-        event["name"] = name
-    change_kind = record.get("change_kind")
-    if isinstance(change_kind, str) and change_kind:
-        event["change_kind"] = change_kind
-    if input_summary:
-        event["input_summary"] = input_summary[:1000]
-    if output_summary:
-        event["output_summary"] = output_summary
-    timestamp = raw_trace_value(record, "timestamp", "time", "created_at")
-    if timestamp:
-        event["timestamp"] = str(timestamp)
-    exit_code = raw_trace_value(record, "exit_code", "returncode")
-    if isinstance(exit_code, int):
-        event["exit_code"] = exit_code
-    duration = _num(raw_trace_value(record, "duration_ms", "elapsed_ms"))
-    if duration is not None:
-        event["duration_ms"] = duration
-    usage = record.get("usage") if isinstance(record.get("usage"), dict) else record.get("tokens")
-    if isinstance(usage, dict):
-        token_doc = {k: v for k, raw in usage.items() if (v := _num(raw)) is not None}
-        normalized_total = usage_number(usage, "total_tokens")
-        normalized_input = usage_number(usage, "input_tokens")
-        normalized_output = usage_number(usage, "output_tokens")
-        if normalized_total is None and normalized_input is not None and normalized_output is not None:
-            normalized_total = normalized_input + normalized_output
-        if normalized_input is not None:
-            token_doc["input_tokens"] = int(normalized_input)
-        if normalized_output is not None:
-            token_doc["output_tokens"] = int(normalized_output)
-        if normalized_total is not None:
-            token_doc["total_tokens"] = int(normalized_total)
-        event["tokens"] = token_doc
-    event["source"] = source
-    event["otel"] = otel_attributes_for_event(event)
-    return event
-
-
-def otel_attributes_for_event(event: dict[str, Any]) -> dict[str, Any]:
-    """OTel GenAI semantic-convention attributes for one normalized event
-    (roadmap 2.4). Additive: the harness's own keys stay authoritative for
-    grading; these make the trace boundary a standard target instead of a
-    bespoke schema. Events schema_version 2 carries them; version-1 files
-    still grade unchanged."""
-    attrs: dict[str, Any] = {}
-    event_type = event.get("type")
-    if event_type in {"command", "tool_call"}:
-        attrs["gen_ai.operation.name"] = "execute_tool"
-        attrs["gen_ai.tool.name"] = str(event.get("name") or "bash")
-        if event.get("input_summary"):
-            attrs["gen_ai.tool.call.arguments"] = event["input_summary"]
-        if event.get("output_summary"):
-            attrs["gen_ai.tool.call.result"] = event["output_summary"]
-    elif event_type == "message":
-        attrs["gen_ai.operation.name"] = "chat"
-        if event.get("role"):
-            attrs["gen_ai.message.role"] = event["role"]
-    elif event_type == "error":
-        attrs["error.type"] = str(event.get("name") or event.get("input_summary") or "error")[:120]
-    elif event_type in {"file_read", "file_write", "skill_load"}:
-        if event.get("input_summary"):
-            attrs["file.path"] = event["input_summary"][:500]
-    tokens = event.get("tokens")
-    if isinstance(tokens, dict):
-        if (input_tokens := _num(tokens.get("input_tokens"))) is not None:
-            attrs["gen_ai.usage.input_tokens"] = int(input_tokens)
-        if (output_tokens := _num(tokens.get("output_tokens"))) is not None:
-            attrs["gen_ai.usage.output_tokens"] = int(output_tokens)
-    if isinstance(event.get("exit_code"), int):
-        attrs["process.exit_code"] = event["exit_code"]
-    if event.get("is_error") is True:
-        attrs["error.type"] = str(event.get("name") or "tool_result_error")[:120]
-    return attrs
-
-
-def _claude_tool_flat_record(name: str, tool_input: Any) -> dict[str, Any]:
-    """One Claude tool_use block as a normalizer-native record. Bash is a shell
-    command; Read/Write/Edit are file operations (a SKILL.md path classifies as
-    skill_load in normalize_trace_record); the Skill tool is a skill load; any
-    other tool stays a generic tool call with its input preserved."""
-    inp = tool_input if isinstance(tool_input, dict) else {}
-    if name == "Bash":
-        return {"type": "command", "tool": name, "command": str(inp.get("command") or "")}
-    if name == "Read":
-        return {"type": "file_read", "name": name, "path": str(inp.get("file_path") or "")}
-    if name in {"Write", "Edit", "MultiEdit", "NotebookEdit"}:
-        return {"type": "file_write", "name": name, "path": str(inp.get("file_path") or inp.get("notebook_path") or "")}
-    if name == "Skill":
-        return {"type": "skill_load", "name": name, "path": str(inp.get("skill") or "")}
-    return {"type": "tool_use", "tool": name, "input": inp}
-
-
-def _claude_protocol_error(message: str) -> dict[str, Any]:
-    return {
-        "type": "error", "status": "failed", "message": message,
-        "_trace_protocol_invalid": True,
-    }
-
-
-def claude_stream_flat_records(records: list[dict[str, Any]], *,
-                               record_lines: list[int] | None = None) -> list[tuple[int, dict[str, Any]]]:
-    """Flatten `claude -p --output-format stream-json` events into (line, record)
-    pairs the generic normalizer understands. A message wraps several content
-    blocks, so one raw line can yield several records — each keeps the RAW line
-    for its raw_ref. Lifecycle is paired: a tool_use OPENS a call (in progress)
-    and the matching tool_result COMPLETES it, so an orphaned call (crash
-    mid-tool) counts zero under the completed-events-only metrics contract.
-    Usage rides ONLY the terminal result event — per-assistant-message usage is
-    API-request-level and would double count the cumulative total."""
-    flat: list[tuple[int, dict[str, Any]]] = []
-    if record_lines is not None and len(record_lines) != len(records):
-        raise ValueError("record_lines must have one physical line per trace record")
-    open_calls: dict[str, tuple[int, dict[str, Any]]] = {}
-    seen_call_ids: set[str] = set()
-    for ordinal, record in enumerate(records, 1):
-        line = record_lines[ordinal - 1] if record_lines is not None else ordinal
-        rtype = str(record.get("type") or "")
-        if rtype not in {"assistant", "user"}:
-            # system/init, result, and unknown lifecycle events pass through:
-            # `result` is an intrinsically terminal kind carrying usage/duration.
-            flat.append((line, record))
-            continue
-        if not isinstance(record.get("message"), dict):
-            flat.append((line, _claude_protocol_error(
-                f"Claude {rtype} record has no message object")))
-            continue
-        message = record["message"]
-        role = str(message.get("role") or rtype)
-        content = message.get("content")
-        if isinstance(content, str):
-            if content.strip():
-                flat.append((line, {"type": "message", "role": role, "text": content}))
-            continue
-        if not isinstance(content, list):
-            flat.append((line, _claude_protocol_error(
-                "Claude message content must be a string or list")))
-            continue
-        for block in content:
-            if not isinstance(block, dict):
-                flat.append((line, _claude_protocol_error(
-                    "Claude message content blocks must be objects")))
-                continue
-            btype = block.get("type")
-            if btype == "text":
-                text = block.get("text")
-                if not isinstance(text, str):
-                    flat.append((line, _claude_protocol_error(
-                        "Claude text block text must be a string")))
-                elif text.strip():
-                    flat.append((line, {"type": "message", "role": role, "text": text}))
-            elif btype == "thinking":
-                if not isinstance(block.get("thinking"), str):
-                    flat.append((line, _claude_protocol_error(
-                        "Claude thinking block must contain thinking text")))
-            elif btype == "redacted_thinking":
-                if not isinstance(block.get("data"), str):
-                    flat.append((line, _claude_protocol_error(
-                        "Claude redacted_thinking block must contain data")))
-            elif btype == "tool_use":
-                name, raw_input, call_id = block.get("name"), block.get("input"), block.get("id")
-                if not isinstance(name, str) or not name.strip():
-                    flat.append((line, _claude_protocol_error(
-                        "Claude tool_use name must be a non-empty string")))
-                    continue
-                if not isinstance(raw_input, dict):
-                    flat.append((line, _claude_protocol_error(
-                        "Claude tool_use input must be an object")))
-                    continue
-                if not isinstance(call_id, str) or not call_id.strip():
-                    flat.append((line, _claude_protocol_error(
-                        "Claude tool_use id must be a non-empty string")))
-                    continue
-                spec = _claude_tool_flat_record(name, raw_input)
-                if call_id in seen_call_ids:
-                    lifecycle = "open " if call_id in open_calls else "reused "
-                    flat.append((line, _claude_protocol_error(
-                        f"duplicate {lifecycle}Claude tool_use call id {call_id!r}")))
-                    continue
-                flat.append((line, {**spec, "status": "in_progress"}))
-                seen_call_ids.add(call_id)
-                open_calls[call_id] = (line, spec)
-            elif btype == "tool_result":
-                call_id = block.get("tool_use_id")
-                if not isinstance(call_id, str) or not call_id.strip():
-                    flat.append((line, _claude_protocol_error(
-                        "Claude tool_result tool_use_id must be a non-empty string")))
-                    continue
-                if "is_error" in block and not isinstance(block["is_error"], bool):
-                    flat.append((line, _claude_protocol_error(
-                        "Claude tool_result is_error must be boolean")))
-                    continue
-                if not isinstance(block.get("content"), (str, list)):
-                    flat.append((line, _claude_protocol_error(
-                        "Claude tool_result content must be a string or list")))
-                    continue
-                matched_call = open_calls.pop(call_id, None)
-                if matched_call is None:
-                    flat.append((line, {
-                        **_claude_protocol_error(
-                            f"unmatched Claude tool_result for call id {call_id!r}"),
-                        "result": stringify_trace_value(block.get("content"))[:1000],
-                        "_raw_result_line": line,
-                    }))
-                    continue
-                call_line, spec = matched_call
-                completion = {**spec, "status": "completed",
-                              "output": stringify_trace_value(block.get("content"))[:1000],
-                              "_raw_call_line": call_line, "_raw_result_line": line}
-                if block.get("is_error"):
-                    # the call completed WITH an error result (e.g. nonzero
-                    # exit); lifecycle-wise it still ran, so it stays completed.
-                    completion["is_error"] = True
-                flat.append((line, completion))
-            else:
-                flat.append((line, _claude_protocol_error(
-                    f"unsupported Claude content block type {btype!r}")))
-    for call_id, (call_line, _) in sorted(open_calls.items()):
-        flat.append((call_line, _claude_protocol_error(
-            f"Claude tool_use call id {call_id!r} has no matching tool_result")))
-    return flat
-
-
-def identity_flat_records(records: list[dict[str, Any]], *,
-                          record_lines: list[int] | None = None) -> list[tuple[int, dict[str, Any]]]:
-    """One raw record per physical line, unchanged — the default flatten."""
-    if record_lines is not None and len(record_lines) != len(records):
-        raise ValueError("record_lines must have one physical line per trace record")
-    return [((record_lines[i - 1] if record_lines is not None else i), record)
-            for i, record in enumerate(records, 1)]
-
-
-def pi_stream_flat_records(records: list[dict[str, Any]], *,
-                           record_lines: list[int] | None = None) -> list[tuple[int, dict[str, Any]]]:
-    """Pi's terminal `tool_execution_end`/`tool_execution_update` carries only
-    toolCallId, toolName, result, and isError — the invocation's path or
-    command lives on the matching `tool_execution_start`. Without correlating
-    the two by toolCallId, a completed read or edit has no path to classify
-    against and can only ever read as a bare command."""
-    if record_lines is not None and len(record_lines) != len(records):
-        raise ValueError("record_lines must have one physical line per trace record")
-    pending_args: dict[str, Any] = {}
-    flat: list[tuple[int, dict[str, Any]]] = []
-    for i, record in enumerate(records, 1):
-        line = record_lines[i - 1] if record_lines is not None else i
-        top_type = str(record.get("type") or "")
-        call_id = record.get("toolCallId")
-        args = record.get("args")
-        if top_type == "tool_execution_start" and isinstance(call_id, str) and isinstance(args, dict):
-            pending_args[call_id] = args
-        elif (top_type in {"tool_execution_end", "tool_execution_update"}
-              and isinstance(call_id, str) and "args" not in record
-              and call_id in pending_args):
-            record = {**record, "args": pending_args[call_id]}
-        flat.append((line, record))
-    return flat
-
-
-def codex_stream_flat_records(records: list[dict[str, Any]], *,
-                              record_lines: list[int] | None = None) -> list[tuple[int, dict[str, Any]]]:
-    if record_lines is not None and len(record_lines) != len(records):
-        raise ValueError("record_lines must have one physical line per trace record")
-    flat: list[tuple[int, dict[str, Any]]] = []
-    for i, record in enumerate(records, 1):
-        line = record_lines[i - 1] if record_lines is not None else i
-        item = record.get("item")
-        changes = item.get("changes") if isinstance(item, dict) else None
-        if (record.get("type") == "item.completed" and isinstance(item, dict)
-                and item.get("type") == "file_change" and isinstance(changes, list) and changes
-                and all(isinstance(change, dict) for change in changes)
-                and parse_event_state(item.get("status"), raw_type="item.completed",
-                                      status_present="status" in item).state is EventState.COMPLETED):
-            flat.extend((line, {
-                "type": "file_write",
-                "name": "file_change",
-                "path": stringify_trace_value(change.get("path")),
-                "change_kind": stringify_trace_value(change.get("kind")),
-                "status": "completed",
-            }) for change in changes)
-        else:
-            flat.append((line, record))
-    return flat
-# Vibe's `--output streaming` record shape changed in 2.23. Through 2.22 it
-# wrote one LLMMessage dump per line (`role`, string `content`, OpenAI-style
-# `tool_calls`; vibe/core/output_formatters.py). From 2.23 it writes public
-# history entries (vibe/cli/programmatic.py, vibe/app_server/models.py): each
-# carries a `type`, fields are camelCase, a `message` entry holds its text as
-# content blocks, and one `effect` entry is one finished tool call. A stream's
-# first record says which shape it is in; each shape has its own parser.
-VIBE_HISTORY_CONTENT_ENTRY_TYPES = frozenset({"message", "reasoning", "effect", "callback"})
-VIBE_HISTORY_METADATA_ENTRY_TYPES = frozenset({"checkpoint", "notice"})
-
-
-def vibe_records_are_history_entries(records: Sequence[Mapping[str, Any]]) -> bool:
-    """True for a Vibe 2.23+ stream of public history entries, False for the
-    LLMMessage dumps Vibe 2.22 and earlier wrote (they carry no `type`)."""
-    return bool(records) and "type" in records[0]
-
-
-def vibe_entry_text(entry: Mapping[str, Any]) -> str:
-    """The text of a Vibe 2.23+ `message` entry, joined as Vibe's own
-    PublicMessageEntry.text joins it."""
-    content = entry.get("content")
-    if not isinstance(content, list):
-        return ""
-    return "\n\n".join(block["text"] for block in content
-                        if isinstance(block, dict) and block.get("type") == "text"
-                        and isinstance(block.get("text"), str))
-
-
-def _vibe_tool_flat_record(name: str, arguments: Mapping[str, Any]) -> dict[str, Any] | None:
-    """One Vibe tool call in the harness trace vocabulary, for the tools the
-    harness enables (VIBE_READ_ONLY_TOOLS); None for any other tool. Reads the
-    LLMMessage argument spellings and the 2.23+ camelCase effect input."""
-    if name == "skill":
-        return {"type": "skill_load", "name": name,
-                "path": str(arguments.get("name") or arguments.get("skill") or "")}
-    if name == "read_file":
-        return {"type": "file_read", "name": name,
-                "path": str(arguments.get("path") or arguments.get("file_path")
-                            or arguments.get("filePath") or "")}
-    if name == "grep":
-        return {"type": "tool_use", "tool": name, "input": dict(arguments)}
-    return None
-
-
-def vibe_stream_flat_records(records: list[dict[str, Any]], *,
-                             record_lines: list[int] | None = None) -> list[tuple[int, dict[str, Any]]]:
-    """Flatten a Vibe stream in whichever record shape it is in."""
-    if vibe_records_are_history_entries(records):
-        return vibe_history_entry_flat_records(records, record_lines=record_lines)
-    return vibe_llm_message_flat_records(records, record_lines=record_lines)
-
-
-def vibe_history_entry_flat_records(
-    records: list[dict[str, Any]], *, record_lines: list[int] | None = None,
-) -> list[tuple[int, dict[str, Any]]]:
-    """Flatten Vibe 2.23+ public history entries. Vibe writes an entry once it
-    is completed, so an `effect` entry is a whole tool call: its input under
-    `detail`, its outcome under `state`."""
-    if record_lines is not None and len(record_lines) != len(records):
-        raise ValueError("record_lines must have one physical line per trace record")
-    flat: list[tuple[int, dict[str, Any]]] = []
-    seen: set[str] = set()
-
-    def invalid(line: int, message: str) -> None:
-        flat.append((line, _claude_protocol_error(f"Vibe {message}")))
-
-    for ordinal, record in enumerate(records, 1):
-        line = record_lines[ordinal - 1] if record_lines is not None else ordinal
-        kind, entry_id = record.get("type"), record.get("id")
-        if not isinstance(entry_id, str) or not entry_id.strip():
-            invalid(line, "history entry id must be a non-empty string")
-            continue
-        if entry_id in seen:
-            invalid(line, f"history entry id {entry_id!r} is duplicated")
-            continue
-        seen.add(entry_id)
-        if record.get("generationStatus") != "completed":
-            invalid(line, f"history entry {entry_id!r} is not completed")
-            continue
-        if kind == "message":
-            role, content = record.get("role"), record.get("content")
-            if role not in {"user", "assistant", "system"}:
-                invalid(line, f"message role {role!r} is unsupported")
-            elif not isinstance(content, list) or not all(isinstance(block, dict) for block in content):
-                invalid(line, "message content must be a list of content blocks")
-            elif vibe_entry_text(record).strip():
-                flat.append((line, {"type": "message", "role": role, "text": vibe_entry_text(record)}))
-        elif kind == "effect":
-            detail, state = record.get("detail"), record.get("state")
-            name = detail.get("toolName") if isinstance(detail, dict) else None
-            arguments = detail.get("input") if isinstance(detail, dict) else None
-            if not isinstance(name, str) or not name.strip() or not isinstance(state, dict):
-                invalid(line, "effect must carry a detail.toolName and a state")
-                continue
-            spec = _vibe_tool_flat_record(name, arguments if isinstance(arguments, dict) else {})
-            if spec is None:
-                invalid(line, f"tool call function {name!r} is unsupported")
-                continue
-            status = state.get("status")
-            if status not in {"completed", "failed", "cancelled", "skipped"}:
-                invalid(line, f"effect {entry_id!r} state {status!r} is not a finished tool call")
-                continue
-            flat.append((line, {**spec, "status": "completed" if status == "completed" else "failed",
-                                **({} if status == "completed" else {"is_error": True}),
-                                "output": stringify_trace_value(
-                                    state.get("output") if status == "completed"
-                                    else state.get("error") or state.get("reason"))[:1000],
-                                "_raw_call_line": line, "_raw_result_line": line}))
-        elif kind == "reasoning":
-            if not isinstance(record.get("text"), str):
-                invalid(line, "reasoning entry text must be a string")
-        elif kind == "callback" or kind in VIBE_HISTORY_METADATA_ENTRY_TYPES:
-            flat.append((line, record))
-        else:
-            invalid(line, f"history entry type {kind!r} is unsupported")
-    return flat
-
-
-def vibe_llm_message_flat_records(records: list[dict[str, Any]], *,
-                                  record_lines: list[int] | None = None) -> list[tuple[int, dict[str, Any]]]:
-    """Flatten Vibe 2.22's OpenAI-style message/tool lifecycle without dropping it."""
-    if record_lines is not None and len(record_lines) != len(records):
-        raise ValueError("record_lines must have one physical line per trace record")
-    flat: list[tuple[int, dict[str, Any]]] = []
-    open_calls: dict[str, tuple[int, dict[str, Any]]] = {}
-    seen: set[str] = set()
-
-    def invalid(line: int, message: str) -> None:
-        flat.append((line, _claude_protocol_error(f"Vibe {message}")))
-
-    for ordinal, record in enumerate(records, 1):
-        line = record_lines[ordinal - 1] if record_lines is not None else ordinal
-        role = record.get("role")
-        tool_calls = record.get("tool_calls")
-        if tool_calls is not None:
-            if role != "assistant" or not isinstance(tool_calls, list):
-                invalid(line, "tool_calls must be a list on an assistant message")
-                continue
-            for call in tool_calls:
-                if not isinstance(call, dict):
-                    invalid(line, "tool_calls entries must be objects")
-                    continue
-                call_id = call.get("id")
-                function = call.get("function")
-                if not isinstance(call_id, str) or not call_id.strip():
-                    invalid(line, "tool call id must be a non-empty string")
-                    continue
-                if call_id in seen:
-                    invalid(line, f"tool call id {call_id!r} is duplicated or reused")
-                    continue
-                if not isinstance(function, dict):
-                    invalid(line, "tool call function must be an object")
-                    continue
-                name, arguments = function.get("name"), function.get("arguments")
-                if not isinstance(name, str) or not name.strip():
-                    invalid(line, "tool call function name must be a non-empty string")
-                    continue
-                if isinstance(arguments, str):
-                    try:
-                        arguments = stream_json_loads(arguments)
-                    except json.JSONDecodeError:
-                        invalid(line, "tool call arguments must be a JSON object")
-                        continue
-                if not isinstance(arguments, dict):
-                    invalid(line, "tool call arguments must be an object")
-                    continue
-                spec = _vibe_tool_flat_record(name, arguments)
-                if spec is None:
-                    invalid(line, f"tool call function {name!r} is unsupported")
-                    continue
-                flat.append((line, {**spec, "status": "in_progress"}))
-                open_calls[call_id] = (line, spec)
-                seen.add(call_id)
-        content = record.get("content")
-        if role == "tool":
-            call_id = record.get("tool_call_id")
-            if not isinstance(call_id, str) or not call_id.strip():
-                invalid(line, "tool result tool_call_id must be a non-empty string")
-                continue
-            matched = open_calls.pop(call_id, None)
-            if matched is None:
-                invalid(line, f"tool result for unknown call id {call_id!r}")
-                continue
-            call_line, spec = matched
-            flat.append((line, {**spec, "status": "completed",
-                                "output": stringify_trace_value(content)[:1000],
-                                "_raw_call_line": call_line,
-                                "_raw_result_line": line}))
-        elif role in {"assistant", "user", "system"}:
-            if content is not None and not isinstance(content, str):
-                invalid(line, "message content must be a string")
-            elif isinstance(content, str) and content.strip():
-                flat.append((line, {"type": "message", "role": role,
-                                    "text": content,
-                                    **({"usage": record["usage"]}
-                                       if isinstance(record.get("usage"), dict) else {})}))
-        elif role is not None:
-            invalid(line, f"message role {role!r} is unsupported")
-        elif tool_calls is None:
-            invalid(line, "record must have a supported role")
-    for call_id, (line, _) in sorted(open_calls.items()):
-        invalid(line, f"tool call id {call_id!r} has no matching tool result")
-    return flat
-
-
-def _gemini_tool_flat_record(name: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
-    """Map one official Gemini tool name into the harness trace vocabulary."""
-    values = dict(parameters)
-    common = {"parameters": values}
-    if name == "run_shell_command":
-        return {"type": "command", "tool": name,
-                "command": str(values.get("command") or ""), **common}
-    if name == "activate_skill":
-        return {"type": "skill_load", "name": name,
-                "path": str(values.get("name") or ""), **common}
-    if name in {"write_file", "replace"}:
-        return {"type": "file_write", "name": name,
-                "path": str(values.get("file_path") or ""), **common}
-    if name == "read_file":
-        path = str(values.get("file_path") or "")
-    elif name in {"list_directory", "grep_search", "glob"}:
-        # Search patterns are queries, not evidence that a matching path was
-        # opened.  Only the searched directory belongs in the path channel.
-        path = str(values.get("dir_path") or "")
-    elif name == "read_many_files":
-        # stream-json omits this tool's structured returnDisplay, including its
-        # processed-files list.  `include` contains paths/globs the model asked
-        # to read, not proof that any match was opened, so fail closed on path
-        # evidence while preserving the original parameters.
-        path = ""
-    else:
-        path = ""
-    if name in GEMINI_READ_ONLY_TOOLS:
-        return {"type": "file_read", "name": name, "path": path, **common}
-    return {"type": "tool_use", "tool": name, "input": values}
-
-
-def gemini_stream_flat_records(
-    records: list[dict[str, Any]], *, record_lines: list[int] | None = None,
-) -> list[tuple[int, dict[str, Any]]]:
-    """Flatten Gemini's paired tool events without discarding raw line refs."""
-    if record_lines is not None and len(record_lines) != len(records):
-        raise ValueError("record_lines must have one physical line per trace record")
-    flat: list[tuple[int, dict[str, Any]]] = []
-    open_calls: dict[str, tuple[int, dict[str, Any]]] = {}
-    for ordinal, record in enumerate(records, 1):
-        line = record_lines[ordinal - 1] if record_lines is not None else ordinal
-        kind = record.get("type")
-        if kind == "tool_use":
-            call_id = record.get("tool_id")
-            name = record.get("tool_name")
-            parameters = record.get("parameters")
-            if (not isinstance(call_id, str) or not call_id.strip()
-                    or not isinstance(name, str) or not name.strip()
-                    or not isinstance(parameters, Mapping)):
-                flat.append((line, _claude_protocol_error(
-                    "Gemini tool_use has an invalid id, name, or parameters")))
-                continue
-            spec = _gemini_tool_flat_record(name, parameters)
-            flat.append((line, {**spec, "status": "in_progress"}))
-            open_calls[call_id] = (line, spec)
-            continue
-        if kind == "tool_result":
-            call_id = record.get("tool_id")
-            matched = open_calls.pop(call_id, None) if isinstance(call_id, str) else None
-            if matched is None:
-                flat.append((line, _claude_protocol_error(
-                    "Gemini tool_result has no matching tool_use")))
-                continue
-            call_line, spec = matched
-            flat.append((line, {
-                **spec,
-                "status": (
-                    "failed" if record.get("status") == "error"
-                    else "completed"
-                ),
-                "output": stringify_trace_value(
-                    record.get("output") or record.get("error"))[:1000],
-                "is_error": record.get("status") == "error",
-                "_raw_call_line": call_line,
-                "_raw_result_line": line,
-            }))
-            continue
-        if kind == "error" and record.get("severity") == "warning":
-            flat.append((line, {
-                "type": "warning",
-                "severity": "warning",
-                "message": record.get("message"),
-                "timestamp": record.get("timestamp"),
-            }))
-            continue
-        if kind == "message":
-            flat.append((line, {
-                "type": "message",
-                "role": record.get("role"),
-                "text": record.get("content"),
-                "timestamp": record.get("timestamp"),
-            }))
-            continue
-        flat.append((line, record))
-    for call_id, (line, _) in sorted(open_calls.items()):
-        flat.append((line, _claude_protocol_error(
-            f"Gemini tool_use call id {call_id!r} has no matching tool_result")))
-    return flat
-
-
-def _gemini_records_text(records: Iterable[Mapping[str, Any]]) -> str:
-    return "\n".join(json.dumps(dict(record), ensure_ascii=False)
-                     for record in records) + ("\n" if records else "")
-
-
-def _gemini_stream_semantics(
-    records: list[dict[str, Any]], pi_stream: PiStream | None,
-) -> tuple[dict[str, Any] | None, str | None]:
-    _ = pi_stream
-    parsed = GeminiStream.parse(_gemini_records_text(records))
-    failure = parsed.protocol_error or parsed.provider_error
-    return (dict(parsed.usage) if parsed.usage is not None and failure is None
-            else None), failure
-
-
-def _gemini_usage_and_cost_blocks(
-    raw_text: str, pi_stream: PiStream | None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    _ = pi_stream
-    parsed = GeminiStream.parse(raw_text)
-    if not parsed.complete or parsed.usage is None:
-        return {"source": "missing"}, {"source": "missing"}
-    return (
-        normalize_usage(dict(parsed.usage), source="trace_normalized"),
-        {"source": "missing"},
-    )
-
-
-def _no_stream_semantics(records: list[dict[str, Any]], pi_stream: PiStream | None) -> tuple[dict[str, Any] | None, str | None]:
-    """No terminal cumulative usage and no stream-level failure: per-record
-    token accumulation applies."""
-    return None, None
-
-
-def _no_retry_observation(records: list[dict[str, Any]], pi_stream: PiStream | None) -> int | None:
-    return None
-
-
-def _pi_retries(records: list[dict[str, Any]], pi_stream: PiStream | None) -> int | None:
-    return (pi_stream or PiStream.from_records(records)).retries
-
-
-def _pi_stream_semantics(records: list[dict[str, Any]], pi_stream: PiStream | None) -> tuple[dict[str, Any] | None, str | None]:
-    """Pi repeats final cumulative usage on message_end, turn_end, and
-    agent_end — one response, not several token deltas — and a terminal
-    failure invalidates the stream's usage entirely. An already-parsed
-    PiStream may be passed to avoid re-parsing."""
-    parsed = pi_stream or PiStream.from_records(records)
-    error = parsed.failure_error
-    return (parsed.terminal_usage if not error else None), error
-
-
-def _generic_usage_and_cost_blocks(raw_text: str, pi_stream: PiStream | None) -> tuple[dict[str, Any], dict[str, Any]]:
-    records = [obj for obj in iter_json_objects(raw_text, strict=False) if isinstance(obj, dict)]
-    return _generic_stream_usage_and_cost(records)
-
-
-def _pi_usage_and_cost_blocks(raw_text: str, pi_stream: PiStream | None) -> tuple[dict[str, Any], dict[str, Any]]:
-    parsed = pi_stream or PiStream.parse(raw_text)
-    return dict(parsed.usage_normalized), dict(parsed.cost_normalized)
-
-
-def _generic_trace_protocol_error(
-    records: list[dict[str, Any]], pi_stream: PiStream | None,
-) -> str | None:
-    return None
-
-
-def _codex_trace_protocol_error(
-    records: list[dict[str, Any]], pi_stream: PiStream | None,
-) -> str | None:
-    terminals = [i for i, record in enumerate(records)
-                 if str(record.get("type") or "").casefold() == "turn.completed"]
-    if terminals != [len(records) - 1]:
-        return "Codex trace must contain exactly one final turn.completed event"
-    return None
-
-
-def _claude_trace_protocol_error(
-    records: list[dict[str, Any]], pi_stream: PiStream | None,
-) -> str | None:
-    if claude_terminal_result_index(records) is None:
-        return "Claude trace must contain exactly one final result event"
-    return None
-
-
-def _vibe_trace_protocol_error(
-    records: list[dict[str, Any]], pi_stream: PiStream | None,
-) -> str | None:
-    if vibe_records_are_history_entries(records):
-        # Session content ends with the answer; a checkpoint or notice entry
-        # (metadata) may still follow it.
-        content = [record for record in records
-                   if record.get("type") in VIBE_HISTORY_CONTENT_ENTRY_TYPES]
-        terminal_answer = (bool(content) and content[-1].get("type") == "message"
-                           and content[-1].get("role") == "assistant"
-                           and bool(vibe_entry_text(content[-1]).strip()))
-    else:
-        terminal_answer = (bool(records) and records[-1].get("role") == "assistant"
-                           and isinstance(records[-1].get("content"), str)
-                           and bool(records[-1]["content"].strip()))
-    if not terminal_answer:
-        return "Vibe trace must end with one non-empty assistant response"
-    return None
-
-
-def _gemini_trace_protocol_error(
-    records: list[dict[str, Any]], pi_stream: PiStream | None,
-) -> str | None:
-    _ = pi_stream
-    return GeminiStream.parse(_gemini_records_text(records)).protocol_error
-
-
-def _pi_trace_protocol_error(
-    records: list[dict[str, Any]], pi_stream: PiStream | None,
-) -> str | None:
-    parsed = pi_stream or PiStream.from_records(records)
-    return parsed.protocol_error
-
-
-class TraceFlattener(Protocol):
-    def __call__(self, records: list[dict[str, Any]], *,
-                 record_lines: list[int] | None = None) -> list[tuple[int, dict[str, Any]]]: ...
-
-
-@_dataclass(frozen=True)
-class TraceDialect:
-    """Per-provider trace semantics: how raw records flatten into
-    normalizer-native (line, record) pairs — claude's block-structured stream
-    expands to several records per raw line — how a stream's terminal
-    usage/failure resolve — Pi's cumulative repeats must not be summed — and
-    how a raw stream normalizes into usage/cost blocks. ONE registry instead
-    of per-source branches scattered through the normalizer and
-    stream_usage_and_cost. Generic-semantics providers are registered
-    explicitly; misspelled or unsupported sources are rejected before a
-    provider-specific stream can be silently normalized with the wrong rules."""
-
-    flatten: TraceFlattener = identity_flat_records
-    stream_semantics: Callable[[list[dict[str, Any]], PiStream | None], tuple[dict[str, Any] | None, str | None]] = _no_stream_semantics
-    usage_and_cost: Callable[[str, PiStream | None], tuple[dict[str, Any], dict[str, Any]]] = _generic_usage_and_cost_blocks
-    protocol_error: Callable[[list[dict[str, Any]], PiStream | None], str | None] = _generic_trace_protocol_error
-    retries: Callable[[list[dict[str, Any]], PiStream | None], int | None] = _no_retry_observation
-
-
-GENERIC_TRACE_DIALECT = TraceDialect()
-CODEX_TRACE_DIALECT = TraceDialect(flatten=codex_stream_flat_records, protocol_error=_codex_trace_protocol_error)
-JETTY_TRACE_DIALECT = TraceDialect(protocol_error=_jetty_trace_protocol_error)
-VIBE_TRACE_DIALECT = TraceDialect(
-    flatten=vibe_stream_flat_records,
-    protocol_error=_vibe_trace_protocol_error,
-)
-CLAUDE_TRACE_DIALECT = TraceDialect(
-    flatten=claude_stream_flat_records,
-    protocol_error=_claude_trace_protocol_error,
-)
-PI_TRACE_DIALECT = TraceDialect(
-    flatten=pi_stream_flat_records,
-    stream_semantics=_pi_stream_semantics,
-    usage_and_cost=_pi_usage_and_cost_blocks,
-    protocol_error=_pi_trace_protocol_error,
-    retries=_pi_retries,
-)
-GEMINI_TRACE_DIALECT = TraceDialect(
-    flatten=gemini_stream_flat_records,
-    stream_semantics=_gemini_stream_semantics,
-    usage_and_cost=_gemini_usage_and_cost_blocks,
-    protocol_error=_gemini_trace_protocol_error,
-)
 
 # ``generic`` is the explicit source for unowned imported traces. Every backend
 # key is projected from its declarative row instead of being registered here a
 # second time.
-TRACE_DIALECTS: dict[str, TraceDialect] = {
-    "generic": GENERIC_TRACE_DIALECT,
-    **trace_dialect_implementations(),
-}
-
-
-def trace_dialect_for(source: str) -> TraceDialect:
-    if not isinstance(source, str) or not source:
-        raise ValueError("trace source must be a non-empty string")
-    key = source.casefold()
-    try:
-        return TRACE_DIALECTS[key]
-    except KeyError as exc:
-        raise ValueError(
-            f"unsupported trace source {source!r}; known: {sorted(TRACE_DIALECTS)}") from exc
-
-
-def normalize_trace_records(records: list[dict[str, Any]], *, source: str = "generic",
-                            pi_stream: PiStream | None = None,
-                            record_lines: list[int] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    dialect = trace_dialect_for(source)
-    flat = dialect.flatten(records, record_lines=record_lines)
-    events = [normalize_trace_record(record, source=source, index=i, line=line)
-              for i, (line, record) in enumerate(flat, 1)]
-    commands = [command_text(e) for e in command_events(events)]
-    token_totals: dict[str, int | None] = {
-        "input_tokens": None, "output_tokens": None, "total_tokens": None,
-    }
-    elapsed_ms = 0.0
-    terminal_usage, stream_error = dialect.stream_semantics(records, pi_stream)
-    if terminal_usage is not None:
-        for key in token_totals:
-            value = usage_number(terminal_usage, key)
-            if value is not None:
-                token_totals[key] = value
-    elif not stream_error:
-        for (_, record), event in zip(flat, events):
-            usage = record.get("usage") if isinstance(record.get("usage"), dict) else record.get("tokens")
-            if isinstance(usage, dict):
-                input_tokens = usage_number(usage, "input_tokens")
-                output_tokens = usage_number(usage, "output_tokens")
-                total_tokens = usage_number(usage, "total_tokens")
-                if total_tokens is None and input_tokens is not None and output_tokens is not None:
-                    total_tokens = input_tokens + output_tokens
-                for key, value in [("input_tokens", input_tokens), ("output_tokens", output_tokens), ("total_tokens", total_tokens)]:
-                    if value is not None:
-                        token_totals[key] = (token_totals[key] or 0) + value
-            duration = _num(raw_trace_value(record, "duration_ms", "elapsed_ms"))
-            if duration is not None:
-                elapsed_ms += duration
-            tokens = event.get("tokens")
-            if isinstance(tokens, dict) and not isinstance(usage, dict):
-                for key in ("input_tokens", "output_tokens", "total_tokens"):
-                    value = usage_number(tokens, key)
-                    if value is not None:
-                        token_totals[key] = (token_totals[key] or 0) + value
-    if (token_totals["total_tokens"] is None
-            and token_totals["input_tokens"] is not None
-            and token_totals["output_tokens"] is not None):
-        token_totals["total_tokens"] = (
-            token_totals["input_tokens"] + token_totals["output_tokens"])
-    counts = trace_event_counts(events)
-    skill_events = counts["skill_events"]
-    metrics: dict[str, Any] = {
-        "schema_version": 2,
-        "source": source,
-        "tool_calls": counts["tool_calls"],
-        "commands": counts["commands"],
-        "file_reads": counts["file_reads"],
-        "file_writes": counts["file_writes"],
-        "errors": counts["errors"],
-        "repeated_command_max": repeated_command_max(commands),
-        "skill_invoked": bool(skill_events),
-        "skill_invocation_evidence": [command_text(e) or e.get("input_summary", "") for e in skill_events[:10]],
-    }
-    retries = dialect.retries(records, pi_stream)
-    if retries is not None:
-        metrics["retries"] = retries
-    protocol_errors = [
-        str(record.get("message") or "trace protocol error")
-        for _, record in flat if record.get("_trace_protocol_invalid") is True
-    ]
-    if protocol_errors:
-        metrics["trace_protocol_errors"] = protocol_errors[:20]
-    if elapsed_ms:
-        metrics["elapsed_ms"] = int(elapsed_ms)
-    for key, value in token_totals.items():
-        if value is not None:
-            metrics[key] = value
-    observed_tokens = {key: value for key, value in token_totals.items()
-                       if value is not None}
-    if observed_tokens:
-        # Trace-derived tokens get the normalized block (issue #21). Never a
-        # missing marker here — a provider-reported block in run metadata must
-        # not be shadowed by an empty trace.
-        metrics["usage_normalized"] = normalize_usage(
-            observed_tokens, source="trace_normalized")
-    otel_usage = {}
-    if token_totals["input_tokens"] is not None:
-        otel_usage["gen_ai.usage.input_tokens"] = token_totals["input_tokens"]
-    if token_totals["output_tokens"] is not None:
-        otel_usage["gen_ai.usage.output_tokens"] = token_totals["output_tokens"]
-    if otel_usage:
-        metrics["otel"] = otel_usage
-    event_doc = {"schema_version": 2, "source": source, "events": events}
-    return event_doc, metrics
-
-
-def _pi_final_message(record: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(record, dict):
-        return None
-    message = record.get("message")
-    if isinstance(message, dict):
-        return string_keyed_dict(message, "Pi final message")
-    messages = record.get("messages")
-    if isinstance(messages, list):
-        for candidate in reversed(messages):
-            if isinstance(candidate, dict) and candidate.get("role") == "assistant":
-                return string_keyed_dict(candidate, "Pi assistant message")
-        for candidate in reversed(messages):
-            if isinstance(candidate, dict):
-                return string_keyed_dict(candidate, "Pi fallback message")
-    return None
-
-
-def _pi_final_agent_end(records: list[dict[str, Any]]) -> dict[str, Any] | None:
-    return next((record for record in reversed(records) if str(record.get("type") or "") == "agent_end"), None)
-
-
-def _pi_terminal_error(records: list[dict[str, Any]]) -> str | None:
-    """Read only Pi's final retry attempt, never a historical failed message."""
-    last_agent_end = _pi_final_agent_end(records)
-    fallback = next((record for record in reversed(records) if str(record.get("type") or "") == "turn_end"), None)
-    candidate = _pi_final_message(last_agent_end if last_agent_end is not None else fallback)
-    if candidate is None:
-        return None
-    error = candidate.get("errorMessage") or candidate.get("error")
-    if isinstance(error, str) and error.strip():
-        return error.strip()
-    if str(candidate.get("stopReason") or "").casefold() == "error":
-        return "Pi provider ended the turn with stopReason:error"
-    return None
-
-
-def pi_stream_terminal_error(raw_text: str) -> str | None:
-    """Compatibility boundary backed by the typed, single-pass Pi parser."""
-    return PiStream.parse(raw_text).failure_error
-
-
-def _pi_terminal_usage(records: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Return cumulative usage from Pi's final retry attempt only."""
-    last_agent_end = _pi_final_agent_end(records)
-    fallback = next((record for record in reversed(records)
-                     if str(record.get("type") or "") in {"turn_end", "message_end"}), None)
-    message = _pi_final_message(last_agent_end if last_agent_end is not None else fallback)
-    return message.get("usage") if isinstance(message, dict) and isinstance(message.get("usage"), dict) else None
-
-
-def _stream_usage_doc(record: dict[str, Any]) -> dict[str, Any] | None:
-    usage = raw_trace_value(record, "usage", "tokens")
-    return usage if isinstance(usage, dict) else None
-
-
-def _is_cumulative_usage_record(record: dict[str, Any]) -> bool:
-    top_type = str(raw_trace_value(record, "type", "event", "name", "kind") or "").casefold()
-    item_type = nested_item_type(record).casefold()
-    return top_type in {"result", "response.completed"} or item_type in {"result", "response.completed"}
-
-
-def _sum_stream_usage(records: list[dict[str, Any]]) -> dict[str, Any]:
-    totals: dict[str, int] = {}
-    for record in records:
-        usage = _stream_usage_doc(record)
-        if not usage:
-            continue
-        normalized = normalize_usage(usage, source="trace_normalized")
-        for key in USAGE_ALIASES:
-            value = normalized.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                totals[key] = totals.get(key, 0) + int(value)
-    return normalize_usage(totals if totals else None, source="trace_normalized")
-
-
-def _cost_value_from_record(record: dict[str, Any]) -> Any:
-    """Return a validated raw cost value without discarding object currency."""
-    raw = raw_trace_value(record, "cost", "cost_usd", "total_cost_usd")
-    if raw is None:
-        usage_obj = _stream_usage_doc(record)
-        if isinstance(usage_obj, dict):
-            raw = usage_obj.get("cost", usage_obj.get("cost_usd"))
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-        return raw if _num(raw) is not None else None
-    if isinstance(raw, dict):
-        return raw if normalize_cost(raw).get("source") != "missing" else None
-    return None
-
-
-def _generic_stream_usage_and_cost(records: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
-    cumulative_usage: list[dict[str, Any]] = []
-    for record in records:
-        if not _is_cumulative_usage_record(record):
-            continue
-        usage_doc = _stream_usage_doc(record)
-        if not usage_doc:
-            continue
-        normalized = normalize_usage(usage_doc, source="trace_normalized")
-        if normalized.get("source") != "missing":
-            cumulative_usage.append(normalized)
-    usage = cumulative_usage[-1] if cumulative_usage else _sum_stream_usage(records)
-
-    cumulative_cost: list[dict[str, Any]] = []
-    for record in records:
-        if not _is_cumulative_usage_record(record):
-            continue
-        value = _cost_value_from_record(record)
-        if value is None:
-            continue
-        normalized = normalize_cost(value, source="trace_normalized")
-        if normalized.get("source") != "missing":
-            cumulative_cost.append(normalized)
-    if cumulative_cost:
-        return usage, cumulative_cost[-1]
-    cost_values = [_cost_value_from_record(record) for record in records]
-    cost_blocks = [normalize_cost(value, source="trace_normalized") for value in cost_values if value is not None]
-    cost_blocks = [block for block in cost_blocks if block.get("source") != "missing"]
-    currencies = {str(block.get("currency")) for block in cost_blocks}
-    if len(currencies) == 1:
-        currency = next(iter(currencies))
-        cost_total = sum(float(block["total_cost"]) for block in cost_blocks)
-        cost = normalize_cost({"amount": round(cost_total, 6), "currency": currency}, source="trace_normalized")
-    else:
-        cost = {"source": "missing"}
-    return usage, cost
-
-
-@_dataclass(frozen=True)
-class PiStream:
-    """One parsed Pi JSON stream with intrinsic terminal semantics.
-
-    Provider status and cumulative telemetry are derived together once. Callers
-    pass this object to detection, telemetry, and trace normalization rather than
-    reinterpreting the same wire text with independent policies.
-    """
-
-    records: tuple[dict[str, Any], ...]
-    parse_errors: tuple[str, ...]
-    terminal_error: str | None
-    protocol_error: str | None
-    terminal_usage: dict[str, Any] | None
-    usage_normalized: dict[str, Any]
-    cost_normalized: dict[str, Any]
-    retries: int | None = None
-
-    def __post_init__(self) -> None:
-        if self.failure_error and (
-            self.usage_normalized != {"source": "missing"}
-            or self.cost_normalized != {"source": "missing"}
-        ):
-            raise ValueError("failed Pi streams cannot carry measured usage or cost")
-        if self.retries is not None and (
-            isinstance(self.retries, bool) or not isinstance(self.retries, int) or self.retries < 0
-        ):
-            raise ValueError("Pi retry count must be a non-negative integer or None")
-        if self.protocol_error and self.retries is not None:
-            raise ValueError("protocol-invalid Pi streams cannot carry a retry count")
-
-    @property
-    def failure_error(self) -> str | None:
-        return self.terminal_error or self.protocol_error
-
-    @classmethod
-    def from_records(cls, records: Iterable[dict[str, Any]],
-                     parse_errors: Iterable[str] = ()) -> PiStream:
-        materialized = [dict(record) for record in records]
-        terminal_error = _pi_terminal_error(materialized)
-        final_agent_end = _pi_final_agent_end(materialized)
-        terminal_seen = final_agent_end is not None and final_agent_end.get("willRetry") is not True
-        errors = tuple(parse_errors)
-        protocol_error = (
-            f"Pi JSON stream parse error: {errors[0]}" if errors
-            else None if terminal_seen
-            else "Pi JSON stream ended without a final agent_end event"
-        )
-        terminal_usage = _pi_terminal_usage(materialized)
-        if terminal_error or protocol_error:
-            usage, cost = {"source": "missing"}, {"source": "missing"}
-        elif terminal_usage is not None:
-            usage = normalize_usage(terminal_usage, source="trace_normalized")
-            cost = normalize_cost(terminal_usage.get("cost"), source="trace_normalized")
-        else:
-            usage, cost = _generic_stream_usage_and_cost(materialized)
-        attempt_ends = [record for record in materialized if record.get("type") == "agent_end"]
-        last_attempt_event = next((record for record in reversed(materialized)
-                                   if record.get("type") in {"agent_start", "agent_end"}), None)
-        retries = None
-        if (not protocol_error and last_attempt_event is final_agent_end
-                and all("willRetry" not in record or isinstance(record["willRetry"], bool)
-                        for record in attempt_ends)):
-            retries = sum(record.get("willRetry") is True for record in attempt_ends)
-        return cls(tuple(materialized), errors, terminal_error, protocol_error,
-                   dict(terminal_usage) if terminal_usage is not None else None,
-                   usage, cost, retries)
-
-    @classmethod
-    def parse(cls, raw_text: str) -> PiStream:
-        if not isinstance(raw_text, str):
-            raise TypeError("Pi stream must be text")
-        records, errors = parse_trace_jsonl_text(raw_text, strict=False)
-        return cls.from_records(records, errors)
-
-
-def stream_usage_and_cost(raw_text: str, *, source: str | None = None,
-                          pi_stream: PiStream | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Normalize one runner stream without confusing Pi cumulative events for
-    deltas — resolved by the source's registered trace dialect."""
-    resolved_source = "generic" if source is None else source
-    return trace_dialect_for(resolved_source).usage_and_cost(raw_text, pi_stream)
-
-
-def write_trace_artifacts(
-    run_dir: Path,
-    trace_text: str,
-    *,
-    source: str,
-    metadata: dict[str, Any] | None = None,
-    extra_metrics: dict[str, Any] | None = None,
-    environment: dict[str, Any] | None = None,
-    write_metadata: bool = True,
-    out_events: Path | None = None,
-    out_metrics: Path | None = None,
-    write_raw_trace: bool = True,
-    pi_stream: PiStream | None = None,
-    process_observation_complete: bool | None = None,
-    provider_response_complete: bool | None = None,
-    artifact_set_complete: bool | None = None,
-    retain_invalid_provider_trace: bool = False,
-    trace_utf8_valid: bool = True,
-    mediated_tools: tool_fault_domain.ToolObservation | None = None,
-    tool_journal_path: str | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    if tool_fault_domain.MEDIATED_KEYS & set(metadata or {}):
-        raise ValueError("metadata cannot author mediated tool evidence")
-    if not isinstance(retain_invalid_provider_trace, bool):
-        raise TypeError("retain_invalid_provider_trace must be boolean")
-    if not isinstance(trace_utf8_valid, bool):
-        raise TypeError("trace_utf8_valid must be boolean")
-    for label, value in (("process_observation_complete", process_observation_complete),
-                         ("provider_response_complete", provider_response_complete),
-                         ("artifact_set_complete", artifact_set_complete)):
-        if value is not None and not isinstance(value, bool):
-            raise TypeError(f"{label} must be boolean or None")
-    run_dir.mkdir(parents=True, exist_ok=True)
-    if write_raw_trace:
-        (run_dir / "trace.jsonl").write_text(trace_text, encoding="utf-8")
-    parsed_records, parsed_errors, record_lines, duplicate_keys = parse_trace_jsonl_text_with_lines(
-        trace_text, strict_json_errors=not retain_invalid_provider_trace, strict=False)
-    if source.casefold() == "pi" and pi_stream is not None:
-        records, parse_errors = list(pi_stream.records), list(pi_stream.parse_errors)
-        if len(record_lines) != len(records):
-            record_lines = list(range(1, len(records) + 1))
-    else:
-        records, parse_errors = parsed_records, parsed_errors
-    if source.casefold() == "claude" and retain_invalid_provider_trace:
-        retained_records = []
-        for line, record in zip(record_lines, records):
-            try:
-                for holder in (record, record.get("message")):
-                    if isinstance(holder, dict) and isinstance(holder.get("usage"), dict):
-                        normalize_usage(holder["usage"], source="trace_normalized")
-            except ValueError as exc:
-                parse_errors.append(f"line {line}: invalid Claude usage: {exc}")
-                retained_records.append(_claude_protocol_error(f"invalid Claude usage: {exc}"))
-            else:
-                retained_records.append(record)
-        records = retained_records
-    events, metrics = normalize_trace_records(
-        records, source=source, pi_stream=pi_stream, record_lines=record_lines)
-    semantic_protocol_error = trace_dialect_for(source).protocol_error(records, pi_stream)
-    if semantic_protocol_error:
-        existing_protocol_errors = metrics.get("trace_protocol_errors")
-        protocol_errors = (list(existing_protocol_errors)
-                           if isinstance(existing_protocol_errors, list) else [])
-        protocol_errors.append(semantic_protocol_error)
-        metrics["trace_protocol_errors"] = protocol_errors[:20]
-    if not trace_utf8_valid:
-        protocol_errors = list(metrics.get("trace_protocol_errors") or [])
-        protocol_errors.append("trace transport is not valid UTF-8")
-        metrics["trace_protocol_errors"] = protocol_errors[:20]
-    if parse_errors:
-        metrics["parse_errors"] = parse_errors[:20]
-        metrics["errors"] = int(metrics.get("errors", 0) or 0) + len(parse_errors)
-    if duplicate_keys:
-        metrics["stream_duplicate_keys"] = duplicate_keys[:20]
-    # A trace-derived count is observed only when at least one valid event was
-    # captured and parsing completed. Completion is derived here and reserved:
-    # arbitrary caller metrics cannot promote an absent trace.
-    trace_observation_complete = (
-        bool(records) and not parse_errors and not metrics.get("trace_protocol_errors"))
-    reserved = set(metrics) | {
-        "observation_complete", "trace_observation_complete", "process_observation_complete",
-        "provider_response_complete", "operation_observation_complete",
-        "artifact_set_complete", "observation_evidence", "telemetry",
-        "telemetry_schema_version", "usage_normalized", "cost_normalized",
-        "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens",
-        "cache_write_tokens", "cache_creation_tokens", "cost_usd", "otel",
-        "parse_errors", "trace_protocol_errors", "stream_duplicate_keys",
-        "skill_invoked", "skill_invocation_evidence", "retries",
-        "repeated_command_max", "commands", "tool_calls", "file_reads",
-        "file_writes", "errors", "schema_version", "source",
-    }
-    # Process-level duration/exit facts are authoritative named observations;
-    # every trace-owned counter and schema field is non-overridable.
-    process_metric_keys = {"returncode", "timed_out", "elapsed_ms"}
-    reserved.update(tool_fault_domain.MEDIATED_KEYS)
-    collisions = (reserved - process_metric_keys) & set(extra_metrics or {})
-    if collisions:
-        raise ValueError(f"extra_metrics cannot override derived evidence: {', '.join(sorted(collisions))}")
-    if extra_metrics:
-        metrics.update(extra_metrics)
-    generic_complete = metrics.get("observation_complete")
-    if not isinstance(generic_complete, bool):
-        generic_complete = (metadata or {}).get("observation_complete")
-    if process_observation_complete is None:
-        explicit = (metadata or {}).get("process_observation_complete")
-        process_observation_complete = explicit if isinstance(explicit, bool) else generic_complete if isinstance(generic_complete, bool) else None
-    if provider_response_complete is None:
-        explicit = (metadata or {}).get("provider_response_complete")
-        provider_response_complete = explicit if isinstance(explicit, bool) else generic_complete if isinstance(generic_complete, bool) else None
-    evidence = telemetry_domain.ObservationEvidence(
-        telemetry_domain.ObservationEvidence.state(process_observation_complete),
-        telemetry_domain.ObservationEvidence.state(provider_response_complete),
-        telemetry_domain.ObservationEvidence.state(trace_observation_complete),
-        telemetry_domain.ObservationEvidence.state(artifact_set_complete),
-    )
-    # Retain the legacy single-axis field as a derived compatibility alias for
-    # provider-response completeness.  It is reserved above, so a caller cannot
-    # use extra_metrics to promote a failed or partial provider response.
-    legacy_observation_complete = (
-        provider_response_complete if isinstance(provider_response_complete, bool)
-        else generic_complete if isinstance(generic_complete, bool)
-        else False
-    )
-    metrics.update({
-        "observation_complete": legacy_observation_complete,
-        "trace_observation_complete": trace_observation_complete,
-        "process_observation_complete": process_observation_complete,
-        "provider_response_complete": provider_response_complete,
-        "operation_observation_complete": evidence.operation_complete,
-        "artifact_set_complete": artifact_set_complete,
-        "observation_evidence": evidence.to_dict(),
-    })
-    # Telemetry precedence: an explicit provider/estimated/not-applicable block
-    # supplied by a runner wins over a trace-derived block. Both artifacts then
-    # receive the same v3 envelope, including an explicit unavailable state when
-    # no value was observed. A missing trace can never become numeric zero.
-    for key in ("usage_normalized", "cost_normalized"):
-        block = (metadata or {}).get(key)
-        if isinstance(block, dict) and block.get("source") in {"provider_reported", "trace_normalized", "price_table_estimated", "estimated", "not_applicable"}:
-            metrics[key] = block
-        metrics.setdefault(key, {"source": "missing"})
-    # Legacy scalar mirrors remain useful to existing report readers, but are
-    # derived here from the authoritative normalized provider/trace blocks.
-    # They are reserved above and cannot be injected through extra_metrics.
-    usage_block = metrics["usage_normalized"]
-    if isinstance(usage_block, dict):
-        for key in ("input_tokens", "output_tokens", "total_tokens",
-                    "cache_read_tokens", "cache_write_tokens"):
-            value = usage_block.get(key)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                metrics[key] = value
-        if isinstance(usage_block.get("cache_write_tokens"), int):
-            metrics["cache_creation_tokens"] = usage_block["cache_write_tokens"]
-    cost_block = metrics["cost_normalized"]
-    if (isinstance(cost_block, dict) and cost_block.get("currency") == "USD"
-            and isinstance(cost_block.get("total_cost"), (int, float))
-            and not isinstance(cost_block.get("total_cost"), bool)):
-        metrics["cost_usd"] = float(cost_block["total_cost"])
-    # Metrics contains the resolved usage/cost precedence. Metadata is useful
-    # for identity/basis but must not let an explicit `source: missing` erase a
-    # usable trace-normalized observation.
-    envelope_input = {**(metadata or {}), **metrics}
-    # Process, provider response, trace, and artifact-set completeness are
-    # independent axes. The typed evidence value above is the only owner of
-    # operation completeness; no generic success boolean promotes another axis.
-    # A crash/timeout can leave a syntactically valid partial JSONL trace. Keep
-    # its legacy debugging fields, but v3 must not present trace-derived usage
-    # or cost as complete measurement evidence. Provider-reported blocks remain
-    # valid independent observations.
-    if not evidence.operation_complete:
-        for key in ("usage_normalized", "cost_normalized"):
-            block = envelope_input.get(key)
-            if isinstance(block, dict) and block.get("source") == "trace_normalized":
-                envelope_input[key] = {"source": "missing"}
-    tool_measurements = _tool_measurements(mediated_tools, telemetry_domain.basis_from_run(envelope_input)) if mediated_tools is not None else None
-    if mediated_tools is not None:
-        if not tool_journal_path:
-            raise ValueError("mediated tools require a stable journal path")
-        events["mediated_tools"] = mediated_tools.as_member(tool_journal_path)
-        if parse_errors or metrics.get("errors"):
-            metrics["provider_trace_errors"] = metrics.get("errors")
-        for key, value in (tool_measurements or {}).items():
-            metrics.pop(key, None)
-            if value.availability == telemetry_domain.AVAILABLE:
-                metrics[key] = value.value
-    envelope = telemetry_domain.telemetry_envelope(
-        envelope_input,
-        tool_measurements=tool_measurements,
-        source=source,
-        population=str(envelope_input.get("population") or "answer"),
-    )
-    metrics["telemetry_schema_version"] = 3
-    metrics["telemetry"] = envelope
-    write_json(out_events or run_dir / "events.json", events)
-    write_json(out_metrics or run_dir / "metrics.json", metrics)
-    if environment:
-        write_json(run_dir / "environment.json", environment)
-    if write_metadata:
-        existing: dict[str, Any] = {}
-        if metadata:
-            existing.update(metadata)
-        existing.update({k: v for k, v in metrics.items() if k not in {"schema_version", "source"}})
-        existing.setdefault("usage_normalized", {"source": "missing"})
-        existing.setdefault("cost_normalized", {"source": "missing"})
-        existing["telemetry_schema_version"] = 3
-        existing["telemetry"] = envelope
-        existing["trace_source"] = source
-        write_json(run_dir / "metadata.json", existing)
-    return events, metrics
 
 
 def import_trace(args: argparse.Namespace) -> int:
@@ -10530,14 +6625,6 @@ def build_task_prompt(pt: PreparedTask, skill_paths: list[str] | None = None, in
     )
 
 
-def coerce_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return str(value)
-
-
 def run_argv_capture(plan: ProcessInvocationPlan) -> InvocationResult:
     """Native agent adapter wrapper over the one subprocess owner.
 
@@ -10636,147 +6723,6 @@ def cleanup_codex_invoke_temp(path: Path) -> dict[str, Any]:
             f"isolated Codex temporary-home cleanup required the final fallback after {attempts} attempts ({code})"
         ),
     }
-
-
-def seed_codex_home(codex_home: Path) -> dict[str, Any]:
-    """Copy portable Codex auth/config into an isolated CODEX_HOME.
-
-    `$CODEX_HOME/skills` is also Codex's skill-discovery surface, so seeding is
-    file-allowlisted: copy auth/config files only, never user skills/plugins.
-    `--ignore-user-config` keeps copied config from influencing native harness
-    runs unless Codex needs it for auth compatibility."""
-    codex_home.mkdir(parents=True, exist_ok=True)
-    source = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-    copied: list[str] = []
-    for name in CODEX_HOME_FILES:
-        src = source / name
-        dst = codex_home / name
-        if not src.is_file():
-            continue
-        if src.resolve() == dst.resolve():
-            continue
-        shutil.copy2(src, dst)
-        copied.append(name)
-    return {"codex_home": str(codex_home), "codex_home_files_copied": copied, "config_isolated": True}
-
-
-def codex_env_for_home(codex_home: Path) -> tuple[dict[str, str], dict[str, Any]]:
-    env = os.environ.copy()
-    seeded = seed_codex_home(codex_home)
-    env["CODEX_HOME"] = seeded["codex_home"]
-    # Do not persist the scratch auth/config path into run artifacts. It is not
-    # model-visible for answer/judge runs, but it is still a credential-bearing
-    # directory and should not become a handle for later artifact readers.
-    meta = {**seeded, "codex_home": "<isolated CODEX_HOME outside workdir>"}
-    return env, meta
-
-
-CODEX_SESSIONS_DIRNAME = "sessions"
-CODEX_ROLLOUT_SKILL_TAG = "<skill>"
-_CODEX_SKILL_TAG_PATTERNS = {
-    tag: re.compile(rf"<{tag}>(.*?)</{tag}>", re.DOTALL) for tag in ("name", "path")
-}
-
-
-@_dataclass(frozen=True)
-class CodexRollout:
-    """Where the persisted transcript of one `codex exec --json` thread was
-    looked for, and what it held. Codex writes it under
-    `$CODEX_HOME/sessions/<y>/<m>/<d>/rollout-<stamp>-<thread_id>.jsonl`; the
-    thread id comes from the stream's `thread.started` event. `status` is
-    `found`, `not_found`, or `no_thread_id`; `home` names which CODEX_HOME held
-    it (`isolated` for the run's scratch home, `ambient` for the caller's)."""
-
-    status: str
-    home: str | None = None
-    file_name: str | None = None
-    text: str | None = None
-
-    def metadata(self) -> dict[str, Any]:
-        """The JSON-safe record a trigger row keeps so a reader can tell whether
-        the rollout detector had anything to read."""
-        meta: dict[str, Any] = {"codex_rollout_status": self.status}
-        if self.home is not None:
-            meta["codex_rollout_home"] = self.home
-        if self.file_name is not None:
-            meta["codex_rollout_file"] = self.file_name
-        return meta
-
-
-def codex_thread_id(stdout: str) -> str | None:
-    """The thread id Codex announces in its `thread.started` event."""
-    for record in iter_json_objects(stdout, strict=False):
-        if isinstance(record, dict) and record.get("type") == "thread.started":
-            thread_id = record.get("thread_id")
-            if isinstance(thread_id, str) and thread_id.strip():
-                return thread_id.strip()
-            return None
-    return None
-
-
-def codex_rollout_path(codex_home: Path, thread_id: str) -> Path | None:
-    sessions = codex_home / CODEX_SESSIONS_DIRNAME
-    if not sessions.is_dir():
-        return None
-    suffix = f"-{thread_id}.jsonl"
-    matches = sorted(
-        path for path in sessions.rglob("rollout-*.jsonl")
-        if path.is_file() and path.name.endswith(suffix))
-    return matches[0] if matches else None
-
-
-def locate_codex_rollout(stdout: str, isolated_home: Path | None = None) -> CodexRollout:
-    """Find the rollout for the thread `stdout` announces. The run's isolated
-    CODEX_HOME is searched first, then the ambient `$CODEX_HOME` (default
-    `~/.codex`) for a `--codex-cmd` wrapper that ignored the isolated home. A
-    thread id is unique, so either hit is this run's own transcript."""
-    thread_id = codex_thread_id(stdout)
-    if thread_id is None:
-        return CodexRollout(status="no_thread_id")
-    homes: list[tuple[str, Path]] = []
-    if isolated_home is not None:
-        homes.append(("isolated", isolated_home))
-    homes.append(("ambient", Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))))
-    for label, home in homes:
-        path = codex_rollout_path(home, thread_id)
-        if path is not None:
-            return CodexRollout(status="found", home=label, file_name=path.name,
-                                text=path.read_text(encoding="utf-8", errors="replace"))
-    return CodexRollout(status="not_found")
-
-
-def _codex_skill_tag(text: str, tag: str) -> str | None:
-    match = _CODEX_SKILL_TAG_PATTERNS[tag].search(text)
-    return match.group(1).strip() if match else None
-
-
-def codex_rollout_skill_loads(rollout_text: str, skill_names: list[str], copied_paths: list[Path]) -> list[str]:
-    """Skill loads a Codex rollout proves through the CLI's own `<skill>`
-    injection. The injection is a user-role `response_item` whose text opens
-    with `<skill>`, names a mounted skill, and, when present, carries a `<path>`
-    under the mount. Tool calls, listings, prose, and outputs can mention a skill without
-    loading it, so they do not count here."""
-    names = set(skill_names)
-    evidence: list[str] = []
-    for record in iter_json_objects(rollout_text):
-        if not isinstance(record, dict) or record.get("type") != "response_item":
-            continue
-        payload = record.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        item_type = str(payload.get("type") or "")
-        if item_type == "message":
-            if payload.get("role") != "user":
-                continue
-            for block in payload.get("content") or []:
-                text = str(block.get("text") or "") if isinstance(block, dict) else ""
-                if not text.startswith(CODEX_ROLLOUT_SKILL_TAG):
-                    continue
-                name = _codex_skill_tag(text, "name")
-                path = _codex_skill_tag(text, "path")
-                if name in names and (path is None or text_mentions_mounted_skill(path, copied_paths)):
-                    evidence.append(f"rollout skill injection: {name}" + (f" ({path})" if path else ""))
-    return evidence[:5]
 
 
 def _strip_json_comments(text: str) -> str:
@@ -11729,187 +7675,6 @@ def gemini_cli_invoke(
     }
 
 
-def seed_vibe_home(vibe_home: Path) -> dict[str, Any]:
-    """Create an isolated VIBE_HOME for native Vibe runs.
-
-    Vibe discovers user skills/tools from VIBE_HOME, so every harness run gets a
-    fresh home by default. Auth is carried by MISTRAL_API_KEY; if that env var is
-    absent but the user has the documented ~/.vibe/.env file, copy only that env
-    file and no skills/config/agents, preserving baseline isolation."""
-    vibe_home.mkdir(parents=True, exist_ok=True)
-    copied_env = False
-    if not os.environ.get("MISTRAL_API_KEY"):
-        source_home = Path(os.environ.get("VIBE_HOME") or (Path.home() / ".vibe"))
-        src = source_home / ".env"
-        if src.is_file() and src.resolve() != (vibe_home / ".env").resolve():
-            shutil.copy2(src, vibe_home / ".env")
-            copied_env = True
-    return {"vibe_home": str(vibe_home), "vibe_env_file_copied": copied_env}
-
-
-def vibe_env_for_home(vibe_home: Path, model: str | None = None) -> tuple[dict[str, str], dict[str, Any]]:
-    env = os.environ.copy()
-    seeded = seed_vibe_home(vibe_home)
-    env["VIBE_HOME"] = seeded["vibe_home"]
-    if model:
-        env["VIBE_ACTIVE_MODEL"] = model
-    meta = {
-        **seeded,
-        "vibe_home": "<isolated VIBE_HOME outside workdir>",
-        "vibe_home_outside_workdir": True,
-        "config_isolated": True,
-        **({"active_model_env": "VIBE_ACTIVE_MODEL"} if model else {}),
-    }
-    return env, meta
-
-
-def build_vibe_cli_argv(vibe_cmd: str | None = None, *, prompt: str, cwd: Path | str | None = None,
-                        output: str = "streaming", tools: Iterable[str] | None = VIBE_READ_ONLY_TOOLS,
-                        auto_approve: bool = True, max_turns: int | None = None,
-                        max_price: float | None = None, max_tokens: int | None = None) -> list[str]:
-    try:
-        argv = shlex.split(vibe_cmd or VIBE_DEFAULT_CMD)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"invalid --vibe-cmd: {exc}") from exc
-    if not argv:
-        argv = [VIBE_DEFAULT_CMD]
-    argv += ["--prompt", prompt, "--output", output]
-    if cwd is not None:
-        argv += ["--workdir", str(cwd)]
-    argv.append("--trust")
-    if auto_approve:
-        argv.append("--auto-approve")
-    for tool in (tools or ()):  # `re:^$` is the explicit no-tools sentinel.
-        argv += ["--enabled-tools", str(tool)]
-    if max_turns is not None:
-        argv += ["--max-turns", str(max_turns)]
-    if max_price is not None:
-        argv += ["--max-price", str(max_price)]
-    if max_tokens is not None:
-        argv += ["--max-tokens", str(max_tokens)]
-    return argv
-
-
-def redact_vibe_prompt_arg(argv: list[str]) -> list[str]:
-    redacted = list(argv)
-    # The owned prompt is appended after the caller-controlled command prefix.
-    for idx in range(len(redacted) - 2, -1, -1):
-        arg = redacted[idx]
-        if arg == "--prompt":
-            redacted[idx + 1] = "<prompt>"
-            break
-    return redacted
-
-
-def parse_vibe_messages_with_errors(
-    stdout: str,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Parse Vibe --output json (one list) or --output streaming (JSONL).
-
-    The Vibe CLI emits LLMMessage dictionaries (through 2.22) or public
-    history entries (2.23 and later), not a provider-enforced answer schema. The harness therefore treats the final assistant message content as
-    the answer/verdict, while preserving all parsed messages as trace JSONL."""
-    text = coerce_text(stdout).strip()
-    if not text:
-        return [], ["Vibe stream is empty"]
-    try:
-        parsed = stream_json_loads(text)
-    except json.JSONDecodeError:
-        return parse_trace_jsonl_text(text, strict=False)
-    if isinstance(parsed, list):
-        errors = [f"Vibe message {index} is not an object"
-                  for index, item in enumerate(parsed, 1)
-                  if not isinstance(item, dict)]
-        return [item for item in parsed if isinstance(item, dict)], errors
-    if isinstance(parsed, dict):
-        if isinstance(parsed.get("messages"), list):
-            values = parsed["messages"]
-            errors = [f"Vibe message {index} is not an object"
-                      for index, item in enumerate(values, 1)
-                      if not isinstance(item, dict)]
-            return [item for item in values if isinstance(item, dict)], errors
-        return [parsed], []
-    return [], ["Vibe output must be a message object, message list, or JSONL"]
-
-
-def parse_vibe_messages(stdout: str) -> list[dict[str, Any]]:
-    """Compatibility projection; execution boundaries consume parser errors too."""
-    messages, _ = parse_vibe_messages_with_errors(stdout)
-    return messages
-
-
-def _vibe_content_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                if isinstance(item.get("text"), str):
-                    parts.append(item["text"])
-                elif isinstance(item.get("content"), str):
-                    parts.append(item["content"])
-            elif isinstance(item, str):
-                parts.append(item)
-        return "\n".join(parts)
-    return ""
-
-
-def vibe_final_answer(messages: list[dict[str, Any]]) -> str:
-    """Return only a validated assistant message; trace bytes are not answers."""
-    for msg in reversed(messages):
-        if str(msg.get("role", "")).casefold() != "assistant":
-            continue
-        text = _vibe_content_text(msg.get("content")).strip()
-        if text:
-            return text
-    return ""
-
-
-def vibe_usage_and_cost(messages: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, float | None]:
-    terminal = next((message for message in reversed(messages)
-                     if message.get("role") == "assistant"
-                     and isinstance(message.get("content"), str)
-                     and message["content"].strip()), None)
-    if terminal is None:
-        return None, None
-    candidate = terminal.get("usage") or terminal.get("tokens")
-    usage = candidate if (isinstance(candidate, dict)
-                          and normalize_usage(candidate).get("source") != "missing") else None
-    cost: float | None = None
-    for key in ("cost_usd", "total_cost_usd", "total_cost", "cost"):
-        value = terminal.get(key)
-        normalized = normalize_cost(value)
-        if normalized.get("source") != "missing":
-            cost = float(normalized["total_cost"])
-            break
-    return usage, cost
-
-
-def vibe_trace_text(messages: list[dict[str, Any]], stdout: str) -> str:
-    # Raw provider bytes are the audit artifact. Reserializing the clean subset
-    # would erase malformed/non-object records and manufacture trace completeness.
-    return coerce_text(stdout)
-
-
-def vibe_skill_tool_evidence(stdout: str, skill_names: list[str]) -> list[str]:
-    """Detect only completed, schema-valid Vibe `skill` tool lifecycles."""
-    records, errors = parse_trace_jsonl_text(stdout, strict=False)
-    if errors:
-        return []
-    events, metrics = normalize_trace_records(records, source="vibe")
-    if metrics.get("trace_protocol_errors"):
-        return []
-    names = set(skill_names)
-    evidence = []
-    for event in events["events"]:
-        invoked = str(event.get("input_summary") or "")
-        if (event.get("type") == "skill_load" and event_is_completed(event)
-                and event.get("is_error") is not True and invoked in names):
-            evidence.append(f"Vibe skill tool invoked: {invoked}")
-    return evidence[:5]
-
-
 def vibe_cli_invoke(prompt: str, *, model: str | None = None, vibe_cmd: str | None = None,
                     timeout: int = DEFAULT_RUNNER_TIMEOUT_S, cwd: str | Path | None = None,
                     output: str = "streaming", tools: Iterable[str] | None = VIBE_READ_ONLY_TOOLS,
@@ -12435,19 +8200,6 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
     return 2 if budget_stopped else int(recovery_failed)
 
 
-def native_spend_policy(args: argparse.Namespace) -> SpendPolicy | None:
-    ceiling = getattr(args, "max_cost_usd", None)
-    assumption = getattr(args, "assumed_cost_per_run_usd", None)
-    if ceiling is None:
-        if assumption is not None:
-            die("--assumed-cost-per-run-usd requires --max-cost-usd")
-        return None
-    try:
-        return SpendPolicy.from_raw(ceiling, assumption)
-    except (TypeError, ValueError) as exc:
-        die(f"invalid spend policy: {exc}")
-
-
 def run_agent(args: argparse.Namespace) -> int:
     agent = getattr(args, "agent", None)
     if not isinstance(agent, str):
@@ -12494,22 +8246,6 @@ def run_codex(args: argparse.Namespace) -> int:
 # its final word. Every other record type is metadata and may follow the result
 # (observed: `system`/`task_summary`, 2.1.269), so a metadata record type a
 # later Claude Code adds there does not make every run unreadable.
-CLAUDE_SESSION_CONTENT_RECORD_TYPES = frozenset({"assistant", "user", "result", "stream_event"})
-
-
-def claude_terminal_result_index(records: Sequence[Mapping[str, Any]]) -> int | None:
-    """The one owner of Claude's terminal-event rule, shared by the answer
-    parser, the trace dialect and the trigger adapter: exactly one `result`
-    record, and no session content after it. Anything else (no result, two
-    results, a turn after the result) is None: the stream has no final word."""
-    results = [i for i, record in enumerate(records) if record.get("type") == "result"]
-    if len(results) != 1:
-        return None
-    for record in records[results[0] + 1:]:
-        if (record.get("type") in CLAUDE_SESSION_CONTENT_RECORD_TYPES
-                or isinstance(record.get("message"), Mapping)):
-            return None
-    return results[0]
 
 
 def parse_claude_cli_json(stdout: str) -> dict[str, Any]:
@@ -12629,10 +8365,6 @@ class ContextIsolation(Enum):
 # disableBundledSkills drops the skills Claude Code ships; autoMemoryEnabled
 # false keeps the memory under ~/.claude/projects/<cwd> out of the prompt and
 # stops the run writing there.
-CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS = (
-    "--setting-sources", "project", "--strict-mcp-config",
-    "--settings", '{"disableBundledSkills":true,"autoMemoryEnabled":false}',
-)
 
 # --safe-mode keeps OAuth working (unlike --bare) and hides workspace skills
 # and agents too; --disable-slash-commands also drops the skills Claude Code
@@ -12981,156 +8713,12 @@ def codex_structured_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return converted
 
 
-def _walk_codex_host_skills() -> tuple[Path, list[str], list[str]]:
-    """The host skill root, every `SKILL.md` under it (sorted), and every
-    directory walked.
-
-    Codex finds nested and symlinked skills, so follow links, but visit each
-    real directory once so a symlink cycle cannot hang the run."""
-    root = Path.home() / ".agents" / "skills"
-    host_skills: list[str] = []
-    directories: list[str] = []
-    walked: set[str] = set()
-    for directory, subdirs, files in os.walk(root, followlinks=True):
-        real = os.path.realpath(directory)
-        if real in walked:
-            subdirs.clear()
-            continue
-        walked.add(real)
-        directories.append(directory)
-        if "SKILL.md" in files:
-            host_skills.append(str(Path(directory) / "SKILL.md"))
-    host_skills.sort()
-    return root, host_skills, directories
-
-
-def codex_host_skill_paths() -> list[str]:
-    """Every `SKILL.md` under the operator's `~/.agents/skills`, sorted."""
-    return _walk_codex_host_skills()[1]
-
-
 # codex-cli 0.156.1 leaves these unescaped in a `file://` URL and drops tab,
 # newline, and carriage return; everything else outside [A-Za-z0-9_.-] is
 # percent-encoded as UTF-8.
-_CODEX_FILE_URL_SAFE = "/[]^|~';:!$&()*+,=@"
-_CODEX_URL_DROPPED = {ord("\t"): None, ord("\n"): None, ord("\r"): None}
 # A host path ends at the next character Codex puts after one: a quote
 # (optionally backslash-escaped), whitespace, `]`, or `,`. A `:` right before
 # it is Codex's message separator, not the path.
-_CODEX_PATH_TAIL = r'[^\s"\],]*?(?=:?\\*(?:[\s"\],]|$))'
-
-
-def _rust_debug_escape(text: str) -> str:
-    """`text` as Rust's `{:?}` prints it inside a quoted string, which is how a
-    Codex config error echoes a rejected `-c` value."""
-    escapes = {"\\": "\\\\", '"': '\\"', "\t": "\\t", "\n": "\\n", "\r": "\\r", "\0": "\\0"}
-    return "".join(escapes.get(ch) or (ch if ch.isprintable() else f"\\u{{{ord(ch):x}}}") for ch in text)
-
-
-def _codex_path_spellings(path: str) -> set[str]:
-    """Every way Codex has been seen to print `path`: raw, TOML- or
-    JSON-escaped, any of those again through Rust's `{:?}`, and as a
-    `file://` URL."""
-    encoded = {path, toml_basic_string(path)[1:-1], json.dumps(path)[1:-1],
-               json.dumps(path, ensure_ascii=False)[1:-1]}
-    url = "file://" + urllib.parse.quote(path.translate(_CODEX_URL_DROPPED), safe=_CODEX_FILE_URL_SAFE)
-    return encoded | {_rust_debug_escape(text) for text in encoded} | {url}
-
-
-@_dataclass(frozen=True)
-class CodexHostPathRedactor:
-    """Removes host skill paths from Codex output.
-
-    `roots` are the spellings of `~/.agents/skills` and its realpath: any span
-    starting with one is redacted up to the next path delimiter, which covers
-    paths Codex prints in a form nobody derived. `paths` are the spellings of
-    each walked directory, each `SKILL.md`, and their realpaths, which also
-    covers a path with a space or quote in it and a symlink target outside the
-    root. Both are sorted longest first so a whole path wins over its prefix."""
-
-    roots: tuple[str, ...]
-    paths: tuple[str, ...]
-
-    def __call__(self, text: str) -> str:
-        present = [s for s in self.paths if s in text]
-        if not present and not any(s in text for s in self.roots):
-            return text
-        prefixes = sorted([*present, *self.roots], key=len, reverse=True)
-        pattern = "(?:" + "|".join(map(re.escape, prefixes)) + ")" + _CODEX_PATH_TAIL
-        return re.sub(pattern, "[REDACTED]", text)
-
-
-def codex_host_path_redactor() -> CodexHostPathRedactor:
-    root, host_skills, directories = _walk_codex_host_skills()
-    roots = {str(root), os.path.realpath(root)}
-    paths: set[str] = set()
-    for path in {*host_skills, *directories}:
-        for spelled in {path, os.path.realpath(path)} - roots:
-            paths |= _codex_path_spellings(spelled)
-    root_spellings: set[str] = set().union(*(_codex_path_spellings(r) for r in roots))
-    return CodexHostPathRedactor(
-        roots=tuple(sorted(root_spellings, key=len, reverse=True)),
-        paths=tuple(sorted(paths - root_spellings, key=len, reverse=True)))
-
-
-def toml_basic_string(value: str) -> str:
-    """Encode `value` as a quoted TOML basic string.
-
-    `json.dumps` is the wrong encoder here: JSON represents a `str` as
-    UTF-16, so a character above U+FFFF (an emoji, for example) comes out as
-    an escaped surrogate pair (`\\ud83d\\ude80`), which is not a Unicode
-    scalar value and not legal TOML; Codex then reads the whole
-    `skills.config` value as an opaque string and dies with `Error loading
-    config.toml: invalid type: string ...`. TOML also never accepts `\\/`,
-    which JSON allows (though does not by default emit). This encoder escapes
-    only the quote, the backslash, and control characters (TOML requires
-    every control character other than tab escaped, including U+007F, which
-    JSON does not escape), and otherwise copies each character through
-    literally, astral code points included."""
-    out = ['"']
-    for ch in value:
-        code = ord(ch)
-        if ch == '"':
-            out.append('\\"')
-        elif ch == '\\':
-            out.append('\\\\')
-        elif ch == '\b':
-            out.append('\\b')
-        elif ch == '\t':
-            out.append('\\t')
-        elif ch == '\n':
-            out.append('\\n')
-        elif ch == '\f':
-            out.append('\\f')
-        elif ch == '\r':
-            out.append('\\r')
-        elif code < 0x20 or code == 0x7F:
-            out.append(f"\\u{code:04x}")
-        else:
-            out.append(ch)
-    out.append('"')
-    return "".join(out)
-
-
-def codex_trigger_context_isolation_args() -> tuple[list[str], list[str]]:
-    """Codex flags for a trigger, answer, or judge run, and the form a row records.
-
-    An isolated CODEX_HOME still lists every skill under the operator's
-    ~/.agents/skills, Codex's bundled skills, and the account's codex_apps
-    connector. A run must keep the skills it mounts (`$CODEX_HOME/skills`, the
-    workspace's `.agents/skills`) listed, so it cannot hide the skill catalog.
-    Codex has no switch for the ~/.agents/skills root alone, so each host
-    skill is disabled by path; the recorded form counts them instead of
-    listing the operator's skill paths. Moving HOME would also move tool and
-    version-manager lookups."""
-    host_skills = codex_host_skill_paths()
-    entries = ",".join(f"{{path={toml_basic_string(path)},enabled=false}}" for path in host_skills)
-
-    def args(skills_config: str) -> list[str]:
-        return ["-c", "skills.bundled.enabled=false", "-c", skills_config, "--disable", "apps"]
-
-    return (args(f"skills.config=[{entries}]"),
-            args(f"skills.config=<{len(host_skills)} host skill(s) disabled>"))
 
 
 def codex_context_isolation_args(isolation: ContextIsolation) -> tuple[list[str], list[str]]:
@@ -15375,7 +10963,7 @@ class _ToolReceiptJournal:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        session = _BridgeSession(self, turn, directory, backend.limits)
+        session = _BridgeSession(self, turn, directory, backend.limits, validate_subagent_response)
         plan = ProcessInvocationPlan.from_values(backend.argv, input_text=opening_bytes.decode("utf-8"),
                                                 cwd=workspace, timeout_s=backend.timeout)
         attempt = _invoke_tool_dialogue(plan, session)
@@ -18146,6 +13734,7 @@ class _TriggerReportRows:
 def _validated_trigger_protocol(
     protocol: dict[str, Any], *, label: str, runs_per_query: int,
     design_pairs: set[tuple[str, str | None]],
+    expected_modules: tuple[str, ...] | None = None,
 ) -> dict[str, dict[str, bool]]:
     """Type and cross-check the behavior contract against the declared design."""
     if protocol.get("schema_version") != 1:
@@ -18161,7 +13750,7 @@ def _validated_trigger_protocol(
     if protocol_runs_per_query != runs_per_query:
         die(f"{label} protocol runs_per_query disagrees with its report")
     try:
-        validate_trigger_harness_identity(protocol.get("harness_identity"), label)
+        validate_trigger_harness_identity(protocol.get("harness_identity"), label, expected_modules=expected_modules)
     except ValueError as exc:
         die(str(exc))
 
@@ -18268,7 +13857,7 @@ def _trigger_protocol_observation_error(
     return None
 
 
-def _trigger_report_rows(report: dict[str, Any], label: str) -> _TriggerReportRows:
+def _trigger_report_rows(report: dict[str, Any], label: str, *, expected_modules: tuple[str, ...] | None = None) -> _TriggerReportRows:
     """Re-erect the typed trigger contract from one persisted matrix report.
     Strict at the boundary: a file that is not a skill-trigger-matrix report, or
     any row whose stored flags contradict the typed observation, is rejected
@@ -18350,7 +13939,7 @@ def _trigger_report_rows(report: dict[str, Any], label: str) -> _TriggerReportRo
         expected_cells.add(cell_key)
     protocol_requirements = _validated_trigger_protocol(
         protocol, label=label, runs_per_query=runs_per_query,
-        design_pairs={(agent, model) for agent, model, _ in expected_cells},
+        design_pairs={(agent, model) for agent, model, _ in expected_cells}, expected_modules=expected_modules,
     )
     observations: list[MatrixObservation] = []
     cells: dict[tuple[str, str | None, str], dict[int, MatrixObservation]] = {}
@@ -18429,8 +14018,9 @@ def build_trigger_comparison(baseline: dict[str, Any], ablation: dict[str, Any])
     CONFIRMED_CAUSAL needs verified provenance, coverage, and a significant
     observed drop; an observed-but-insignificant drop downgrades to
     INDETERMINATE (never REFUTED, which would wrongly claim "no regression")."""
-    base_report = _trigger_report_rows(baseline, "--baseline")
-    abl_report = _trigger_report_rows(ablation, "--ablation")
+    expected_modules = tuple(trigger_harness_identity()["modules"])
+    base_report = _trigger_report_rows(baseline, "--baseline", expected_modules=expected_modules)
+    abl_report = _trigger_report_rows(ablation, "--ablation", expected_modules=expected_modules)
     if baseline.get("ablation") is not None:
         die("--baseline must be an unablated trigger run (it declares an ablation)")
     if (not isinstance(ablation.get("ablation"), str)
@@ -19246,17 +14836,6 @@ def model_analysis_from_paired(paired: dict[str, Any]) -> dict[str, Any]:
     losers = [row["model"] for row in ranking
               if isinstance(row["lift"], (int, float)) and row["lift"] <= 0 and isinstance(overall, (int, float)) and overall > 0]
     return {"ranking": ranking, "lift_losers": losers}
-
-
-def _expected_component(comp: dict[str, Any], skill_paths: list[str]) -> Component:
-    """A manifest-declared component as a Component with a resolved skill_root, so
-    its fingerprint can be compared against the runner-recorded one."""
-    root = resolve_skill_root(comp, skill_paths)
-    if root is None:
-        raise ValueError("ablation component has no resolvable skill_root")
-    return Component(cls=ComponentClass(comp.get("class") or component_class(comp)),
-                     mechanism=Mechanism(comp.get("mechanism")),
-                     skill_root=root, target=comp.get("target", {}))
 
 
 def _verify_recorded_ablation_provenance(provs: list[dict[str, Any]], measured_count: int, expected: ExpectedProvenance, ws_tree_hashes: list[Any]) -> tuple[bool, str]:
@@ -21817,8 +17396,6 @@ def aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
-
-
 def case_by_id(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {c["id"]: c for c in iter_cases(manifest)}
 
@@ -23336,7 +18913,6 @@ def render_viewer(args: argparse.Namespace) -> int:
     return 0
 
 
-
 def read_skill_text(manifest_path: Path, manifest: dict[str, Any], override: str | None = None) -> str:
     paths = [override] if override else manifest.get("skill_paths", [])
     repo_root = repo_root_for_manifest(manifest_path)
@@ -23878,14 +19454,6 @@ def legacy_inferred_should_trigger(case: dict[str, Any]) -> bool:
         if isinstance(assertion, dict):
             text += " " + str(assertion.get("pattern", assertion.get("value", "")))
     return not _LEGACY_TRIGGER_NEGATION_RE.search(text)
-
-
-def expected_trigger_polarity(case: dict[str, Any]) -> str:
-    """Resolve discovery polarity only from the validated explicit boolean."""
-    value = case.get("should_trigger")
-    if not isinstance(value, bool):
-        raise TypeError("trigger case requires an explicit boolean should_trigger")
-    return "TRIGGER" if value else "NO_TRIGGER"
 
 
 def case_polarity(case: dict[str, Any]) -> str:
@@ -25741,19 +21309,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     for subparser in sub.choices.values():
         subparser.allow_abbrev = False
     return parser
-
-
-def _stderr_with_warning(stderr: str, warning: str, *, limit: int = 4000) -> str:
-    """Append a diagnostic while preserving it inside the stderr size cap."""
-    warning = warning.strip()
-    if len(warning) >= limit:
-        return warning[:limit]
-    base = stderr.rstrip()
-    if not base:
-        return warning
-    available = max(0, limit - len(warning) - 1)
-    prefix = base[:available].rstrip()
-    return f"{prefix}\n{warning}" if prefix else warning
 
 
 def validate_cli_command(args: argparse.Namespace) -> int:

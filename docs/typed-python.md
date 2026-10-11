@@ -82,18 +82,16 @@ consumer-only type check does not prove malformed wire data cannot construct the
 3. `[tool.ty.src]` to hold only `include`, so the gate cannot exclude a packaged module: no
    `tool.ty.overrides` glob may re-scope one, and no `ty.toml` may replace the pyproject
    configuration;
-4. the explicit `TRIGGER_IDENTITY_MODULES` conservative module inventory to be packaged and to
-   contain the trigger entrypoints and shared process/pair owners without pulling their
-   standalone CLI, grading, judge, report, Jetty, or unsupported-Gemini-trigger modules into causal
-   identity;
+4. the derived schema4 trigger inventory to contain packaged executable roots, shared process,
+   input, CLI, trace, and spend owners, including eager Gemini trace callbacks, while excluding
+   separated answer, grading, judge, report, and Jetty execution owners;
 5. every `*_contracts.py` boundary module to be named by the abstraction documentation; and
 6. Linux and Windows CI to promote `ty` warnings to failures.
 
 Packaging, static analysis, and causal identity answer different questions; filesystem equality
 between them would make every unrelated report or CLI module edit invalidate trigger comparability.
-The inventory is conservative at module granularity: because `skill_benchmark.py` still combines
-trigger and non-trigger orchestration, every edit to that file intentionally invalidates trigger
-identity. When adding a Python module, let the packaging/docs failures enumerate integration points
+The package-bounded inventory remains conservative at module granularity. Each reached module
+enters the identity with its current content digest. When adding a Python module, let the packaging/docs failures enumerate integration points
 and update a semantic identity only when that module can change the named evidence surface. When
 adding a closed union or refined scalar, add a runtime malformed-input test and a static narrowing
 or precision proof in `type_tests/abstraction_contracts.py`. Do not make a diagnostic disappear by

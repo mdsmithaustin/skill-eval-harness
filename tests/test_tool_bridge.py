@@ -10,6 +10,7 @@ from pathlib import Path
 
 from helpers import make_eval_repo, run_cli
 
+import process_runtime as pr
 import skill_benchmark as sb
 
 
@@ -409,7 +410,7 @@ class BridgeProcessTests(unittest.TestCase):
                 if process.pid in observations:
                     stopped_before_wait.append(observations[process.pid])
                 return wait(process, *args, **kwargs)
-            with mock.patch.object(sb, "recovery_group_stopped", group_stopped), mock.patch.object(
+            with mock.patch.object(pr, "recovery_group_stopped", group_stopped), mock.patch.object(
                     sb.subprocess.Popen, "wait", reap):
                 self.assertEqual(sb.run_subagent_tasks(rows, runs, backend, replay_mode="strict"), 0)
             self.assertEqual(stopped_before_wait, [True, True])

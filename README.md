@@ -660,6 +660,11 @@ skill-eval-harness/
 ├── skill_benchmark.py          # the CLI, grading, reporting, and runner adapters
 ├── run_pi_trigger_eval.py      # skill-pi-trigger-eval: the trigger matrix with the Pi adapter alone
 ├── run_trigger_matrix.py       # activation matrix across agents × models (claude/codex/pi/vibe/stub adapters)
+├── skill_inputs.py            # manifest loading, skill materialization, and treatment identity
+├── process_runtime.py         # shared supervisor, recovery, bridge, and stop state
+├── trace_normalization.py     # trace dialect callbacks, detection, and artifact writing
+├── agent_clis.py              # provider homes, argv, and isolation helpers
+├── trigger_identity.py        # derived packaged trigger source identity
 ├── ablation_model.py           # typed ablation/provenance/task value objects
 ├── agent_capabilities.py       # unified backend surfaces, capabilities, CLI options, smoke, and failure policy
 ├── artifact_contracts.py       # closed persisted-artifact observations and integrity verification

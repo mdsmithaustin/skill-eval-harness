@@ -4,7 +4,7 @@ import re
 import unittest
 from pathlib import Path
 
-import skill_benchmark as sb
+import trigger_identity as ti
 
 ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -76,26 +76,21 @@ class TypeCoverageContractTests(unittest.TestCase):
         # version; a bump must be deliberate (CONTRIBUTING.md).
         self.assertIn("regex==2026.7.19", toml_array("project", "dependencies"))
 
-    def test_trigger_semantic_identity_is_an_explicit_packaged_module_inventory(self):
-        packaged = {
-            f"{name}.py" for name in toml_array("tool.setuptools", "py-modules")
-        }
-        trigger_modules = set(sb.TRIGGER_IDENTITY_MODULES)
+    def test_trigger_semantic_identity_is_derived_from_packaged_execution(self):
+        packaged = {f"{name}.py" for name in toml_array("tool.setuptools", "py-modules")}
+        trigger_modules = set(ti.trigger_harness_identity()["modules"])
         self.assertTrue(trigger_modules <= packaged)
         self.assertTrue({
-            "skill_benchmark.py", "run_pi_trigger_eval.py",
-            "run_trigger_matrix.py", "trigger_contracts.py",
-            "trigger_reporting.py", "invocation_contracts.py",
-            "experimental_pairs.py",
-            "spend_contracts.py", "spend_runtime.py",
+            "run_pi_trigger_eval.py", "run_trigger_matrix.py", "trigger_contracts.py",
+            "trigger_reporting.py", "invocation_contracts.py", "skill_inputs.py",
+            "trace_normalization.py", "process_runtime.py", "agent_clis.py", "trigger_identity.py",
+            "spend_contracts.py", "spend_runtime.py", "gemini_contracts.py",
         } <= trigger_modules)
-        self.assertTrue({
-            "cli_contracts.py", "grading_contracts.py", "judge_contracts.py",
-            "report_contracts.py", "jetty_contracts.py", "gemini_contracts.py",
-        }.isdisjoint(trigger_modules))
-        upgrading = (ROOT / "docs" / "upgrading.md").read_text(encoding="utf-8")
-        self.assertIn("conservative audited module-level", upgrading)
-        self.assertIn("skill_benchmark.py` remains a monolith", upgrading)
+        self.assertTrue({"skill_benchmark.py", "grading_contracts.py", "judge_contracts.py",
+                         "report_contracts.py", "jetty_contracts.py"}.isdisjoint(trigger_modules))
+        upgrading = (ROOT / "docs/upgrading.md").read_text(encoding="utf-8")
+        self.assertIn("package-bounded", upgrading)
+        self.assertIn("schema4", upgrading)
 
     def test_every_boundary_module_is_named_in_the_abstraction_docs(self):
         documented = "\n".join(

@@ -13,6 +13,7 @@ from helpers import (
     write_with_skill_task,
 )
 
+import process_runtime as pr
 import skill_benchmark as sb
 
 
@@ -127,7 +128,7 @@ class RecoveryCompatibilityTests(unittest.TestCase):
                             raise OSError("capture storage failed")
                         return write_bytes(path, content)
 
-                    with mock.patch.object(sb, "write_json", side_effect=fail_process), \
+                    with mock.patch.object(pr, "write_json", side_effect=fail_process), \
                             mock.patch.object(Path, "write_bytes", autospec=True, side_effect=fail_raw):
                         code, _, stderr = run_cli(
                             "run-agent", "--agent", "claude", "--tasks", tasks, "--runs", root / "runs",

@@ -18,6 +18,9 @@ import argparse
 import json
 from pathlib import Path
 
+from cli_contracts import native_spend_policy
+from json_contracts import write_json
+from process_runtime import stops_on_signal
 from run_trigger_matrix import (
     DEFAULT_TIMEOUT_S,
     MatrixRunStopped,
@@ -25,12 +28,7 @@ from run_trigger_matrix import (
     matrix_exit_code,
     run_matrix,
 )
-from skill_benchmark import (
-    VALID_SPLITS,
-    native_spend_policy,
-    stops_on_signal,
-    write_json,
-)
+from skill_inputs import VALID_SPLITS
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

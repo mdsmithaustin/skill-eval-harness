@@ -394,11 +394,12 @@ raw output string
   complements rather than replaces runtime parsing; manifest dictionaries and external
   embedding/script values remain untrusted wire data. The complete inventory and extension rule
   are in [`typed-python.md`](typed-python.md).
-- Packaging inventory, `ty` source coverage, and the versioned trigger-semantic module inventory
+- Packaging inventory, `ty` source coverage, and the versioned trigger source inventory
   are separate contracts. A standalone report-only module is excluded from trigger identity, while
   a declared trigger dependency changes `harness_identity` and blocks causal reuse. The inventory is
-  deliberately conservative at module granularity: because `skill_benchmark.py` still owns both
-  trigger and non-trigger orchestration, any edit to that monolith invalidates trigger evidence.
+  conservative at module granularity. Schema4 derives the packaged closure of Matrix, Pi and
+  canonical registry references. Shared owner edits change trigger identity. Separated answer,
+  grading, judge and report edits leave it unchanged.
 - The command line crosses the same kind of boundary. `argparse.Namespace` becomes a frozen
   `ValidatedLegacyCLIInvocation`; commands form a closed enum, paths and domain identities are projected to their
   typed values, numeric limits reject booleans and non-finite/out-of-range values, and dispatch
@@ -490,7 +491,7 @@ legacy artifact never recorded. In particular:
   `--agent-cmd` reply; Vibe's stop stays unavailable because its output carries none.)*;
 - `RunnerOutcome` is retained as a compatibility factory, so new code should construct the explicit
   union variants directly;
-- `skill_benchmark.py` remains a shared orchestration monolith, so the conservative trigger identity
-  must invalidate on unrelated edits to that module until trigger ownership is extracted; and
+- trigger identity covers source reproducibility, while external tools, credentials and environment
+  dependencies still require their own execution evidence; and
 - provider payload dictionaries are preserved for diagnostics, but no downstream decision should
   bypass the typed adapter to read them directly.

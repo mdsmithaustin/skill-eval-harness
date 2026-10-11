@@ -84,67 +84,52 @@ from ablation_model import TRIGGER_MEASUREMENT_EVIDENCE_CLASS, EvidenceClass, Pr
 from agent_capabilities import (
     AGENT_CAPABILITIES,
     CODEX_TRIGGER_DEFAULT_CMD,
+    VIBE_DEFAULT_CMD,
     add_surface_cli_options,
     binding_for,
     surface_implementations,
     surface_option_values,
 )
-from completion_contracts import StopClass, StopObservation, claude_result_stop
-from content_digests import file_sha256
-from invocation_contracts import RawProcessCapture
-from skill_benchmark import (
+from agent_clis import (
     CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS,
     CODEX_HOME_FILES,
-    VALID_SPLITS,
-    VIBE_DEFAULT_CMD,
     VIBE_READ_ONLY_TOOLS,
-    AblationError,
     CodexRollout,
-    PiStream,
-    ProcessInvocationPlan,
-    build_canonical_skill_tree,
     build_vibe_cli_argv,
-    canonical_json_sha256,
-    canonical_trigger_query,
-    claude_terminal_result_index,
     codex_env_for_home,
     codex_host_path_redactor,
     codex_rollout_skill_loads,
     codex_trigger_context_isolation_args,
-    detect_trigger_detection,
-    detect_trigger_records,
-    event_is_completed,
+    locate_codex_rollout,
+    vibe_env_for_home,
+)
+from cli_contracts import native_spend_policy
+from completion_contracts import StopClass, StopObservation, claude_result_stop
+from content_digests import canonical_json_sha256, file_sha256
+from invocation_contracts import ProcessInvocationPlan, RawProcessCapture
+from json_contracts import iter_json_objects, strict_json_loads, write_json
+from process_runtime import (
+    invoke_argv_with_timeout,
+    skill_benchmark_stopped,
+    stops_on_signal,
+)
+from skill_inputs import (
+    VALID_SPLITS,
+    AblationError,
+    build_canonical_skill_tree,
+    canonical_trigger_query,
     expected_trigger_polarity,
     frontmatter_value,
-    invoke_argv_with_timeout,
     is_trigger_case,
     iter_cases,
-    iter_json_objects,
     load_manifest_source,
-    locate_codex_rollout,
     materialize_trigger_ablation,
     mount_skill_tree,
     mounted_skills_by_id,
-    native_spend_policy,
-    normalize_trace_records,
-    parse_trace_jsonl_text,
     repo_root_for_manifest,
-    safe_trace_label,
-    skill_benchmark_stopped,
     skill_root_keys_for,
     skill_tree_hash,
-    stops_on_signal,
-    stream_duplicate_keys,
-    stream_usage_and_cost,
-    strict_json_loads,
-    trace_dialect_for,
-    trigger_harness_identity,
     trigger_manifest_identity,
-    vibe_env_for_home,
-    vibe_final_answer,
-    vibe_skill_tool_evidence,
-    write_json,
-    write_trace_artifacts,
 )
 from spend_contracts import (
     MatrixCall,
@@ -163,6 +148,22 @@ from spend_runtime import (
     WorkerRaised,
 )
 from telemetry import Measurement, Money
+from trace_contracts import event_is_completed
+from trace_normalization import (
+    PiStream,
+    claude_terminal_result_index,
+    detect_trigger_detection,
+    detect_trigger_records,
+    normalize_trace_records,
+    parse_trace_jsonl_text,
+    safe_trace_label,
+    stream_duplicate_keys,
+    stream_usage_and_cost,
+    trace_dialect_for,
+    vibe_final_answer,
+    vibe_skill_tool_evidence,
+    write_trace_artifacts,
+)
 from trigger_contracts import (
     FailedTriggerObservation,
     InvocationOutcome,
@@ -187,6 +188,7 @@ from trigger_contracts import (
     validated_trigger_model,
     validated_trigger_protocol_limits,
 )
+from trigger_identity import assert_trigger_sources_unchanged, trigger_harness_identity
 from trigger_reporting import (
     summarize_trigger_cohort,
     summarize_trigger_matrix,
@@ -1808,6 +1810,12 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
 
     if abort is not None:
         raise MatrixRunStopped(abort, report)
+    try:
+        assert_trigger_sources_unchanged(protocol["harness_identity"])
+    except RuntimeError as exc:
+        report["evidence_class"] = "incomplete_trigger_measurement"
+        report["source_consistency"] = {"status": "changed", "error": str(exc)}
+        raise MatrixRunStopped(exc, report) from exc
     return report
 
 

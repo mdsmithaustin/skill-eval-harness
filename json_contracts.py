@@ -5,6 +5,7 @@ import json
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, NoReturn
 
 
@@ -247,3 +248,32 @@ def strict_json_equal(left: Any, right: Any) -> bool:
     right_wire = json.dumps(
         right_frozen, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return left_wire == right_wire
+
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(
+        data, indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
+
+
+def iter_json_objects(text: str, *, strict: bool = True):
+    """Yield each parseable JSON value found line-by-line in a runner's stream,
+    silently skipping non-JSON lines. The one scanning loop shared by trigger
+    detection, stream telemetry, and the agent adapters — previously five
+    hand-rolled copies of the same try/except.
+
+    `strict=True` applies the artifact rule (a repeated object key raises);
+    `strict=False` applies the external-CLI stream rule (`stream_json_loads`:
+    last value wins), for bytes an agent CLI emitted and the harness does not
+    control. A line that is not JSON is skipped either way."""
+    loads = strict_json_loads if strict else stream_json_loads
+    for line in text.splitlines():
+        try:
+            yield loads(line)
+        except StrictJSONViolation as exc:
+            raise ValueError(exc.msg) from exc
+        except json.JSONDecodeError as exc:
+            if exc.__cause__ is not None:
+                raise ValueError(exc.msg) from exc
+            continue
