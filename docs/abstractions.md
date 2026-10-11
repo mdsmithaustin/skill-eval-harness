@@ -238,10 +238,10 @@ hashed paths are the paths an agent lists. The judge's explore-surface digest fr
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract for ordinary rows. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11882`), Claude (`run_claude:12171`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11913`), Claude (`run_claude:12202`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:15464`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4293` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:15495`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:4296` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -258,7 +258,17 @@ independently set timeout, return code, answer, and failure into a contradictory
 calls no model during default grading; it reads what the runner left behind. The explicit
 `--allow-scripts` and `--embed-cmd` modes may invoke caller-supplied external oracle subprocesses.
 
-`spend_contracts.py` owns an immutable `AnswerCall | SubagentTurnCall | JudgeCall | JettyCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` owns serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. Native runners retain workspace, subprocess, artifact, and recovery policy. Reports read each ledger without changing the immutable answer design. The [native spend walkthrough](limit-native-spend.md) describes the operator contract.
+`spend_contracts.py` owns an immutable `AnswerCall | SubagentTurnCall | JudgeCall | JettyCall | MatrixCall` plan, closed call states, and observed, assumed, unpriced, or proven nonbillable charges. It reuses `RunCoordinate`, `Money`, and `Measurement`. Derived totals retain unknown costs as partial evidence. `spend_runtime.py` owns serial `SpendAdmission.run`, which publishes admission before its callback and settlement afterward in one exclusive invocation directory. Native runners retain workspace, subprocess, artifact, and recovery policy. Reports read each ledger without changing the immutable answer design. The [native spend walkthrough](limit-native-spend.md) describes the operator contract.
+
+For trigger evaluation, `MatrixPopulation` freezes every authored repetition and derives an
+explicitly paid-only `SpendPlan`. `SpendAdmission.bounded_map` owns the combined worker bound,
+all ready settlement batches, and the sole ledger writer. Matrix workers return immutable
+retained price and observation values. Matrix owns treatment preparation and trace publication,
+and Pi calls the same operation. `RawProcessCapture` retains private facts inside the existing
+supervisor before fallible output transformations. `NotStartedTriggerObservation` and
+`FailedTriggerObservation` keep refusal and failed discovery separate from process lifecycle.
+`matrix_observation_from_row` dispatches those variants and legacy actual rows for saved readers.
+All variants contribute to the report denominator. Incomplete cohorts have no rate fields.
 
 The existing Jetty owner stores one digest-keyed task aggregate with shared upload facts and
 ordered submission attempts. Every native attempt has a stable UUID and ordered immutable
@@ -555,7 +565,7 @@ by domain, difficulty, trigger type, and success goal. Case flags mark saturated
 flaky, and with-skill-failed cases, and `effect_estimates.ceiling_or_floor` separates the two
 ways a case stops discriminating: both arms always pass (ceiling) or both always fail (floor, which
 `suggest-cases` never offers for hardening). These flags, the leakage lint
-(`prompt_assertion_leakage_findings:987`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:990`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as

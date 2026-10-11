@@ -14,10 +14,13 @@ from typing import Any, NoReturn, TypeAlias
 from trigger_contracts import (
     CompleteSkillTriggerResult,
     CompleteTriggerResult,
+    IncompleteCellResult,
     IncompleteTriggerResult,
     InvocationState,
+    MatrixObservation,
     TriggerExpectation,
-    TriggerObservation,
+    TriggerFailureStage,
+    TriggerNotStartedReason,
 )
 
 
@@ -55,11 +58,11 @@ class CompleteTriggerCohort:
 class IncompleteTriggerReason:
     """A counted, closed reason why a trigger observation is incomplete."""
 
-    state: InvocationState
+    state: InvocationState | TriggerNotStartedReason | TriggerFailureStage
     count: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.state, InvocationState) or self.state is InvocationState.COMPLETE:
+        if not isinstance(self.state, (InvocationState, TriggerNotStartedReason, TriggerFailureStage)) or self.state is InvocationState.COMPLETE:
             raise ValueError("incomplete cohort reasons require a non-complete invocation state")
         _natural(self.count, "incomplete reason count")
         if self.count == 0:
@@ -106,17 +109,17 @@ class EmptyTriggerCohort:
 TriggerCohort: TypeAlias = CompleteTriggerCohort | IncompleteTriggerCohort | EmptyTriggerCohort
 
 
-def summarize_trigger_cohort(observations: Sequence[TriggerObservation]) -> TriggerCohort:
+def summarize_trigger_cohort(observations: Sequence[MatrixObservation]) -> TriggerCohort:
     if not observations:
         return EmptyTriggerCohort()
 
     measured: list[CompleteTriggerResult | CompleteSkillTriggerResult] = []
-    reasons: Counter[InvocationState] = Counter()
+    reasons: Counter[InvocationState | TriggerNotStartedReason | TriggerFailureStage] = Counter()
     for observation in observations:
         result = observation.result
         if isinstance(result, (CompleteTriggerResult, CompleteSkillTriggerResult)):
             measured.append(result)
-        elif isinstance(result, IncompleteTriggerResult):
+        elif isinstance(result, (IncompleteTriggerResult, IncompleteCellResult)):
             reasons[result.state] += 1
         else:
             _assert_never(result)
@@ -185,7 +188,7 @@ def trigger_cohort_as_dict(cohort: TriggerCohort) -> dict[str, Any]:
 
 
 def _query_summary_as_dict(query_id: str, query: str, expectation: TriggerExpectation,
-                           observations: Sequence[TriggerObservation]) -> dict[str, Any]:
+                           observations: Sequence[MatrixObservation]) -> dict[str, Any]:
     block = trigger_cohort_as_dict(summarize_trigger_cohort(observations))
     renamed = {
         "query_id": query_id,
@@ -204,9 +207,9 @@ def _query_summary_as_dict(query_id: str, query: str, expectation: TriggerExpect
     return {**renamed, **block, **(constraints.as_dict() if constraints else {})}
 
 
-def summarize_trigger_matrix(observations: Iterable[TriggerObservation]) -> list[dict[str, Any]]:
+def summarize_trigger_matrix(observations: Iterable[MatrixObservation]) -> list[dict[str, Any]]:
     """Group typed observations and serialize only through the cohort owner."""
-    cells: dict[tuple[str, str | None], list[TriggerObservation]] = {}
+    cells: dict[tuple[str, str | None], list[MatrixObservation]] = {}
     for observation in observations:
         cells.setdefault((observation.agent, observation.model), []).append(observation)
 
@@ -215,7 +218,7 @@ def summarize_trigger_matrix(observations: Iterable[TriggerObservation]) -> list
         cells.items(), key=lambda item: (item[0][0], str(item[0][1])),
     ):
         grouped_queries: dict[
-            tuple[str, str, TriggerExpectation], list[TriggerObservation]
+            tuple[str, str, TriggerExpectation], list[MatrixObservation]
         ] = {}
         for observation in cell_observations:
             query_id = (

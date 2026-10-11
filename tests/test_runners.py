@@ -1745,16 +1745,14 @@ class RunnerOutcomeContractTests(unittest.TestCase):
                 f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
                 "pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('token')\n",
                 encoding="utf-8")
-            started = time.monotonic()
             result = sb.codex_cli_invoke(
                 "prompt", isolation=sb.ContextIsolation.WORKSPACE, codex_cmd=f"{sys.executable} {fake_codex}",
                 cwd=root / "workspace", timeout=2)
-            elapsed = time.monotonic() - started
 
             self.assertEqual(result["answer"], "token")
             self.assertEqual(result["returncode"], 0)
             self.assertFalse(result["timed_out"])
-            self.assertLess(elapsed, 1.0)
+            self.assertLess(result["elapsed_ms"], 1000)
             self.assertEqual(result["environment"]["process_group_cleanup"]["signal"], "SIGKILL")
             child_pid = int(pid_file.read_text(encoding="utf-8"))
             self._assert_pid_stopped(child_pid)

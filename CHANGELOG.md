@@ -4,6 +4,12 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Trigger matrix and Pi evaluation accept per-invocation dollar admission ceilings. One bounded
+  controller settles ready cells before new admission, retains original paid evidence across
+  discovery failures, and reports every planned repetition. Paid refusals exit 2 without
+  invented process fields. Trusted offline Stub work can continue after paid closure. Saved
+  readers accept distinct refusal and discovery-failure rows. See [matrix spend](docs/limit-native-spend.md#trigger-matrices-and-pi-evaluations).
+
 - `run-jetty` accepts an invocation dollar ceiling for fresh submissions. Fresh zero ceilings
   perform no HTTP requests. Earlier reconciliation and exact durable replay remain available.
   Ordered attempt history preserves unknown replacements and lazy schema 1 migration. Current

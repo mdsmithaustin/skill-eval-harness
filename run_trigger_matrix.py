@@ -66,11 +66,13 @@ import shutil
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import Iterable, Mapping
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, ClassVar
 
 # Preserve one module identity under the documented direct-script entrypoint;
@@ -89,6 +91,7 @@ from agent_capabilities import (
 )
 from completion_contracts import StopClass, StopObservation, claude_result_stop
 from content_digests import file_sha256
+from invocation_contracts import RawProcessCapture
 from skill_benchmark import (
     CLAUDE_TRIGGER_CONTEXT_ISOLATION_ARGS,
     CODEX_HOME_FILES,
@@ -122,10 +125,12 @@ from skill_benchmark import (
     materialize_trigger_ablation,
     mount_skill_tree,
     mounted_skills_by_id,
+    native_spend_policy,
     normalize_trace_records,
     parse_trace_jsonl_text,
     repo_root_for_manifest,
     safe_trace_label,
+    skill_benchmark_stopped,
     skill_root_keys_for,
     skill_tree_hash,
     stops_on_signal,
@@ -141,10 +146,30 @@ from skill_benchmark import (
     write_json,
     write_trace_artifacts,
 )
+from spend_contracts import (
+    MatrixCall,
+    MatrixPopulation,
+    MatrixScheduleCell,
+    NoModelSpend,
+    SpendPolicy,
+)
+from spend_runtime import (
+    BoundedRunError,
+    MatrixNotStarted,
+    NotStarted,
+    Priced,
+    SpendAdmission,
+    Started,
+    WorkerRaised,
+)
+from telemetry import Measurement, Money
 from trigger_contracts import (
+    FailedTriggerObservation,
     InvocationOutcome,
     InvocationState,
     LegacyAttribution,
+    MatrixObservation,
+    NotStartedTriggerObservation,
     SkillAttribution,
     SkillId,
     SkillTriggerConstraints,
@@ -153,6 +178,8 @@ from trigger_contracts import (
     TriggerEvidence,
     TriggerEvidenceKind,
     TriggerExpectation,
+    TriggerFailureStage,
+    TriggerNotStartedReason,
     TriggerObservation,
     TriggerQueryDefinition,
     TriggerRepetitionIdentity,
@@ -622,7 +649,9 @@ class AgentAdapter:
     # The shared mount and subprocess conventions (skill_benchmark owns them;
     # the Pi runner uses the very same functions, so adapters cannot drift).
     _mount_tree = staticmethod(mount_skill_tree)
-    _run_argv = staticmethod(invoke_argv_with_timeout)
+    @staticmethod
+    def _run_argv(plan: ProcessInvocationPlan) -> InvocationOutcome:
+        return invoke_argv_with_timeout(replace(plan, raw_capture=_matrix_raw_capture.get()))
 
     def protocol_parameters(self) -> dict[str, Any]:
         """Behavior-affecting adapter inputs, excluding prompt and treatment."""
@@ -1205,6 +1234,212 @@ def matrix_failure_observation(
     )
 
 
+_matrix_raw_capture: ContextVar[RawProcessCapture | None] = ContextVar("matrix_raw_capture", default=None)
+_STUB_BINDINGS = tuple(getattr(StubAdapter, name) for name in (
+    "mount", "invoke", "detect", "release", "_mount_tree", "_content_words", "exposed_skill_names"))
+
+
+@dataclass
+class _CellCapture:
+    raw: RawProcessCapture
+    invocation: InvocationOutcome | None = None
+    stage: TriggerFailureStage = TriggerFailureStage.MOUNT
+    failure_stage: TriggerFailureStage | None = None
+
+
+@dataclass(frozen=True)
+class _CellArtifacts:
+    trace_dir: Path
+    pi_stream: PiStream | None
+
+
+@dataclass(frozen=True)
+class _RetainedCell:
+    observation: MatrixObservation
+    cost: Measurement[Money]
+    subtotal: Money | None
+    no_model_spend: NoModelSpend | None
+    artifacts: _CellArtifacts | None
+
+
+@dataclass(frozen=True)
+class _MatrixCell:
+    adapter: AgentAdapter
+    call: MatrixCall
+    query: str
+    should_trigger: bool
+    identity: TriggerRepetitionIdentity
+    constraints: SkillTriggerConstraints | None
+    metadata: Mapping[str, Any]
+    trace_dir: Path | None
+    offline: bool
+
+
+def _observe_priced_cell(cell: _MatrixCell, tree_dir: Path, timeout: int,
+                         root_keys: Mapping[SkillId, str]) -> Priced[_RetainedCell]:
+    capture = _CellCapture(RawProcessCapture())
+    token = _matrix_raw_capture.set(capture.raw)
+    artifacts: list[_CellArtifacts] = []
+    interruption: BaseException | None = None
+    try:
+        try:
+            observation: MatrixObservation = observe_cell_query(
+                cell.adapter, tree_dir, cell.query, cell.should_trigger, cell.call.requested_model,
+                timeout, cell.trace_dir, dict(cell.metadata), cell.identity, cell.constraints,
+                root_keys, _capture=capture, _artifacts=artifacts)
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                interruption = exc
+            original = _raw_invocation(capture)
+            if original is not None:
+                original = replace(original, stdout="", stderr="", provider_error=None,
+                                   metadata={}, provider_payload=None)
+            observation = FailedTriggerObservation(
+                cell.call.agent, cell.call.requested_model, cell.query,
+                TriggerExpectation.from_bool(cell.should_trigger), cell.identity, cell.constraints,
+                {**dict(cell.metadata), "failure_error_type": type(exc).__name__,
+                 "error": (type(exc).__name__ if original is not None else
+                           redact_sensitive_text(f"{type(exc).__name__}: {exc}", ambient_secret_values()))},
+                capture.failure_stage or capture.stage, original)
+        try:
+            cost, subtotal = _matrix_dollars(cell.call.agent, _raw_invocation(capture))
+        except Exception as exc:
+            cost, subtotal = Measurement[Money].unavailable("billing_reader_failed"), None
+            observation = replace(observation, metadata={**dict(observation.metadata),
+                                                         "billing_error_type": type(exc).__name__})
+        retained = _RetainedCell(observation, cost, subtotal,
+                                 NoModelSpend("offline_adapter") if cell.offline else None,
+                                 artifacts[0] if artifacts else None)
+        return Priced(retained, cost, subtotal, retained.no_model_spend, interruption)
+    finally:
+        _matrix_raw_capture.reset(token)
+
+
+def _publish_cell(retained: _RetainedCell) -> _RetainedCell:
+    if retained.artifacts is not None and isinstance(retained.observation, TriggerObservation):
+        return replace(retained, observation=_publish_trace(retained.observation, retained.artifacts))
+    return retained
+
+
+def _raw_invocation(capture: _CellCapture) -> InvocationOutcome | None:
+    facts = capture.raw.facts
+    if facts is None:
+        invocation = capture.invocation
+        if invocation is None or invocation.returncode is None or invocation.elapsed_ms is None:
+            return None
+        if invocation.timed_out:
+            return InvocationOutcome.from_timeout(stdout=invocation.stdout, stderr=invocation.stderr,
+                                                  elapsed_ms=invocation.elapsed_ms,
+                                                  metadata=dict(invocation.metadata))
+        return InvocationOutcome.from_process(stdout=invocation.stdout, stderr=invocation.stderr,
+                                              returncode=invocation.returncode,
+                                              elapsed_ms=invocation.elapsed_ms,
+                                              metadata=dict(invocation.metadata))
+    def text(value: bytes | str | None) -> tuple[str, bool]:
+        if isinstance(value, bytes):
+            try:
+                return value.decode("utf-8", errors="strict"), True
+            except UnicodeDecodeError:
+                return "", False
+        return value or "", True
+    stdout, valid = text(facts.stdout)
+    stderr, _ = text(facts.stderr)
+    metadata = {"stdout_utf8_valid": valid, "billing_complete": facts.communication_complete}
+    if facts.timed_out:
+        return InvocationOutcome.from_timeout(stdout=stdout, stderr=stderr,
+                                              elapsed_ms=facts.elapsed_ms, metadata=metadata)
+    if facts.returncode is not None:
+        return InvocationOutcome.from_process(stdout=stdout, stderr=stderr,
+                                              returncode=facts.returncode,
+                                              elapsed_ms=facts.elapsed_ms, metadata=metadata)
+    return None
+
+
+def _matrix_dollars(agent: str, invocation: InvocationOutcome | None) -> tuple[Measurement[Money], Money | None]:
+    missing = Measurement[Money].unavailable("billing_evidence_unavailable")
+    if agent not in {"claude", "pi"} or invocation is None:
+        return missing, None
+    if invocation.metadata.get("stdout_utf8_valid") is False:
+        return missing, None
+    try:
+        records = []
+        malformed = False
+        for line in invocation.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                records.append(strict_json_loads(line))
+            except (ValueError, TypeError):
+                malformed = True
+                break
+        if not records or not all(isinstance(record, dict) for record in records):
+            return missing, None
+        final = False
+        amount = None
+        if agent == "claude":
+            terminal = claude_terminal_result_index(records)
+            if terminal is None:
+                return missing, None
+            amount = records[terminal].get("total_cost_usd")
+            final = (not malformed and not invocation.timed_out
+                     and invocation.metadata.get("billing_complete", True))
+        else:
+            ends = [record for record in records if record.get("type") == "agent_end"]
+            terminal = ends[-1] if ends else next((record for record in reversed(records)
+                                                 if record.get("type") in {"message_end", "turn_end"}), None)
+            if terminal is None:
+                return missing, None
+            messages = terminal.get("messages", [terminal.get("message")])
+            message = next((item for item in reversed(messages)
+                            if isinstance(item, dict) and item.get("role") == "assistant"), None)
+            if message is None:
+                return missing, None
+            usage = message.get("usage")
+            cost = usage.get("cost") if isinstance(usage, dict) else None
+            amount = cost.get("total") if isinstance(cost, dict) else cost
+            final = (not malformed and len(ends) == 1 and not invocation.timed_out
+                     and invocation.metadata.get("billing_complete", True)
+                     and message.get("stopReason") in {"stop", "length"})
+            if ends and any(record.get("type") in {"agent_start", "message_start", "message_end", "turn_end", "agent_end"}
+                            for record in records[records.index(ends[-1]) + 1:]):
+                return missing, None
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            return missing, None
+        dollars = Money.from_raw(amount)
+    except (ValueError, TypeError, KeyError):
+        return missing, None
+    if final:
+        return Measurement.available(dollars, provenance="provider_reported"), None
+    return Measurement.unavailable("billing_incomplete"), dollars
+
+
+def _publish_trace(observation: TriggerObservation, artifacts: _CellArtifacts) -> TriggerObservation:
+    row = observation.as_row()
+    invocation = observation.invocation
+    metadata = {
+        "population": "trigger", "provider": observation.agent, "model": observation.model,
+        **{key: row[key] for key in ("query", "should_trigger", "pass", "returncode", "timed_out",
+                                    "observation_complete", "triggered", "evidence")},
+        **(observation.attribution.as_dict() if isinstance(observation.attribution, SkillAttribution) else {}),
+        "usage_normalized": dict(observation.usage), "cost_normalized": dict(observation.cost),
+        **(observation.identity.as_dict() if observation.identity is not None else {}),
+        **dict(invocation.metadata), **dict(observation.metadata)}
+    if invocation.provider_error is not None:
+        metadata["provider_error"] = invocation.provider_error
+    try:
+        write_trace_artifacts(
+            artifacts.trace_dir, invocation.stdout, source=observation.agent,
+            metadata=metadata,
+            extra_metrics={"elapsed_ms": row["elapsed_ms"], "returncode": row["returncode"],
+                           "timed_out": row["timed_out"]},
+            environment={"runner": observation.agent, "model": observation.model, "trigger_eval": True},
+            write_metadata=True, pi_stream=artifacts.pi_stream,
+            process_observation_complete=invocation.process_observation_complete)
+    except Exception as exc:
+        return observation.with_metadata({"trace_error": f"{type(exc).__name__}: {exc}"})
+    return observation
+
+
 def observe_cell_query(
     adapter: AgentAdapter,
     tree_dir: Path,
@@ -1217,6 +1452,8 @@ def observe_cell_query(
     identity: TriggerRepetitionIdentity | None = None,
     constraints: SkillTriggerConstraints | None = None,
     root_keys: Mapping[SkillId, str] | None = None,
+    *, _capture: _CellCapture | None = None,
+    _artifacts: list[_CellArtifacts] | None = None,
 ) -> TriggerObservation:
     """Observe one cell without erasing its domain type before aggregation."""
     secrets: list[str] = []
@@ -1243,7 +1480,14 @@ def observe_cell_query(
                 selected_names = {key: adapter.exposed_skill_names(mounted_skill_names([mounted[key]]))
                                   for key in constraints.selected}
             names = adapter.exposed_skill_names(mounted_skill_names(copied))
-            invocation = validate_invoke_result(adapter.name, adapter.invoke(query, model, workspace, timeout))
+            if _capture is not None:
+                _capture.stage = TriggerFailureStage.INVOCATION
+            invocation = adapter.invoke(query, model, workspace, timeout)
+            if _capture is not None and isinstance(invocation, InvocationOutcome):
+                _capture.invocation = invocation
+            invocation = validate_invoke_result(adapter.name, invocation)
+            if _capture is not None:
+                _capture.stage = TriggerFailureStage.DISCOVERY
             secrets = cell_secret_values(adapter, workspace) + ambient_secret_values()
             attribution: TriggerAttribution = LegacyAttribution()
             if constraints is not None:
@@ -1256,8 +1500,16 @@ def observe_cell_query(
                 detection = adapter.detect(invocation, names, copied)
 
         finally:
+            if _capture is not None:
+                if sys.exc_info()[0] is not None:
+                    _capture.failure_stage = _capture.stage
+                _capture.stage = TriggerFailureStage.RELEASE
             adapter.release(workspace)
+            if _capture is not None:
+                _capture.stage = TriggerFailureStage.CLEANUP
 
+    if _capture is not None:
+        _capture.stage = TriggerFailureStage.REDACTION
     redacted_stdout = redact_sensitive_text(invocation.stdout, secrets)
     redacted_stderr = redact_sensitive_text(invocation.stderr, secrets)
     redacted_provider_error = (
@@ -1328,63 +1580,21 @@ def observe_cell_query(
         metadata=observation_metadata,
         identity=identity, attribution=attribution,
     )
-    row = observation.as_row()
-
     if trace_dir is not None:
-        trace_metadata = {
-            "population": "trigger",
-            "provider": adapter.name,
-            "model": model,
-            "query": row["query"],
-            "should_trigger": row["should_trigger"],
-            "pass": row["pass"],
-            "returncode": row["returncode"],
-            "timed_out": row["timed_out"],
-            "observation_complete": row["observation_complete"],
-            "triggered": row["triggered"],
-            "evidence": row["evidence"],
-            **(attribution.as_dict() if isinstance(attribution, SkillAttribution) else {}),
-            "usage_normalized": usage,
-            "cost_normalized": cost,
-            **(identity.as_dict() if identity is not None else {}),
-            **dict(redacted_invocation.metadata),
-            **observation_metadata,
-        }
-        if redacted_invocation.provider_error is not None:
-            trace_metadata["provider_error"] = redacted_invocation.provider_error
-        try:
-            # Detection and telemetry above share the one provider payload the
-            # invocation retained; the artifact reparses only a stream that
-            # redaction changed.
-            artifact_pi_stream = None
-            if isinstance(invocation.provider_payload, PiStream):
-                artifact_pi_stream = (
-                    invocation.provider_payload
-                    if redacted_invocation.stdout == invocation.stdout
-                    else PiStream.parse(redacted_invocation.stdout))
-            write_trace_artifacts(
-                trace_dir,
-                redacted_invocation.stdout,
-                source=adapter.name,
-                metadata=trace_metadata,
-                extra_metrics={
-                    "elapsed_ms": row["elapsed_ms"],
-                    "returncode": row["returncode"],
-                    "timed_out": row["timed_out"],
-                },
-                environment={"runner": adapter.name, "model": model, "trigger_eval": True},
-                write_metadata=True,
-                pi_stream=artifact_pi_stream,
-                process_observation_complete=(
-                    redacted_invocation.process_observation_complete),
-            )
-        except Exception as exc:
-            trace_error = f"{type(exc).__name__}: {exc}"
-            observation = observation.with_metadata({"trace_error": trace_error})
+        artifact_pi_stream = None
+        if isinstance(invocation.provider_payload, PiStream):
+            artifact_pi_stream = (invocation.provider_payload
+                                  if redacted_invocation.stdout == invocation.stdout
+                                  else None)
+        artifacts = _CellArtifacts(trace_dir, artifact_pi_stream)
+        if _artifacts is not None:
+            _artifacts.append(artifacts)
+        else:
+            observation = _publish_trace(observation, artifacts)
     return observation
 
 
-def summarize_matrix(observations: list[TriggerObservation]) -> list[dict[str, Any]]:
+def summarize_matrix(observations: list[MatrixObservation]) -> list[dict[str, Any]]:
     """Serialize the shared typed matrix aggregation at the report boundary."""
     return summarize_trigger_matrix(observations)
 
@@ -1406,12 +1616,23 @@ def print_matrix(matrix: list[dict[str, Any]]) -> None:
               f"{overall:>9}")
 
 
+class MatrixRunStopped(BaseException):
+    def __init__(self, cause: BaseException, report: dict[str, Any]) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.report = report
+
+
 def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str],
                models: list[str | None] | None, runs_per_query: int, timeout: int, workers: int,
                claude_bin: str = "claude", codex_cmd: str | None = None,
                vibe_cmd: str | None = None, max_turns: int = 6,
                backend_options: dict[str, Any] | None = None,
-               trace_runs: Path | None = None, ablation: str | None = None) -> dict[str, Any]:
+               trace_runs: Path | None = None, ablation: str | None = None, *,
+               spend_policy: SpendPolicy | None = None,
+               spend_root: Path | None = None) -> dict[str, Any]:
+    if spend_policy is not None and (not isinstance(spend_policy, SpendPolicy) or spend_root is None):
+        raise ValueError("matrix spend policy requires a policy and ledger root")
     manifest = load_manifest(manifest_path)
     rows = validate_trigger_rows(rows, "trigger matrix rows",
                                  frozenset(SkillId(value) for value in manifest.get("skill_paths", [])))
@@ -1478,57 +1699,83 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
             raise SystemExit(str(exc)) from exc
         protocol_sha256 = canonical_json_sha256(protocol)
         manifest_identity = trigger_manifest_identity(manifest)
-        trace_root = None
-        if trace_runs is not None:
-            trace_runs.mkdir(parents=True, exist_ok=True)
-            trace_root = Path(tempfile.mkdtemp(prefix="matrix-", dir=trace_runs))
-        futures, observations, design = [], [], []
-        future_context: dict[Any, tuple[str, str | None, str, bool, dict[str, Any], TriggerRepetitionIdentity, SkillTriggerConstraints | None]] = {}
-        ex = ThreadPoolExecutor(max_workers=workers)
-        try:
-            for adapter in adapters:
-                for model in (models if models is not None else adapter.default_models):
-                    for row_index, row in enumerate(rows, 1):
-                        query = str(row["query"])
-                        constraints = parse_skill_constraints(row)
-                        design.append({
-                            "agent": adapter.name, "model": model,
-                            "query_id": row["query_id"], "query": query,
-                            "should_trigger": row["should_trigger"],
-                            **(constraints.as_dict() if constraints else {}),
-                        })
-                        for run_number in range(1, runs_per_query + 1):
-                            trace_dir = None
-                            if trace_root is not None:
-                                agent_segment = safe_trace_segment(adapter.name, "agent")
-                                model_segment = safe_trace_segment(str(model or "default"), "default")
-                                trace_dir = (trace_root / agent_segment / model_segment /
-                                             f"query-{row_index:03d}-{safe_trace_label(query, f'query-{row_index}')}" /
-                                             f"run-{run_number}")
-                            metadata = {
-                                "measurement": EvidenceClass.RAW_MEASUREMENT.value,
-                                "ablation": ablation,
-                                "skill_tree_hash": tree_hash,
-                                "protocol_sha256": protocol_sha256,
-                                "protocol_observation": {},
-                            }
-                            should_trigger = row["should_trigger"]
-                            identity = TriggerRepetitionIdentity(row["query_id"], run_number)
-                            future = ex.submit(observe_cell_query, adapter, tree_dir,
-                                               query, should_trigger,
-                                               model, timeout, trace_dir, metadata, identity, constraints, root_keys)
-                            futures.append(future)
-                            future_context[future] = (
-                                adapter.name, model, query, should_trigger, metadata, identity, constraints)
-            for fut in as_completed(futures):
-                try:
-                    observations.append(fut.result())
-                except Exception as exc:
-                    agent, model, query, should_trigger, metadata, identity, constraints = future_context[fut]
-                    observations.append(matrix_failure_observation(
-                        agent, model, query, should_trigger, exc, metadata, identity, constraints))
-        finally:
-            ex.shutdown(cancel_futures=True)
+        trace_root = trace_runs / ("matrix-" + uuid.uuid4().hex) if trace_runs is not None else None
+        cells: list[_MatrixCell] = []
+        design: list[dict[str, Any]] = []
+        treatment_sha256 = canonical_json_sha256({"skill_tree_hash": tree_hash, "ablation": ablation,
+                                                    "provenance": provenance})
+        for adapter in adapters:
+            offline = type(adapter) is StubAdapter and tuple(getattr(type(adapter), name) for name in (
+                "mount", "invoke", "detect", "release", "_mount_tree", "_content_words", "exposed_skill_names")) == _STUB_BINDINGS
+            support = capability_rows[adapter.name].telemetry_contract()["cost"].availability
+            if (spend_policy is not None and spend_policy.ceiling.amount > 0 and not offline
+                    and support != "available" and spend_policy.assumed_cost_per_run is None):
+                raise SystemExit(f"agent {adapter.name!r} requires --assumed-cost-per-run-usd under a positive ceiling")
+            for model in tuple(models if models is not None else adapter.default_models):
+                for row_index, row in enumerate(rows, 1):
+                    query = row["query"]
+                    constraints = parse_skill_constraints(row)
+                    definition = {"agent": adapter.name, "model": model,
+                                  "query_id": row["query_id"], "query": query,
+                                  "should_trigger": row["should_trigger"],
+                                  **(constraints.as_dict() if constraints else {})}
+                    design.append(definition)
+                    query_digest = canonical_json_sha256({
+                        "query": query, "should_trigger": row["should_trigger"],
+                        **(constraints.as_dict() if constraints else {})})
+                    for repeat in range(1, runs_per_query + 1):
+                        call = MatrixCall(adapter.name, model, row["query_id"], query_digest,
+                                          repeat, treatment_sha256, protocol_sha256)
+                        trace_dir = None
+                        if trace_root is not None:
+                            trace_dir = (trace_root / safe_trace_segment(adapter.name, "agent") /
+                                         safe_trace_segment(str(model or "default"), "default") /
+                                         f"query-{row_index:03d}-{safe_trace_label(query, f'query-{row_index}')}" /
+                                         f"run-{repeat}")
+                        metadata = MappingProxyType({
+                            "measurement": EvidenceClass.RAW_MEASUREMENT.value,
+                            "ablation": ablation, "skill_tree_hash": tree_hash,
+                            "protocol_sha256": protocol_sha256, "protocol_observation": {}})
+                        cells.append(_MatrixCell(adapter, call, query, row["should_trigger"],
+                                                 TriggerRepetitionIdentity(row["query_id"], repeat),
+                                                 constraints, metadata, trace_dir, offline))
+        population = MatrixPopulation(tuple(MatrixScheduleCell(cell.call, cell.offline) for cell in cells))
+        by_call = {cell.call.call_id: cell for cell in cells}
+        frozen_roots = MappingProxyType(dict(root_keys))
+        observations: list[MatrixObservation] = []
+        spend = None
+        abort: BaseException | None = None
+        def invoke_cell(call: MatrixCall) -> Priced[_RetainedCell]:
+            return _observe_priced_cell(by_call[call.call_id], tree_dir, timeout, frozen_roots)
+        with SpendAdmission.open(spend_policy, population.paid_plan,
+                                 root=spend_root or manifest_path.parent / "spend") as admission:
+            try:
+                executions = admission.bounded_map(
+                    population, invoke_cell, workers=workers, publish=_publish_cell,
+                    stopped=skill_benchmark_stopped)
+            except BoundedRunError as stopped:
+                executions = stopped.executions
+                abort = stopped.cause
+            for execution in executions:
+                cell = by_call[execution.call.call_id]
+                if isinstance(execution, (NotStarted, MatrixNotStarted)):
+                    observations.append(NotStartedTriggerObservation(
+                        cell.call.agent, cell.call.requested_model, cell.query,
+                        TriggerExpectation.from_bool(cell.should_trigger), cell.identity,
+                        cell.constraints, cell.metadata, TriggerNotStartedReason(execution.reason.value)))
+                elif isinstance(execution, WorkerRaised):
+                    observations.append(FailedTriggerObservation(
+                        cell.call.agent, cell.call.requested_model, cell.query,
+                        TriggerExpectation.from_bool(cell.should_trigger), cell.identity, cell.constraints,
+                        {**dict(cell.metadata), "failure_error_type": type(execution.error).__name__,
+                         "error": redact_sensitive_text(f"{type(execution.error).__name__}: {execution.error}", ambient_secret_values())},
+                        TriggerFailureStage.WORKER))
+                else:
+                    observations.append(execution.value.observation)
+            if admission.ledger is not None:
+                spend = {**admission.ledger.as_dict(), "scope": "paid_matrix_calls",
+                         "ledger_path": str(admission.path),
+                         "snapshot": "in_memory_after_abort" if abort is not None else "persisted"}
     observations.sort(key=lambda observation: (
         observation.agent, str(observation.model or ""),
         str(observation.identity.query_id if observation.identity else ""),
@@ -1536,7 +1783,7 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
     ))
     matrix = summarize_matrix(observations)
     summary = trigger_cohort_as_dict(summarize_trigger_cohort(observations))
-    return {
+    report = {
         "skill_name": skill_name_from_manifest(manifest),
         "generated_at": int(time.time()),
         # Single-arm raw measurements: rates that steer description edits,
@@ -1556,7 +1803,19 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
         "summary": summary,
         "matrix": matrix,
         "results": [observation.as_row() for observation in observations],
+        **({"spend": spend} if spend is not None else {}),
     }
+
+    if abort is not None:
+        raise MatrixRunStopped(abort, report)
+    return report
+
+
+def matrix_exit_code(report: Mapping[str, Any]) -> int:
+    if any(row.get("execution_state") == "not_started" and row.get("incomplete_reason") in {
+            "cost_ceiling", "cost_unobservable"} for row in report["results"]):
+        return 2
+    return 0 if report["summary"]["measurement_status"] == "complete" else 1
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1574,6 +1833,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-turns", type=int, default=6, help="claude/vibe adapters: turns the model gets to load the skill (its observation window)")
     ap.add_argument("--trace-runs", help="optional directory for per-run trace.jsonl/events.json/metrics.json artifacts for every selected agent")
     ap.add_argument("--ablation", help="materialize this discovery/trigger-population ablation id and trigger-test the altered skill")
+    ap.add_argument("--max-cost-usd", type=float, help="per-invocation paid admission ceiling; active calls can overshoot")
+    ap.add_argument("--assumed-cost-per-run-usd", type=float, help="labeled charge for an unpriced repetition; requires --max-cost-usd")
     ap.add_argument("--out", required=True)
     add_surface_cli_options(ap, "trigger")
     return ap
@@ -1589,16 +1850,23 @@ def main() -> int:
     if not rows:
         raise SystemExit("no trigger queries: add kind:'trigger' cases to the manifest or pass --eval-set")
 
-    report = run_matrix(manifest_path, rows, agents=args.agent or ["claude"], models=args.model,
-                        runs_per_query=args.runs_per_query, timeout=args.timeout, workers=args.workers,
-                        max_turns=args.max_turns,
-                        backend_options=surface_option_values(args, "trigger"),
-                        trace_runs=Path(args.trace_runs) if args.trace_runs else None,
-                        ablation=args.ablation)
+    try:
+        report = run_matrix(manifest_path, rows, agents=args.agent or ["claude"], models=args.model,
+                            runs_per_query=args.runs_per_query, timeout=args.timeout, workers=args.workers,
+                            max_turns=args.max_turns,
+                            backend_options=surface_option_values(args, "trigger"),
+                            trace_runs=Path(args.trace_runs) if args.trace_runs else None,
+                            ablation=args.ablation, spend_policy=native_spend_policy(args),
+                            spend_root=Path(str(args.out) + ".spend"))
+    except MatrixRunStopped as stopped:
+        try:
+            write_json(Path(args.out), stopped.report)
+        finally:
+            raise stopped.cause
     write_json(Path(args.out), report)
     print_matrix(report["matrix"])
     print(f"\nreport: {args.out}")
-    return 0 if report["summary"]["measurement_status"] == "complete" else 1
+    return matrix_exit_code(report)
 
 
 if __name__ == "__main__":

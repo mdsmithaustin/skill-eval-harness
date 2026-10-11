@@ -155,18 +155,86 @@ class JettyCall:
                                          separators=(",", ":")).encode()).hexdigest()
 
 
-SpendCall = AnswerCall | SubagentTurnCall | JudgeCall | JettyCall
+@dataclass(frozen=True)
+class MatrixCall:
+    agent: str
+    requested_model: str | None
+    query_id: str
+    query_input_sha256: str
+    repeat: int
+    treatment_sha256: str
+    protocol_sha256: str
+
+    def __post_init__(self) -> None:
+        for name in ("agent", "query_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"matrix {name} must be nonempty")
+            validate_json_text(value, f"matrix {name}")
+        if self.requested_model is not None:
+            if not isinstance(self.requested_model, str) or not self.requested_model.strip():
+                raise ValueError("matrix requested model must be nonempty or None")
+            validate_json_text(self.requested_model, "matrix requested model")
+        for name in ("query_input_sha256", "treatment_sha256", "protocol_sha256"):
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", getattr(self, name)) is None:
+                raise ValueError(f"matrix {name} requires SHA-256")
+        if type(self.repeat) is not int or self.repeat < 1:
+            raise ValueError("matrix repeat must be positive")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"kind": "matrix", "agent": self.agent,
+                "requested_model": self.requested_model, "query_id": self.query_id,
+                "query_input_sha256": self.query_input_sha256, "repeat": self.repeat,
+                "treatment_sha256": self.treatment_sha256,
+                "protocol_sha256": self.protocol_sha256}
+
+    @property
+    def call_id(self) -> str:
+        return hashlib.sha256(json.dumps(self.as_dict(), sort_keys=True,
+                                         separators=(",", ":")).encode()).hexdigest()
+
+
+SpendCall = AnswerCall | SubagentTurnCall | JudgeCall | JettyCall | MatrixCall
 
 
 @dataclass(frozen=True)
 class SpendPlan:
     calls: tuple[SpendCall, ...]
+    scope: Literal["all_calls", "paid_matrix_calls"] = "all_calls"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.calls, tuple) or not all(isinstance(call, (AnswerCall, SubagentTurnCall, JudgeCall, JettyCall)) for call in self.calls):
+        if self.scope not in {"all_calls", "paid_matrix_calls"}:
+            raise ValueError("unknown spend plan scope")
+        if self.scope == "paid_matrix_calls" and not all(isinstance(call, MatrixCall) for call in self.calls):
+            raise ValueError("paid matrix plan requires matrix calls")
+        if not isinstance(self.calls, tuple) or not all(isinstance(call, (AnswerCall, SubagentTurnCall, JudgeCall, JettyCall, MatrixCall)) for call in self.calls):
             raise TypeError("spend plan requires a tuple of spend calls")
         if len({call.call_id for call in self.calls}) != len(self.calls):
             raise ValueError("spend plan contains duplicate call identities")
+
+
+@dataclass(frozen=True)
+class MatrixScheduleCell:
+    call: MatrixCall
+    offline: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.call, MatrixCall) or type(self.offline) is not bool:
+            raise TypeError("matrix schedule requires a call and offline authority")
+
+
+@dataclass(frozen=True)
+class MatrixPopulation:
+    cells: tuple[MatrixScheduleCell, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.cells, tuple) or not all(isinstance(cell, MatrixScheduleCell) for cell in self.cells):
+            raise TypeError("matrix population requires immutable cells")
+        SpendPlan(tuple(cell.call for cell in self.cells))
+
+    @property
+    def paid_plan(self) -> SpendPlan:
+        return SpendPlan(tuple(cell.call for cell in self.cells if not cell.offline), "paid_matrix_calls")
 
 
 @dataclass(frozen=True)
@@ -285,6 +353,7 @@ class SpendLedger:
     invocation_id: str
     policy: SpendPolicy
     states: Mapping[str, CallState]
+    scope: Literal["all_calls", "paid_matrix_calls"] = "all_calls"
 
     def __post_init__(self) -> None:
         if not isinstance(self.invocation_id, str) or re.fullmatch(r"[0-9a-f]{32}", self.invocation_id) is None:
@@ -299,11 +368,12 @@ class SpendLedger:
                 raise TypeError("settled call requires a closed charge state")
             if isinstance(state, Refused) and not isinstance(state.reason, SpendStopReason):
                 raise TypeError("refused call requires a SpendStopReason")
+        SpendPlan(tuple(state.call for state in self.states.values()), self.scope)
         object.__setattr__(self, "states", MappingProxyType(dict(self.states)))
 
     @classmethod
     def planned(cls, invocation_id: str, policy: SpendPolicy, plan: SpendPlan) -> SpendLedger:
-        return cls(invocation_id, policy, {call.call_id: Planned(call) for call in plan.calls})
+        return cls(invocation_id, policy, {call.call_id: Planned(call) for call in plan.calls}, plan.scope)
 
     @property
     def spent(self) -> Money:
@@ -325,6 +395,13 @@ class SpendLedger:
     @property
     def refusal(self) -> SpendStopReason | None:
         if self.partial:
+            return SpendStopReason.COST_UNOBSERVABLE
+        return self.settled_refusal
+
+    @property
+    def settled_refusal(self) -> SpendStopReason | None:
+        if any(isinstance(state, Settled) and isinstance(state.charge, UnpricedCall)
+               for state in self.states.values()):
             return SpendStopReason.COST_UNOBSERVABLE
         if self.spent.amount >= self.policy.ceiling.amount:
             return SpendStopReason.COST_CEILING
@@ -356,7 +433,7 @@ class SpendLedger:
         return {"schema_version": 1, "invocation_id": self.invocation_id,
                 **self.policy.as_dict(), "spent_usd": format(self.spent.amount, "f"),
                 "spent_availability": "partial" if self.partial else "complete",
-                "calls": calls}
+                "calls": calls, **({"scope": self.scope} if self.scope != "all_calls" else {})}
 
     @classmethod
     def from_dict(cls, raw: Any) -> SpendLedger:
@@ -381,6 +458,11 @@ class SpendLedger:
                 call = JudgeCall(call_raw.get("judge_task_id"), call_raw.get("judge_input_sha256"),
                                  call_raw.get("backend"), call_raw.get("requested_model"),
                                  call_raw.get("repeat"))
+            elif call_raw.get("kind") == "matrix":
+                call = MatrixCall(call_raw.get("agent"), call_raw.get("requested_model"),
+                                  call_raw.get("query_id"), call_raw.get("query_input_sha256"),
+                                  call_raw.get("repeat"), call_raw.get("treatment_sha256"),
+                                  call_raw.get("protocol_sha256"))
             elif call_raw.get("kind") == "jetty":
                 call = JettyCall(call_raw.get("task_contract_sha256"), call_raw.get("journal_attempt_id"))
             else:
@@ -416,7 +498,7 @@ class SpendLedger:
             else:
                 raise ValueError("unknown spend call state")
             states[call.call_id] = state
-        ledger = cls(raw.get("invocation_id"), policy, states)
+        ledger = cls(raw.get("invocation_id"), policy, states, raw.get("scope", "all_calls"))
         if ledger.as_dict() != raw:
             raise ValueError("spend ledger contradicts its canonical records")
         return ledger

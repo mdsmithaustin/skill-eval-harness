@@ -18,8 +18,19 @@ import argparse
 import json
 from pathlib import Path
 
-from run_trigger_matrix import DEFAULT_TIMEOUT_S, eval_rows_from_args, run_matrix
-from skill_benchmark import VALID_SPLITS, stops_on_signal, write_json
+from run_trigger_matrix import (
+    DEFAULT_TIMEOUT_S,
+    MatrixRunStopped,
+    eval_rows_from_args,
+    matrix_exit_code,
+    run_matrix,
+)
+from skill_benchmark import (
+    VALID_SPLITS,
+    native_spend_policy,
+    stops_on_signal,
+    write_json,
+)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -34,6 +45,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S,
                     help=f"seconds per Pi run (default {DEFAULT_TIMEOUT_S}, the trigger matrix's default)")
     ap.add_argument("--model")
+    ap.add_argument("--max-cost-usd", type=float, help="per-invocation paid admission ceiling; active calls can overshoot")
+    ap.add_argument("--assumed-cost-per-run-usd", type=float, help="labeled charge for an unpriced repetition; requires --max-cost-usd")
     ap.add_argument("--out", required=True)
     ap.add_argument("--trace-runs", help="optional directory for per-query trace.jsonl/events.json/metrics.json artifacts")
     ap.add_argument("--ablation", help="materialize this (discovery-population) ablation id and trigger-test the altered skill")
@@ -47,15 +60,22 @@ def main() -> int:
     rows = eval_rows_from_args(args, manifest_path)
     if not rows:
         raise SystemExit("no trigger queries: add kind:'trigger' cases to the manifest or pass --eval-set")
-    report = run_matrix(
-        manifest_path, rows, agents=["pi"],
-        models=[args.model] if args.model is not None else None,
-        runs_per_query=args.runs_per_query, timeout=args.timeout, workers=args.workers,
-        trace_runs=Path(args.trace_runs) if args.trace_runs else None,
-        ablation=args.ablation)
+    try:
+        report = run_matrix(
+            manifest_path, rows, agents=["pi"],
+            models=[args.model] if args.model is not None else None,
+            runs_per_query=args.runs_per_query, timeout=args.timeout, workers=args.workers,
+            trace_runs=Path(args.trace_runs) if args.trace_runs else None,
+            ablation=args.ablation, spend_policy=native_spend_policy(args),
+            spend_root=Path(str(args.out) + ".spend"))
+    except MatrixRunStopped as stopped:
+        try:
+            write_json(Path(args.out), stopped.report)
+        finally:
+            raise stopped.cause
     write_json(Path(args.out), report)
     print(json.dumps(report["summary"], indent=2))
-    return 0 if report["summary"]["measurement_status"] == "complete" else 1
+    return matrix_exit_code(report)
 
 
 if __name__ == "__main__":

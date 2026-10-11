@@ -266,6 +266,21 @@ class InvocationRequest:
 
 
 @dataclass(frozen=True)
+class RawProcessFacts:
+    stdout: bytes | str | None
+    stderr: bytes | str | None
+    returncode: int | None
+    elapsed_ms: int
+    timed_out: bool
+    communication_complete: bool
+
+
+@dataclass
+class RawProcessCapture:
+    facts: RawProcessFacts | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
 class ProcessInvocationPlan:
     """Everything the subprocess owner needs, validated before spawn."""
 
@@ -280,6 +295,7 @@ class ProcessInvocationPlan:
     # False leaves stdout as captured when it is the run's evidence.
     redact_stdout: bool = True
     recovery_capture: RecoveryCapture | None = field(default=None, repr=False)
+    raw_capture: RawProcessCapture | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.argv, tuple):
@@ -329,6 +345,7 @@ class ProcessInvocationPlan:
         redact_output: Callable[[str], str] | None = None,
         redact_stdout: bool = True,
         recovery_capture: RecoveryCapture | None = None,
+        raw_capture: RawProcessCapture | None = None,
     ) -> ProcessInvocationPlan:
         if isinstance(argv, (str, bytes)):
             raise TypeError("process argv must be a sequence of argument strings")
@@ -341,6 +358,7 @@ class ProcessInvocationPlan:
             redact_output=redact_output,
             redact_stdout=redact_stdout,
             recovery_capture=recovery_capture,
+            raw_capture=raw_capture,
         )
 
 

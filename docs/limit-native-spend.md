@@ -1,4 +1,4 @@
-# How do I stop an answer, subagent, judge, or Jetty batch at a dollar ceiling?
+# How do I limit paid calls at a dollar ceiling?
 
 Use `--max-cost-usd` on `run-agent`, `run-claude`, or `run-codex` to limit admission for one command invocation. A call can exceed the ceiling. The command finishes that call and refuses later calls.
 
@@ -39,7 +39,7 @@ The harness publishes `in_flight` before dispatch and publishes the charge befor
 
 Each publication flushes and syncs the file before atomic replacement, then syncs the directory where the platform supports it. File publication failures stop dispatch. An abrupt process kill or failed settlement publication can leave unresolved `in_flight` evidence. The ledger then reports partial spend. A raised callback exception retains an attempted, unpriced receipt, or a labeled assumption if one was supplied. Raised setup, provider, or pricing exceptions skip workspace capture. A settlement publication error also skips capture. Returned failure and timeout outcomes still capture workspace evidence before deletion.
 
-For capped batches, every selected task must be an ordinary native answer task. A recovery row anywhere in the batch rejects the command before provider calls or writes to the runs root. Uncapped recovery keeps its existing phase behavior. The native rules above apply to the serial native answer commands. `run-subagent` has the external-turn rules below. Judge calls have the rules below. Jetty submissions have the rules below. Trigger matrices and Pi trigger evaluations keep their existing execution policies.
+For capped batches, every selected task must be an ordinary native answer task. A recovery row anywhere in the batch rejects the command before provider calls or writes to the runs root. Uncapped recovery keeps its existing phase behavior. The native rules above apply to the serial native answer commands. `run-subagent` has the external-turn rules below. Judge calls have the rules below. Jetty submissions have the rules below. Trigger matrices and Pi trigger evaluations use the bounded concurrent rules below.
 
 ## Subagent external turns
 
@@ -200,3 +200,63 @@ Persistence failures and interruptions stop execution. When settlement publicati
 known floors settle before a deferred error propagates. A failed submitting checkpoint sends
 no submit request. A hard process kill or settlement failure can leave the ledger `in_flight`.
 No local error proves free model execution. Output publication still precedes journal commit.
+
+
+## Trigger matrices and Pi evaluations
+
+Both `skill-trigger-matrix` and `skill-pi-trigger-eval` accept `--max-cost-usd` and
+`--assumed-cost-per-run-usd`. Each agent, requested model, query, and repetition is one
+call. The complete population remains in the report. The ledger contains only potentially
+paid calls and declares `scope: paid_matrix_calls`.
+
+Run the deterministic offline matrix at a zero ceiling:
+
+```sh
+skill-trigger-matrix examples/demo-skill/evals/shared-benchmark.json \
+  --agent stub --model default --runs-per-query 2 --workers 2 \
+  --max-cost-usd 0 --out /tmp/trigger-spend-demo.json
+```
+
+The concrete built-in Stub runs all four repetitions and exits 0. It invokes no model.
+A replacement registered under the same name receives no offline authority. A zero ceiling
+refuses every potentially paid repetition without mounting its workspace or invoking its
+provider. Refused rows have `execution_state: not_started`, null trigger and pass verdicts,
+and no process return code, timing, or invocation fields.
+
+The command validates every selected route, model, query scope, treatment, protocol, and cost
+capability before ledger or trace writes and cell execution. Preparing the shared treatment
+requires one temporary tree. Under a positive ceiling, Codex and Vibe need an explicit
+assumption. Claude and Pi use their supported dollar envelopes when those envelopes establish
+complete billing. Missing prices close later paid admission unless an assumption applies.
+Assumptions charge at least a retained safe subtotal and never become provider telemetry.
+
+One controller keeps at most `--workers` cells active across paid and offline work. It settles
+all ready cells in population order before refilling a slot and checks readiness again before
+each admission. Completions after that last empty scan belong to the next turn. Active calls
+can overshoot the ceiling. Reached ceilings and unknown prices stop later paid calls while
+trusted offline cells continue. Reaching the ceiling on the final cell alone is not refusal.
+
+The supervisor retains private original process facts before redaction, parsing, detection,
+release, and cleanup. Independent Claude and Pi dollar readers do not normalize sibling token
+fields. Ambiguous, duplicate, malformed, or invalid UTF-8 output cannot establish complete
+billing. Timeout and unfinished billing evidence can retain a safe floor. Codex and Vibe
+cost-shaped fields do not establish a supported dollar contract.
+
+Settlement precedes trace publication. A failed discovery stage retains its real process facts
+in `original_invocation` with missing discovery telemetry and null verdicts. Ordinary trace
+write errors retain the existing `trace_error` diagnostic. Required ledger publication failures
+stop all replenishment and drain active work. Matrix directory sync treats supported POSIX
+failures as fatal, while recognized unsupported-directory operations retain the platform limit.
+Serial answer, subagent, judge, and Jetty publication behavior stays unchanged.
+
+The report's `spend` block names its ledger under `<out>.spend/<invocation-id>/spend-ceiling.json`.
+An interrupted or fatally stopped execution attempts to write a full-population report before
+propagating the original stop. Its spend snapshot is labeled `in_memory_after_abort` and does
+not prove that a settlement reached disk. The last durable ledger may remain `in_flight`.
+Signals keep their existing exits. Budget refusal exits 2, other incomplete measurement exits
+1, and complete measurement exits 0. Incomplete cohort summaries omit every rate field.
+Saved trigger comparison retains labeled observed diagnostics, blocks complete causal
+inference for incomplete arms, and keeps its existing exit 0.
+
+The ceiling and assumption do not enter the prompt, treatment, or protocol identity. Pi uses
+the same matrix operation and retains its existing model, repetition, and timeout defaults.

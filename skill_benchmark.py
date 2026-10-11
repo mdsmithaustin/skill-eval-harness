@@ -184,6 +184,7 @@ from invocation_contracts import (
     InvocationResult,
     InvocationState,
     ProcessInvocationPlan,
+    RawProcessFacts,
     RecoveryCapture,
     RecoveryCase,
     RecoveryProcessState,
@@ -279,6 +280,7 @@ from trace_contracts import (
 )
 from trigger_contracts import (
     InvocationOutcome,
+    MatrixObservation,
     SkillId,
     SkillTriggerConstraints,
     TraceEventKind,
@@ -286,6 +288,7 @@ from trigger_contracts import (
     TriggerEvidenceKind,
     TriggerObservation,
     TriggerQueryDefinition,
+    matrix_observation_from_row,
     parse_skill_constraints,
     validated_trigger_protocol_limits,
 )
@@ -6993,6 +6996,10 @@ def stops_on_signal(main: Callable[[], int]) -> Callable[[], int]:
     return run
 
 
+def skill_benchmark_stopped() -> bool:
+    return _stop_signal is not None
+
+
 def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
     """Typed subprocess owner for every spawned runner/adapter process.
 
@@ -7009,6 +7016,14 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
     input_text = plan.input_text
     redact_stderr = plan.redact_output or (lambda text: text)
     redact_stdout = redact_stderr if plan.redact_stdout else (lambda text: text)
+
+    def retain_raw(out: bytes | str | None, err: bytes | str | None,
+                   returncode: int | None, *, timed_out: bool,
+                   communication_complete: bool = False) -> None:
+        if plan.raw_capture is not None:
+            plan.raw_capture.facts = RawProcessFacts(
+                out, err, returncode, int((time.time() - start) * 1000), timed_out,
+                communication_complete)
 
     def _wire_text(value: Any, redact: Callable[[str], str]) -> tuple[str, bool]:
         if value is None:
@@ -7401,17 +7416,28 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                 if leader_exited:
                     break
             else:
+                retain_raw(out, err, proc.returncode, timed_out=False, communication_complete=True)
                 stdout, stdout_utf8_valid = _wire_text(out, redact_stdout)
                 stderr, stderr_utf8_valid = _wire_text(err, redact_stderr)
                 stderr, returncode, _timed_out = stderr[:4000], proc.returncode, False
                 communication_complete = True
                 break
     except KeyboardInterrupt:
+        if communication_timeout is not None:
+            retain_raw(communication_timeout.output, communication_timeout.stderr,
+                       proc.returncode, timed_out=False)
         stop_session(proc, _stop_signal or signal.SIGINT)
+        if communication_timeout is not None:
+            retain_raw(communication_timeout.output, communication_timeout.stderr,
+                       proc.returncode, timed_out=False)
+        raise
+    except BaseException:
+        stop_session(proc, signal.SIGTERM)
         raise
     if not communication_complete:
         assert communication_timeout is not None
         exc = communication_timeout
+        retain_raw(exc.output, exc.stderr, proc.returncode, timed_out=not leader_exited)
         try:
             group_cleanup = kill_process_group(proc.pid)
         except Exception as cleanup_exc:
@@ -7419,8 +7445,10 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                              "error": errno.errorcode.get(getattr(cleanup_exc, "errno", None), type(cleanup_exc).__name__)}
         if not leader_exited and group_cleanup.get("status") in {"unsupported", "warning"}:
             proc.kill()
+        drain_complete = False
         try:
             out, err = proc.communicate(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
+            drain_complete = True
         except subprocess.TimeoutExpired as drain_exc:
             # A detached child can outlive the original group and keep the pipe
             # write ends open forever. Preserve the partial capture, close our
@@ -7446,6 +7474,9 @@ def invoke_argv_with_timeout(plan: ProcessInvocationPlan) -> InvocationOutcome:
                 "capture pipes remained open; non-POSIX reader threads were abandoned"
             )
             group_cleanup = {**group_cleanup, "pipe_drain": pipe_action, "warning": pipe_warning}
+        retain_raw(out or exc.stdout, err if err is not None else exc.stderr,
+                   proc.returncode, timed_out=not leader_exited,
+                   communication_complete=drain_complete)
         stdout, stdout_utf8_valid = _wire_text(out or exc.stdout, redact_stdout)
         captured_stderr = err if err is not None else exc.stderr
         if not leader_exited:
@@ -17231,8 +17262,8 @@ def sign_flip_significance(deltas: list[float], *, max_exact_n: int = 14, sample
 @_dataclass(frozen=True)
 class _TriggerReportRows:
     runs_per_query: int
-    observations: tuple[TriggerObservation, ...]
-    cells: dict[tuple[str, str | None, str], dict[int, TriggerObservation]]
+    observations: tuple[MatrixObservation, ...]
+    cells: dict[tuple[str, str | None, str], dict[int, MatrixObservation]]
     queries: dict[str, TriggerQueryDefinition]
     protocol: dict[str, Any]
     protocol_sha256: str
@@ -17450,15 +17481,15 @@ def _trigger_report_rows(report: dict[str, Any], label: str) -> _TriggerReportRo
         protocol, label=label, runs_per_query=runs_per_query,
         design_pairs={(agent, model) for agent, model, _ in expected_cells},
     )
-    observations: list[TriggerObservation] = []
-    cells: dict[tuple[str, str | None, str], dict[int, TriggerObservation]] = {}
+    observations: list[MatrixObservation] = []
+    cells: dict[tuple[str, str | None, str], dict[int, MatrixObservation]] = {}
     protocol_observations: dict[tuple[str, str | None, str], dict[int, dict[str, Any]]] = {}
     protocol_observation_errors: dict[tuple[str, str | None, str], dict[int, str]] = {}
     for position, row in enumerate(rows, 1):
         try:
             row_mapping = string_keyed_dict(
                 row, f"{label} results row {position}")
-            observation = TriggerObservation.from_row(row_mapping)
+            observation = matrix_observation_from_row(row_mapping)
         except (TypeError, ValueError, KeyError) as exc:
             die(f"{label} results row {position}: {exc}")
         if observation.identity is None:

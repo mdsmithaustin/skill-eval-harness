@@ -30,7 +30,11 @@ from agent_capabilities import SMOKE_TARGETS
 from skill_benchmark import ProcessInvocationPlan, invoke_argv_with_timeout
 from telemetry import ObservationEvidence
 from trace_contracts import event_is_completed
-from trigger_contracts import CompleteTriggerResult, TriggerObservation
+from trigger_contracts import (
+    CompleteTriggerResult,
+    TriggerObservation,
+    matrix_observation_from_row,
+)
 
 DEFAULT_MODELS = {name: target.resolved_model(os.environ) for name, target in SMOKE_TARGETS.items()}
 SMOKE_TRIGGER_EXPECTATIONS = (
@@ -255,11 +259,11 @@ def assess_trigger_report(path: Path, report: dict[str, Any], agent: str = "pi")
         exact_fixture = (len(rows) == len(expected_polarities)
                          and sorted(actual_polarities) == sorted(expected_polarities))
         observations = (
-            [TriggerObservation.from_row(row, default_agent=agent) for row in rows]
+            [matrix_observation_from_row(row, default_agent=agent) for row in rows]
             if exact_fixture else []
         )
         observed = exact_fixture and all(
-            observation.invocation.observation_complete and observation.invocation.returncode == 0
+            isinstance(observation, TriggerObservation) and observation.invocation.observation_complete and observation.invocation.returncode == 0
             for observation in observations
         )
         results = [observation.result for observation in observations]

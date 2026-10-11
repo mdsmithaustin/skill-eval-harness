@@ -75,7 +75,20 @@ class SharedOwnerIdentityTests(unittest.TestCase):
     def test_the_trigger_runner_shares_the_harness_mount_and_subprocess_helpers(self):
         self.assertIs(tm.mount_skill_tree, sb.mount_skill_tree)
         self.assertIs(tm.AgentAdapter._mount_tree, sb.mount_skill_tree)
-        self.assertIs(tm.AgentAdapter._run_argv, sb.invoke_argv_with_timeout)
+        self.assertIs(tm.invoke_argv_with_timeout, sb.invoke_argv_with_timeout)
+        from invocation_contracts import ProcessInvocationPlan, RawProcessCapture
+        capture = RawProcessCapture()
+        with tempfile.TemporaryDirectory() as td:
+            plan = ProcessInvocationPlan.from_values(
+                ["fixture"], input_text=None, cwd=td, timeout_s=5)
+            token = tm._matrix_raw_capture.set(capture)
+            try:
+                with mock.patch.object(tm, "invoke_argv_with_timeout") as invoke:
+                    outcome = tm.AgentAdapter._run_argv(plan)
+                    invoke.assert_called_once_with(replace(plan, raw_capture=capture))
+                    self.assertIs(outcome, invoke.return_value)
+            finally:
+                tm._matrix_raw_capture.reset(token)
 
     def test_the_trigger_runner_shares_the_trace_label_sanitizer(self):
         self.assertIs(tm.safe_trace_label, sb.safe_trace_label)
