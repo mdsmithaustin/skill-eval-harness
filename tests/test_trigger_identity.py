@@ -98,6 +98,50 @@ loader('unused')
                     tm.run_matrix(MANIFEST, [{"id": "q", "query": "inspect the code", "should_trigger": True}], ["stub"], None, 1, 10, 1)
                 invoke.assert_not_called()
 
+    def test_invalid_source_refuses_before_adapter_invocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = self.sources(directory, {
+                "run_trigger_matrix.py": "import child\n",
+                "run_pi_trigger_eval.py": "", "trigger_identity.py": "",
+                "child.py": "def incomplete_edit(\n",
+            })
+            with mock.patch.object(ti, "_source_catalog", return_value=catalog), mock.patch.object(tm.StubAdapter, "invoke") as invoke:
+                with self.assertRaisesRegex(RuntimeError, "required trigger owner child at child.py:1") as refused:
+                    tm.run_matrix(MANIFEST, [{"id": "q", "query": "inspect the code", "should_trigger": True}], ["stub"], None, 1, 10, 1)
+                self.assertIsInstance(refused.exception.__cause__, SyntaxError)
+                invoke.assert_not_called()
+
+    def test_invalid_source_after_publication_saves_settled_spend_and_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = self.sources(root / "source", {
+                "run_trigger_matrix.py": "import child\n",
+                "run_pi_trigger_eval.py": "", "trigger_identity.py": "", "child.py": "",
+            })
+            output = root / "report.json"
+            publish = tm._publish_cell
+
+            def edit_after_publication(retained):
+                result = publish(retained)
+                (catalog.root / "child.py").write_text("def incomplete_edit(\n", encoding="utf-8")
+                return result
+
+            args = ["skill-trigger-matrix", str(MANIFEST), "--agent", "stub", "--runs-per-query", "1",
+                    "--workers", "1", "--timeout", "10", "--max-cost-usd", "1", "--out", str(output)]
+            with mock.patch.object(ti, "_source_catalog", return_value=catalog), mock.patch.object(tm, "_publish_cell", side_effect=edit_after_publication), mock.patch.object(sys, "argv", args):
+                with self.assertRaisesRegex(RuntimeError, "required trigger owner child at child.py:1") as refused:
+                    tm.main()
+            self.assertIsInstance(refused.exception.__cause__, SyntaxError)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["evidence_class"], "incomplete_trigger_measurement")
+            self.assertEqual(report["source_consistency"]["status"], "changed")
+            self.assertEqual(len(report["results"]), 2)
+            self.assertTrue(all(row["observation_complete"] for row in report["results"]))
+            self.assertEqual(report["spend"]["snapshot"], "persisted")
+            ledger = json.loads(Path(report["spend"]["ledger_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(ledger["spent_availability"], "complete")
+            self.assertEqual(ledger["spent_usd"], "0")
+
     def test_missing_required_bytes_and_undeclared_named_sibling_are_errors(self):
         with tempfile.TemporaryDirectory() as directory:
             catalog = self.sources(directory, {"root.py": "import child\n", "child.py": ""})

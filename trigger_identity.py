@@ -270,8 +270,12 @@ def _collect_sources(catalog: _Catalog | None = None, roots: Sequence[str] = _RO
         except OSError as exc:
             raise RuntimeError(f"cannot identify required trigger owner {module} at {path}: {exc}") from exc
         sources[path] = "sha256:" + hashlib.sha256(content).hexdigest()
+        try:
+            tree = _source_ast(path, content)
+        except SyntaxError as exc:
+            raise RuntimeError(f"cannot identify required trigger owner {module} at {path}:{exc.lineno}: {exc.msg}") from exc
         scanner = _Dependencies(catalog, module, path)
-        scanner.walk(_source_ast(path, content).body, {})
+        scanner.walk(tree.body, {})
         pending.extend(scanner.modules)
         for category in scanner.categories:
             pending.extend(reference.module for reference in binding_references(category))
