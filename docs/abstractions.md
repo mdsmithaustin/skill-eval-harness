@@ -238,10 +238,10 @@ hashed paths are the paths an agent lists. The judge's explore-surface digest fr
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract for ordinary rows. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:11913`), Claude (`run_claude:12202`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:12093`), Claude (`run_claude:12382`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:15495`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4296` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:15873`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:4339` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -565,7 +565,7 @@ by domain, difficulty, trigger type, and success goal. Case flags mark saturated
 flaky, and with-skill-failed cases, and `effect_estimates.ceiling_or_floor` separates the two
 ways a case stops discriminating: both arms always pass (ceiling) or both always fail (floor, which
 `suggest-cases` never offers for hardening). These flags, the leakage lint
-(`prompt_assertion_leakage_findings:990`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:994`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as
@@ -611,3 +611,16 @@ in the fan-out (`prepared_task_rows`) with a grouping in `build_benchmark_report
 that *aggregates* a run (each pass-rate/report view) or *identifies* one (`run_dir`, run
 discovery, `judge_task_id`), so extend by auditing those consumers, not just the definition
 site. Touch these carefully and most other features fall into place around them.
+
+## Assessed callable tool observations
+
+`tool_fault_contracts.py` owns immutable ordered declarations, strict exchange identities,
+resolution and output-only payload commitments, one exchange-keyed journal fold, and finite
+`Count`, `ToolClaim`, `ExactOutput`, and `SuccessfulOperations` assessments. Consumers receive
+`ToolObservation` or assessed values. They do not read private resolution annotations.
+`ToolReplayStore` owns precedence and budgets. One run-local `_ToolReceiptJournal` writes
+transitions and binds synchronous callback progress. `OutcomeContext` carries the typed
+observation to the existing artifact writer. Saved readers reconstruct the separate mediated
+member against the answer design and journal before deriving telemetry or assertion results.
+Output closure and delivered-error availability are independent. Provider traces remain
+separate diagnostics. The process supervisor and spend admission retain their existing owners.

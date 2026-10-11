@@ -36,6 +36,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -52,6 +53,8 @@ from enum import Enum
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, NoReturn, Protocol, cast
+
+import tool_fault_contracts as tool_fault_domain
 
 # Direct ``python skill_benchmark.py`` execution must share the canonical module
 # identity used by lazy backend references. Otherwise importing
@@ -331,6 +334,7 @@ TRIGGER_IDENTITY_MODULES = (
     "skill_benchmark.py",
     "spend_contracts.py",
     "spend_runtime.py",
+    "tool_fault_contracts.py",
     "telemetry.py",
     "trace_contracts.py",
     "trigger_contracts.py",
@@ -417,7 +421,7 @@ ASSERTION_TYPE_FIELDS: dict[str, set[str]] = {
     "command_order": {"patterns"},
     "tool_call": {
         "tool", "pattern", "expected_no_call", "required_calls", "call_set",
-        "order", "min_count", "max_count",
+        "order", "min_count", "max_count", "is_error",
     },
     "tool_sequence": {"expected", "mode", "min_f1"},
     "tool_count_le": {"tool", "max", "value"},
@@ -1250,6 +1254,10 @@ def validate_case_assertion(cid: str, label: str, index: int, assertion: Any, pa
         # `required_calls`/`call_set`/`order` are non-empty string lists. Only the
         # regex-matched fields (`pattern`, `order`) are compile-checked — the
         # name-matched `required_calls`/`call_set` are literal tool names.
+        if "is_error" in assertion and type(assertion["is_error"]) is not bool:
+            die(f"{where} tool_call is_error must be boolean")
+        if "is_error" in assertion and assertion.get("expected_no_call"):
+            die(f"{where} tool_call expected_no_call cannot use is_error")
         if "expected_no_call" in assertion and not isinstance(assertion["expected_no_call"], bool):
             die(f"{where} tool_call expected_no_call must be true or false")
         for key in ("tool", "pattern"):
@@ -1472,6 +1480,13 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
         if split not in VALID_SPLITS:
             die(f"{cid}: split must be one of {sorted(VALID_SPLITS)}")
         trigger_case = case_kind.population is CasePopulation.TRIGGER
+        if "tool_faults" in case:
+            try:
+                tool_fault_domain.parse_faults(case["tool_faults"])
+            except (TypeError, ValueError) as exc:
+                die(f"{cid}: tool_faults: {exc}")
+            if trigger_case:
+                die(f"{cid}: tool_faults are unsupported for trigger cases")
         if trigger_case:
             if not isinstance(case.get("should_trigger"), bool):
                 suggested = "true" if legacy_inferred_should_trigger(case) else "false"
@@ -1791,9 +1806,13 @@ def eval_contract_sha256(
             if root != manifest_dir else ".",
             "sha256": tree_digest,
         })
+    semantic_manifest = thaw_json_value(tool_fault_domain.freeze_json_value(manifest, "semantic manifest"))
+    for case in semantic_manifest.get("cases", []):
+        if "tool_faults" in case:
+            case["tool_faults"] = tool_fault_domain.fault_rows(tool_fault_domain.parse_faults(case["tool_faults"]))
     return canonical_json_sha256({
         "schema_version": 1,
-        "manifest": manifest,
+        "manifest": semantic_manifest,
         "referenced_files": files,
         "script_oracle_trees": oracle_trees,
     })
@@ -1975,6 +1994,7 @@ def prepared_task_rows(
                         instruction=variant_instruction(variant, manifest, repo_root),
                         prompt=case_prompt(case, manifest_path, allow_missing=allow_missing_prompts),
                         tags=tuple(case.get("tags", [])),
+                        tool_faults=tool_fault_domain.parse_faults(case["tool_faults"]) if "tool_faults" in case else (),
                         ablation=record,
                         # Canonical-tree hash on every skill-bearing arm so the report can
                         # confirm with_skill and the ablation share a skill revision.
@@ -1994,6 +2014,9 @@ def prepared_task_rows(
                         # The scripted send/respond sequence rides the row too
                         # (roadmap 3.1); turn-aware runners drive it in order.
                         row["turns"] = [str((t or {}).get("prompt", "")) for t in case["turns"]]
+                    if task.tool_faults:
+                        row["tool_fault_task_sha256"] = answer_task_fingerprint(row, task, model)
+                        row["tool_fault_case_input_sha256"] = answer_case_input_fingerprint(row, task)
                     rows.append(row)
     return rows
 
@@ -2054,6 +2077,8 @@ def answer_case_input_fingerprint(task: dict[str, Any], pt: PreparedTask) -> str
     }
     if pt.recovery is not None:
         payload["recovery"] = pt.recovery.as_dict()
+    if pt.tool_faults:
+        payload["tool_faults"] = tool_fault_domain.fault_rows(pt.tool_faults)
     return canonical_json_sha256(payload)
 
 
@@ -2085,6 +2110,8 @@ def answer_task_fingerprint(task: dict[str, Any], pt: PreparedTask,
     }
     if pt.recovery is not None:
         payload["recovery"] = pt.recovery.as_dict()
+    if pt.tool_faults:
+        payload["tool_faults"] = tool_fault_domain.fault_rows(pt.tool_faults)
     return canonical_json_sha256(payload)
 
 
@@ -2143,6 +2170,8 @@ def manifest_case_input_fingerprint(
         "turns": [str((turn or {}).get("prompt", ""))
                   for turn in case.get("turns", [])],
     }
+    if "tool_faults" in case:
+        payload["tool_faults"] = tool_fault_domain.fault_rows(tool_fault_domain.parse_faults(case["tool_faults"]))
     return canonical_json_sha256(payload)
 
 
@@ -2199,6 +2228,12 @@ def answer_design_from_tasks(tasks: list[dict[str, Any]], *,
         seen.add(key)
         task_sha256 = answer_task_fingerprint(task, pt, row_model)
         case_input_sha256 = answer_case_input_fingerprint(task, pt)
+        fault_attested = pt.tool_faults or any(name in task for name in (
+            "tool_fault_task_sha256", "tool_fault_case_input_sha256"))
+        if fault_attested and (not pt.tool_faults
+                or task.get("tool_fault_task_sha256") != task_sha256
+                or task.get("tool_fault_case_input_sha256") != case_input_sha256):
+            raise ValueError("prepared tool_faults identity attestation mismatch")
         fixture_tree_hash = prepared_fixture_tree_hash(pt)
         instruction_sha256 = canonical_json_sha256({"instruction": pt.instruction})
         planned_skill_tree_hash = prepared_skill_surface_hash(pt)
@@ -2229,6 +2264,8 @@ def answer_design_from_tasks(tasks: list[dict[str, Any]], *,
             "instruction_sha256": instruction_sha256,
             "planned_skill_tree_hash": planned_skill_tree_hash,
             "fixture_tree_hash": fixture_tree_hash,
+            **({"tool_faults": tool_fault_domain.fault_rows(pt.tool_faults), "expected_turns": len(task.get("turns") or []) or 1}
+               if pt.tool_faults else {}),
         })
     identities.sort(key=lambda row: (
         row["case_id"], str(row["model"] or ""), row["variant"], row["run_number"]))
@@ -2260,7 +2297,7 @@ def validate_answer_design(value: Any) -> dict[str, Any]:
         if not isinstance(row, dict) or set(row) != {
                 "case_id", "model", "variant", "run_number", "run_dir",
                 "task_sha256", "case_input_sha256", "instruction_sha256",
-                "planned_skill_tree_hash", "fixture_tree_hash"}:
+                "planned_skill_tree_hash", "fixture_tree_hash"} | ({"tool_faults", "expected_turns"} if "tool_faults" in row else set()):
             raise ValueError("answer design identity has an invalid shape")
         case_id, model, variant = row["case_id"], row["model"], row["variant"]
         run_number, run_dir = row["run_number"], row["run_dir"]
@@ -2306,16 +2343,20 @@ def validate_answer_design(value: Any) -> dict[str, Any]:
             raise ValueError(f"duplicate answer design identity: {key}")
         if run_dir in seen_run_dirs:
             raise ValueError(f"duplicate answer design run_dir: {run_dir}")
+        if "tool_faults" in row:
+            tool_fault_domain.parse_faults(row["tool_faults"])
+            if type(row.get("expected_turns")) is not int or row["expected_turns"] < 1:
+                raise ValueError("answer design fault turns must be positive integers")
         seen.add(key)
         seen_run_dirs.add(run_dir)
         normalized_identities.append(dict(row))
     normalized_identities.sort(key=lambda row: (
         row["case_id"], str(row["model"] or ""), row["variant"], row["run_number"]))
-    invariant_by_case: dict[str, tuple[str, str]] = {}
+    invariant_by_case: dict[str, tuple[str, str, str]] = {}
     treatment_by_coordinate: dict[tuple[str, str | None, str], tuple[str, str, str | None]] = {}
     for row in normalized_identities:
         case_key = row["case_id"]
-        case_value = (row["case_input_sha256"], row["fixture_tree_hash"])
+        case_value = (row["case_input_sha256"], row["fixture_tree_hash"], canonical_json_sha256(row.get("tool_faults")))
         previous_case = invariant_by_case.setdefault(case_key, case_value)
         if previous_case != case_value:
             raise ValueError(
@@ -4085,6 +4126,8 @@ def build_jetty_payload(
 def export_jetty(args: argparse.Namespace) -> int:
     path = Path(args.manifest)
     manifest = validate_manifest(path)
+    if any("tool_faults" in case for case in iter_cases(manifest, getattr(args, "split", None))):
+        die("tool_faults are unsupported by Jetty export")
     multi_turn_cases = [
         str(case.get("id")) for case in iter_cases(manifest, getattr(args, "split", None))
         if not is_trigger_case(case) and case.get("turns")
@@ -6660,6 +6703,81 @@ def read_json_dict_or_list(path: Path) -> Any:
         return {"_error": f"invalid JSON in {path.name}: {exc}"}
 
 
+def _tool_observation_identity(planned: Mapping[str, Any]) -> dict[str, Any]:
+    return {"task_sha256": planned["task_sha256"], "case_input_sha256": planned["case_input_sha256"],
+            "run": {"case_id": planned["case_id"], "variant": planned["variant"],
+                    "run_number": planned["run_number"], "model": planned["model"], "population": "answer"},
+            "faults": planned["tool_faults"], "expected_turns": planned["expected_turns"]}
+
+
+def read_tool_observation_base(base: Path, raw_events: Any = None) -> tool_fault_domain.ToolObservation | None:
+    expected: dict[str, Any] | None = None
+    turn: int | None = None
+    for root in base.parents:
+        design_path = root / ANSWER_DESIGN_NAME
+        if not design_path.is_file():
+            continue
+        design = validate_answer_design(strict_json_loads(design_path.read_text(encoding="utf-8")))
+        relative = base.relative_to(root).as_posix()
+        for planned in design["identities"]:
+            if relative not in {planned["run_dir"], *(planned["run_dir"] + f"/turn-{n}" for n in range(1, planned.get("expected_turns", 1) + 1))}:
+                continue
+            if "tool_faults" in planned:
+                expected = _tool_observation_identity(planned)
+                if relative != planned["run_dir"]:
+                    turn = int(base.name.removeprefix("turn-"))
+            break
+        break
+    raw = raw_events if raw_events is not None else read_json_dict_or_list(base / "events.json")
+    member = raw.get("mediated_tools") if isinstance(raw, dict) else None
+    if expected is None:
+        if member is not None:
+            raise ValueError("mediated tools have no matching prepared design")
+        return None
+    if member is None:
+        return tool_fault_domain.ToolObservation(expected, (), turn, "missing_expected_tool_observation")
+    rows: list[Mapping[str, Any]] = []
+    try:
+        if not isinstance(member, dict) or member.get("turn") != turn or type(member.get("turn")) is bool:
+            raise ValueError("mediated turn identity mismatch")
+        journal_path = Path(member["journal_path"])
+        if not journal_path.is_absolute():
+            raise ValueError("tool journal path must be absolute")
+        with journal_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                row = strict_json_loads(line)
+                tool_fault_domain.ToolObservation(expected, (*rows, row))
+                rows.append(row)
+        return tool_fault_domain.reconstruct_tool_observation(rows, member, expected)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        reason = f"invalid_tool_observation: {exc}"
+        if rows and isinstance(member, dict) and tool_fault_domain.strict_json_equal(member.get("identity"), expected):
+            if turn is not None:
+                try:
+                    saved_turn = tool_fault_domain.reconstruct_tool_observation(rows, member, expected)
+                    if saved_turn.coverage == "closed":
+                        return saved_turn
+                except (KeyError, TypeError, ValueError):
+                    pass
+            prefix = tool_fault_domain.ToolObservation(expected, tuple(rows), turn, reason)
+            canonical = prefix.canonical_rows()
+            saved = member.get("canonical_rows")
+            if isinstance(saved, list) and tool_fault_domain.strict_json_equal(saved[:len(canonical)], canonical):
+                return prefix
+        return tool_fault_domain.ToolObservation(expected, (), turn, reason)
+
+
+def _tool_measurements(observation: tool_fault_domain.ToolObservation,
+                       basis: Mapping[str, Any] | None = None) -> dict[str, telemetry_domain.Measurement[Any]]:
+    result: dict[str, telemetry_domain.Measurement[Any]] = {}
+    for key in tool_fault_domain.TOOL_METRIC_KEYS:
+        assessed = observation.assess(tool_fault_domain.Count(key))
+        result[key] = (telemetry_domain.Measurement.available(assessed.value, provenance="trace_normalized", basis=basis)
+                       if isinstance(assessed, tool_fault_domain.Observed) else
+                       telemetry_domain.Measurement.unavailable(assessed.reason, basis=basis))
+    return result
+
+
 def read_event_log_base(base: Path) -> EventLogObservation:
     path = base / "events.json"
     try:
@@ -6672,7 +6790,11 @@ def read_event_log_base(base: Path) -> EventLogObservation:
         raw = strict_json_loads(raw_text)
     except json.JSONDecodeError as exc:
         return InvalidEventLog(f"invalid JSON in events.json: {exc}")
-    return parse_event_log(raw)
+    try:
+        mediated = read_tool_observation_base(base, raw)
+    except (TypeError, ValueError) as exc:
+        return InvalidEventLog(str(exc))
+    return parse_event_log(raw, mediated_tools=mediated)
 
 
 def read_events_base(base: Path) -> tuple[list[dict[str, Any]] | None, str | None]:
@@ -6688,7 +6810,24 @@ def read_metrics_base(base: Path) -> dict[str, Any]:
     merged, error = read_run_sidecar_contract(base)
     if error is not None:
         return {"metadata_error": error, "metadata_artifact_valid": False}
-    return _with_committed_artifact_state(base, merged)
+    merged = _with_committed_artifact_state(base, merged)
+    try:
+        observation = read_tool_observation_base(base)
+    except (TypeError, ValueError) as exc:
+        return {**merged, "metadata_error": str(exc), "metadata_artifact_valid": False}
+    if observation is not None:
+        basis = telemetry_domain.basis_from_run(merged)
+        measurements = _tool_measurements(observation, basis)
+        envelope = dict(merged.get("telemetry") or {})
+        envelope["measurements"] = {**dict(envelope.get("measurements") or {}),
+                                    **{key: value.to_dict() for key, value in measurements.items()}}
+        envelope["mediated_tool_measurements"] = list(measurements)
+        for key, value in measurements.items():
+            merged.pop(key, None)
+            if value.availability == telemetry_domain.AVAILABLE:
+                merged[key] = value.value
+        merged["telemetry"] = envelope
+    return merged
 
 
 def raw_trace_record_for_ref(run_base: Path | None, ref: Any) -> dict[str, Any] | None:
@@ -6793,13 +6932,17 @@ def event_tool_key(event: dict[str, Any]) -> str:
     return str(event.get("type") or "unknown_tool").casefold()
 
 
-def trace_event_counts(events: list[dict[str, Any]]) -> dict[str, Any]:
+def trace_event_counts(events: list[dict[str, Any]], *, mediated_tools: tool_fault_domain.ToolObservation | None = None) -> dict[str, Any]:
     """Single owner of the completed-events-only counting rules. metrics.json
     (normalize_trace_records) and the report's trajectory diff both derive
     their counters here, so the two surfaces cannot drift: a diff delta is a
     delta of exactly the numbers metrics.json reports. Errors count over ALL
     events — a failed operation is an error precisely because it never
     completed."""
+    if mediated_tools is not None:
+        measured = _tool_measurements(mediated_tools)
+        return {key: value.value for key, value in measured.items()}
+
     completed = [e for e in events if event_is_completed(e)]
     commands = command_events(events)
     return {
@@ -6856,8 +6999,14 @@ def text_mentions_mounted_skill(text: str, copied_paths: Sequence[Path]) -> bool
 
 def detect_trigger_records(records: Iterable[dict[str, Any]], copied_paths: list[Path],
                            *, source: str = "generic",
-                           pi_stream: PiStream | None = None) -> TriggerDetection:
+                           pi_stream: PiStream | None = None, mediated_tools: tool_fault_domain.ToolObservation | None = None) -> TriggerDetection:
     """Derive mounted-path evidence from provider-aware completed operations."""
+    if mediated_tools is not None:
+        assessed = mediated_tools.assess(tool_fault_domain.SuccessfulOperations())
+        if isinstance(assessed, tool_fault_domain.Unavailable):
+            return TriggerDetection.absent()
+        return TriggerDetection.from_texts(TriggerEvidenceKind.MOUNTED_PATH, assessed.value)
+
     evidence: list[str] = []
     materialized = list(records)
     event_doc, _ = normalize_trace_records(
@@ -7779,6 +7928,14 @@ def process_or_efficiency_assertion_result(
     events, event_error = read_events_base(run_base)
     metrics = dict(metadata or {})
     metrics.update(read_metrics_base(run_base))
+    mediated = read_tool_observation_base(run_base)
+    if mediated is not None and atype in {"skill_invoked", "command_ran", "command_not_ran", "command_order",
+                                        "tool_call", "tool_sequence", "tool_count_le", "no_repeated_command_loop", "command_count_le"}:
+        assessed = mediated.assess(tool_fault_domain.ToolClaim(assertion))
+        if isinstance(assessed, tool_fault_domain.Unavailable):
+            return None, assessed.reason
+        passed, detail, score = assessed.value
+        return (passed, detail, score) if score is not None else (passed, detail)
     ci = bool(assertion.get("ci", True))
     envelope = metrics.get("telemetry") if isinstance(metrics.get("telemetry"), dict) else None
 
@@ -7857,13 +8014,16 @@ def process_or_efficiency_assertion_result(
             observed_calls = [e for e in events
                               if e.get("type") in TRAJECTORY_STEP_TYPES]
             tool = assertion.get("tool")
-            if tool:
-                tool_folded = str(tool).casefold()
-                selected = [command_text(e) or str(e.get("name", "")) for e in completed_calls
-                            if str(e.get("name", "")).casefold() == tool_folded
-                            or (tool_folded in {"bash", "shell", "command"} and e.get("type") == "command")]
-            else:
-                selected = [command_text(e) or str(e.get("name", "")) for e in completed_calls]
+            tool_folded = str(tool).casefold()
+            relevant_calls = [e for e in completed_calls
+                              if not tool or str(e.get("name", "")).casefold() == tool_folded
+                              or (tool_folded in {"bash", "shell", "command"} and e.get("type") == "command")]
+            if "is_error" in assertion:
+                if any(type(e.get("is_error")) is not bool for e in relevant_calls):
+                    return None, "delivered_error_unavailable"
+                completed_calls = [e for e in completed_calls if e.get("is_error") is assertion["is_error"]]
+                relevant_calls = [e for e in relevant_calls if e.get("is_error") is assertion["is_error"]]
+            selected = [command_text(e) or str(e.get("name", "")) for e in relevant_calls]
             # 6: BFCL-style call taxonomy over completed-call TOOL NAMES (exact,
             # case-insensitive) — NOT a substring/regex over the rendered command, so
             # `required_calls: ["Read"]` means the Read tool ran, and a shell `cat
@@ -7953,7 +8113,7 @@ def process_or_efficiency_assertion_result(
                 cursor = found + 1
             return True, f"matched order: {matched}"
         if atype == "tool_count_le":
-            max_allowed = int(assertion.get("max", 0))
+            max_allowed = int(assertion.get("max", assertion.get("value", 0)))
             tool = assertion.get("tool")
             completed_events = [e for e in events if event_is_completed(e)]
             if tool:
@@ -9349,7 +9509,11 @@ def write_trace_artifacts(
     artifact_set_complete: bool | None = None,
     retain_invalid_provider_trace: bool = False,
     trace_utf8_valid: bool = True,
+    mediated_tools: tool_fault_domain.ToolObservation | None = None,
+    tool_journal_path: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    if tool_fault_domain.MEDIATED_KEYS & set(metadata or {}):
+        raise ValueError("metadata cannot author mediated tool evidence")
     if not isinstance(retain_invalid_provider_trace, bool):
         raise TypeError("retain_invalid_provider_trace must be boolean")
     if not isinstance(trace_utf8_valid, bool):
@@ -9421,6 +9585,7 @@ def write_trace_artifacts(
     # Process-level duration/exit facts are authoritative named observations;
     # every trace-owned counter and schema field is non-overridable.
     process_metric_keys = {"returncode", "timed_out", "elapsed_ms"}
+    reserved.update(tool_fault_domain.MEDIATED_KEYS)
     collisions = (reserved - process_metric_keys) & set(extra_metrics or {})
     if collisions:
         raise ValueError(f"extra_metrics cannot override derived evidence: {', '.join(sorted(collisions))}")
@@ -9500,8 +9665,20 @@ def write_trace_artifacts(
             block = envelope_input.get(key)
             if isinstance(block, dict) and block.get("source") == "trace_normalized":
                 envelope_input[key] = {"source": "missing"}
+    tool_measurements = _tool_measurements(mediated_tools, telemetry_domain.basis_from_run(envelope_input)) if mediated_tools is not None else None
+    if mediated_tools is not None:
+        if not tool_journal_path:
+            raise ValueError("mediated tools require a stable journal path")
+        events["mediated_tools"] = mediated_tools.as_member(tool_journal_path)
+        if parse_errors or metrics.get("errors"):
+            metrics["provider_trace_errors"] = metrics.get("errors")
+        for key, value in (tool_measurements or {}).items():
+            metrics.pop(key, None)
+            if value.availability == telemetry_domain.AVAILABLE:
+                metrics[key] = value.value
     envelope = telemetry_domain.telemetry_envelope(
         envelope_input,
+        tool_measurements=tool_measurements,
         source=source,
         population=str(envelope_input.get("population") or "answer"),
     )
@@ -9746,6 +9923,7 @@ def _write_runner_outcome_files(run_dir: Path, outcome: AnswerOutcome | _NoProce
         # transaction. Direct/import callers retain strict rejection.
         retain_invalid_provider_trace=True,
         trace_utf8_valid=context.trace_utf8_valid,
+        mediated_tools=context.mediated_tools, tool_journal_path=context.tool_journal_path,
     )
     marker = RUNNER_FAILURE_MARKER_BY_PROVIDER[context.provider.value]
     if isinstance(outcome, _NoProcessArtifact):
@@ -11788,6 +11966,8 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                 and spend_policy.assumed_cost_per_run is None):
             die(f"{backend.name} does not report dollar cost; --max-cost-usd requires --assumed-cost-per-run-usd")
     design = answer_design_from_tasks(tasks, default_model=model)
+    if any(pt.tool_faults for _, pt, _, _ in validated):
+        die(f"tool_faults are unsupported by the {backend.name} native backend")
     calls = tuple(AnswerCall(answer_design_identity(design, pt, row_model)["task_sha256"],
                              RunCoordinate.of(pt.case_id, pt.variant_truth, pt.run_number, row_model))
                   for _, pt, row_model, _ in validated)
@@ -14649,9 +14829,14 @@ class ToolReplayStore:
 
     VERSION = 1
 
-    def __init__(self, path: Path, mode: str = "auto"):
+    def __init__(self, path: Path, mode: str = "auto", *, faults: tuple[tool_fault_domain.FaultDefinition, ...] = (), case_input_sha256: str | None = None):
         if mode not in TOOL_REPLAY_MODES:
             raise ValueError(f"unknown tool-replay mode {mode!r}; expected one of {sorted(TOOL_REPLAY_MODES)}")
+        if faults and (mode == "off" or case_input_sha256 is None):
+            raise ValueError("tool_faults require enabled replay and a case input identity")
+        self.faults = faults
+        self.remaining = [fault.times for fault in faults]
+        self.case_input_sha256 = case_input_sha256
         self.path = path
         self.recorded: dict[str, list[Any]] = {}
         had_recording = path.is_file()
@@ -14667,12 +14852,22 @@ class ToolReplayStore:
         canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
         return hashlib.sha256(f"{tool}\n{canonical}".encode()).hexdigest()[:32]
 
-    def resolve(self, tool: str, payload: Any, live: Any = None) -> Any:
+    def _resolve(self, tool: str, payload: Any, live: Any = None) -> tuple[Any, Literal["fault", "recorded", "live"], str | None, bool | None]:
+        for index, fault in enumerate(self.faults):
+            remaining = self.remaining[index]
+            if remaining == 0 or not fault.matches(tool, payload):
+                continue
+            if remaining is not None:
+                self.remaining[index] = remaining - 1
+            if self.case_input_sha256 is None:
+                raise AssertionError("fault store lost its case identity")
+            return (thaw_json_value(fault.output), "fault",
+                    tool_fault_domain.fault_identity(self.case_input_sha256, index + 1), fault.declared_error)
         key = self.call_key(tool, payload)
         if self.mode in {"replay", "strict"}:
             queue = self.recorded.get(key)
             if queue:
-                return queue.pop(0)
+                return queue.pop(0), "recorded", None, None
             if self.mode == "strict":
                 raise ToolReplayMiss(f"unrecorded tool call in strict replay: {tool} (key {key})")
         if live is None:
@@ -14680,12 +14875,160 @@ class ToolReplayStore:
         output = live(payload)
         if self.mode == "record":
             self.new_records.append({"tool": tool, "key": key, "output": output})
-        return output
+        return output, "live", None, None
+
+    def resolve(self, tool: str, payload: Any, live: Any = None) -> Any:
+        return self._resolve(tool, payload, live)[0]
+
+    def _resolve_mediated(self, tool: str, payload: Any, live: Any = None) -> tuple[Any, tool_fault_domain._Resolution | None]:
+        output, source, fault_id, annotation = self._resolve(tool, payload, live)
+        if source == "live" and not _immutable_tool_output(output):
+            return output, None
+        try:
+            resolution = tool_fault_domain._Resolution(source, fault_id, output,
+                {"availability": "known", "value": annotation} if source == "fault" else
+                {"availability": "unavailable", "reason": "legacy_error_unavailable"})
+        except (TypeError, ValueError):
+            return output, None
+        return output, resolution
 
     def save(self) -> None:
         if self.mode != "record" or not self.new_records:
             return
         write_json(self.path, {"version": self.VERSION, "sanitize": [], "records": self.new_records})
+
+
+def _immutable_tool_output(value: Any) -> bool:
+    return (value is None or type(value) in {str, bool, int, float}
+            or isinstance(value, tuple) and all(_immutable_tool_output(item) for item in value))
+
+
+class _ToolReceiptJournal:
+    def __init__(self, path: Path, identity: Mapping[str, Any], store: ToolReplayStore,
+                 live_tools: Mapping[str, Any]):
+        self.path = path
+        self.identity = freeze_json_mapping(identity, "tool run identity")
+        self.store = store
+        self.live_tools = live_tools
+        self.rows: list[Mapping[str, Any]] = []
+        self.pending: Mapping[str, Any] | None = None
+        self.failure: str | None = None
+        self.interruption: BaseException | None = None
+        self.turn = 0
+        self.thread: int | None = None
+        self.executing = False
+        self.path.parent.mkdir(parents=True, exist_ok=False)
+        with self.path.open("x", encoding="utf-8") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        for directory in (self.path.parent, self.path.parent.parent):
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        self._commit({"type": "opened", "identity": dict(self.identity)})
+
+    def _commit(self, transition: Mapping[str, Any]) -> Mapping[str, Any]:
+        if self.failure is not None:
+            raise RuntimeError(self.failure)
+        record = tool_fault_domain.journal_record(self.rows, transition)
+        tool_fault_domain.ToolObservation(self.identity, (*self.rows, record))
+        try:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException as exc:
+            self.failure = f"tool journal write failed: {exc}"
+            self.pending = None
+            raise
+        frozen = freeze_json_mapping(record, "tool journal record")
+        self.rows.append(frozen)
+        return frozen
+
+    def observation(self, turn: int | None = None) -> tool_fault_domain.ToolObservation:
+        return tool_fault_domain.ToolObservation(self.identity, tuple(self.rows), turn, self.failure)
+
+    def _confirm(self) -> None:
+        if self.pending is not None:
+            pending = self.pending
+            self.pending = None
+            self._commit({"type": "confirmed", "turn": self.turn,
+                          "exchange": pending["exchange"], "prepared_sha256": pending["record_sha256"]})
+
+    def executor(self, tool: str, payload: Any) -> Any:
+        if self.thread != threading.get_ident() or self.executing:
+            self.failure = "mediated callable requires synchronous nonreentrant tool execution"
+            self.pending = None
+            raise RuntimeError(self.failure)
+        if self.failure is not None:
+            raise RuntimeError(self.failure)
+        try:
+            tool_fault_domain.canonical_input(payload)
+            if not isinstance(tool, str) or not tool.strip():
+                raise ValueError("mediated tool must be non-empty text")
+        except (TypeError, ValueError):
+            self.failure = "invalid_mediated_tool_request"
+            self.pending = None
+            raise
+        self.executing = True
+        try:
+            self._confirm()
+            output, resolution = self.store._resolve_mediated(tool, payload, self.live_tools.get(tool))
+            if resolution is None:
+                self._commit({"type": "gap", "turn": self.turn, "tool": tool,
+                              "input_sha256": tool_fault_domain._digest("tool-input-v1", payload),
+                              "reason": "mutable_or_non_json_tool_output"})
+                return output
+            exchange = sum(row["type"] == "prepared" for row in self.rows) + 1
+            prepared = self._commit(tool_fault_domain.callable_preparation(
+                self.identity, self.turn, exchange, tool, payload, resolution))
+            self.pending = prepared
+            return output
+        except BaseException:
+            pending = self.pending
+            self.pending = None
+            if pending is not None and self.failure is None:
+                self._commit({"type": "aborted", "turn": self.turn,
+                              "exchange": pending["exchange"], "prepared_sha256": pending["record_sha256"]})
+            if self.failure is None:
+                self._commit({"type": "gap", "turn": self.turn, "tool": tool,
+                              "input_sha256": tool_fault_domain._digest("tool-input-v1", payload),
+                              "reason": "tool_wrapper_failed"})
+            raise
+        finally:
+            self.executing = False
+
+    def invoke_callable(self, agent_fn: Any, turn: int, **kwargs: Any) -> _SubagentTurnResult:
+        self.turn = turn
+        self.thread = threading.get_ident()
+        self._commit({"type": "turn_opened", "turn": turn})
+        try:
+            value = agent_fn(**{**kwargs, "tool_executor": self.executor})
+        except BaseException:
+            self.pending = None
+            raise
+        finally:
+            self.thread = None
+        evidence = (value.evidence if isinstance(value, (_SubagentResponseAccepted, _SubagentResponseRejected))
+                    else _subagent_paid_evidence(value))
+        try:
+            if self.failure is not None:
+                raise RuntimeError(self.failure)
+            self._confirm()
+            self._commit({"type": "turn_closed", "turn": turn})
+            if turn == self.identity["expected_turns"] and self.observation().coverage != "closed":
+                _, completed, _, gap = self.observation()._fold()
+                if len(completed) == self.identity["expected_turns"] and gap is None:
+                    self._commit({"type": "closed"})
+        except BaseException as exc:
+            self.failure = self.failure or f"tool journal confirmation failed: {exc}"
+            if not isinstance(exc, Exception):
+                self.interruption = exc
+            return _SubagentResponseRejected(self.failure, evidence)
+        return (value if isinstance(value, (_SubagentResponseAccepted, _SubagentResponseRejected))
+                else _classify_subagent_response(value, evidence))
 
 
 def tool_replay_mode(default: str = "off") -> str:
@@ -14771,8 +15114,8 @@ def _classify_subagent_response(value: Any, evidence: _SubagentPaidEvidence,
         return _SubagentResponseRejected(f"subagent response rejected: {exc}", evidence)
 
 
-def _invoke_paid_subagent(agent_fn: Any, *, requires_delta: bool, **kwargs: Any) -> Priced[_SubagentTurnResult]:
-    value = agent_fn(**kwargs)
+def _invoke_paid_subagent(agent_fn: Any, *, requires_delta: bool, journal: _ToolReceiptJournal | None = None, turn: int = 1, **kwargs: Any) -> Priced[_SubagentTurnResult]:
+    value = agent_fn(**kwargs) if journal is None else journal.invoke_callable(agent_fn, turn, **kwargs)
     paid = (value if isinstance(value, (_SubagentResponseAccepted, _SubagentResponseRejected))
             else _classify_subagent_response(value, _subagent_paid_evidence(value)))
     cost = paid.evidence.reported_cost
@@ -15057,6 +15400,7 @@ def run_subagent_tasks(
     trace_source: str | None = None,
     context_isolation: Sequence[str] = (),
     spend_policy: SpendPolicy | None = None,
+    fault_selection: Literal["all", "only", "skip"] = "all",
 ) -> int:
     """The built-in subagent runner (roadmap 2.7): no external CLI required —
     `agent_fn(prompt, workspace, model, tool_executor)` is the seam (a Claude
@@ -15104,6 +15448,13 @@ def run_subagent_tasks(
                 print(f"capped recovery is unsupported for case {pt.case_id}; omit --max-cost-usd", file=sys.stderr)
                 return 2
     design = answer_design_from_tasks(tasks, default_model=model)
+    if fault_selection not in {"all", "only", "skip"}:
+        raise ValueError("unknown fault selection")
+    validated = [item for item in validated if fault_selection == "all" or bool(item[1].tool_faults) == (fault_selection == "only")]
+    if not validated:
+        return 0
+    if mode == "off" and any(pt.tool_faults for _, pt, _, _, _ in validated):
+        die("tool_faults require enabled tool replay on the direct callable route")
     call_sets = tuple(tuple(SubagentTurnCall(
         answer_design_identity(design, pt, row_model)["task_sha256"],
         RunCoordinate.of(pt.case_id, pt.variant_truth, pt.run_number, row_model), n)
@@ -15160,7 +15511,24 @@ def run_subagent_tasks(
                 existing_replay = base / "tool-replay.json"
                 if mode in {"replay", "strict", "auto"} and existing_replay.is_file():
                     shutil.copy2(existing_replay, replay_path)
-                store = ToolReplayStore(replay_path, mode) if mode != "off" else None
+                planned_identity = answer_design_identity(design, pt, row_model)
+                store = ToolReplayStore(replay_path, mode, faults=pt.tool_faults,
+                    case_input_sha256=planned_identity["case_input_sha256"]) if mode != "off" else None
+                journal: _ToolReceiptJournal | None = None
+                if pt.tool_faults:
+                    if store is None:
+                        raise AssertionError("fault run lost replay store")
+                    evidence_root = runs / ".tool-observations"
+                    evidence_root.mkdir(exist_ok=True)
+                    journal_path = evidence_root / (uuid.uuid4().hex + "/journal.jsonl")
+                    journal = _ToolReceiptJournal(journal_path, {
+                        "task_sha256": planned_identity["task_sha256"],
+                        "case_input_sha256": planned_identity["case_input_sha256"],
+                        "run": {"case_id": pt.case_id, "model": row_model, "variant": pt.variant_truth,
+                                "run_number": int(pt.run_number), "population": "answer"},
+                        "faults": tool_fault_domain.fault_rows(pt.tool_faults),
+                        "expected_turns": len(turns) or 1,
+                    }, store, live_tools or {})
 
                 def tool_executor(tool: str, payload: Any, replay_store=store) -> Any:
                     live = (live_tools or {}).get(tool)
@@ -15181,11 +15549,11 @@ def run_subagent_tasks(
                 served_reported: list[str] = []
                 callback_error: Exception | None = None
 
-                def invoke_turn(**kwargs: Any) -> Priced[_SubagentTurnResult]:
+                def invoke_turn(journal=journal, **kwargs: Any) -> Priced[_SubagentTurnResult]:
                     nonlocal callback_error
                     callback_error = None
                     try:
-                        return _invoke_paid_subagent(agent_fn, **kwargs)
+                        return _invoke_paid_subagent(agent_fn, journal=journal, **kwargs)
                     except Exception as exc:
                         callback_error = exc
                         raise
@@ -15209,7 +15577,7 @@ def run_subagent_tasks(
                             turn_started = time.time()
                             try:
                                 execution = admission.run(calls[n - 1], functools.partial(invoke_turn,
-                                    requires_delta=True, prompt=sent, workspace=ws, model=row_model,
+                                    requires_delta=True, turn=n, prompt=sent, workspace=ws, model=row_model,
                                     tool_executor=tool_executor, history=list(history)))
                             except Exception as exc:
                                 if exc is not callback_error:
@@ -15222,6 +15590,8 @@ def run_subagent_tasks(
                                     budget_stopped = True
                                     continue
                                 paid = execution.value
+                                if journal is not None and journal.interruption is not None:
+                                    raise journal.interruption
                             started_calls += 1
                             turn_response, turn_error = _subagent_artifact_response(paid)
                             if isinstance(paid, _SubagentResponseRejected):
@@ -15286,6 +15656,8 @@ def run_subagent_tasks(
                             served_reported.extend(turn_served)
                             turn_ro = RunnerOutcome(
                                 provider="subagent", answer=turn_answer,
+                                mediated_tools=journal.observation(n) if journal is not None else None,
+                                tool_journal_path=str(journal.path.resolve()) if journal is not None else None,
                                 returncode=int(turn_rc), timed_out=bool(turn_timed_out),
                                 error=turn_error, elapsed_ms=turn_elapsed,
                                 trace_text=turn_trace_text, trace_source=trace_source,
@@ -15349,6 +15721,8 @@ def run_subagent_tasks(
                                 paid = None
                             else:
                                 paid = execution.value
+                                if journal is not None and journal.interruption is not None:
+                                    raise journal.interruption
                         if paid is None:
                             outcome, error = {}, None
                         else:
@@ -15408,6 +15782,8 @@ def run_subagent_tasks(
                 if terminal is not None:
                     ro = _NoProcessArtifact(OutcomeContext(
                         provider=Provider.SUBAGENT, model=row_model,
+                        mediated_tools=journal.observation() if journal is not None else None,
+                        tool_journal_path=str(journal.path.resolve()) if journal is not None else None,
                         trace_text=trace_text, trace_source=None if trace_source is None else Provider(trace_source),
                         cost_usd=None if refusals else aggregate_cost_usd,
                         metadata_extra=metadata_extra,
@@ -15415,6 +15791,8 @@ def run_subagent_tasks(
                 else:
                     ro = RunnerOutcome(
                         provider="subagent", answer=answer,
+                        mediated_tools=journal.observation() if journal is not None else None,
+                        tool_journal_path=str(journal.path.resolve()) if journal is not None else None,
                         returncode=returncode, timed_out=timed_out,
                         error=error or ("subagent timed out" if timed_out else None),
                         elapsed_ms=(int(elapsed_ms) if isinstance(elapsed_ms, (int, float)) else None),
@@ -15495,6 +15873,13 @@ def shell_agent_backend(agent_cmd: str, timeout: int = DEFAULT_RUNNER_TIMEOUT_S)
 def run_subagent(args: argparse.Namespace) -> int:
     tasks = load_prepared_tasks(Path(args.tasks))
     runs = Path(args.runs)
+    selection = "only" if getattr(args, "only_fault_cases", False) else "skip" if getattr(args, "skip_fault_cases", False) else "all"
+    if selection != "all" or any(any(field in task for field in (
+            "tool_faults", "tool_fault_task_sha256", "tool_fault_case_input_sha256")) for task in tasks):
+        answer_design_from_tasks(tasks, default_model=getattr(args, "model", None))
+    selected = [task for task in tasks if selection == "all" or ("tool_faults" in task) == (selection == "only")]
+    if any("tool_faults" in task for task in selected):
+        die("tool_faults execution requires a direct Python callable; built-in CLI backends do not consume tool_executor")
     agent_cmd = getattr(args, "agent_cmd", None)
     if agent_cmd:
         backend = shell_agent_backend(agent_cmd, timeout=int(getattr(args, "timeout", DEFAULT_RUNNER_TIMEOUT_S)))
@@ -15552,7 +15937,7 @@ def run_subagent(args: argparse.Namespace) -> int:
                               replay_mode=getattr(args, "tool_replay", None) or tool_replay_mode(),
                               trace_source=None if agent_cmd else "claude",
                               context_isolation=() if agent_cmd else CLAUDE_ISOLATION_ARGS[ContextIsolation.WORKSPACE],
-                              spend_policy=native_spend_policy(args))
+                              spend_policy=native_spend_policy(args), fault_selection=selection)
 
 
 JUDGE_NEGATIVE_CONTROLS = {
@@ -19529,18 +19914,19 @@ def invalidate_variant_summaries(
     }
 
 
-def _trajectory_profile(events: list[dict[str, Any]]) -> dict[str, Any]:
+def _trajectory_profile(events: list[dict[str, Any]], *, mediated_tools: tool_fault_domain.ToolObservation | None = None) -> dict[str, Any]:
     """One arm's trajectory shape. Counts come from trace_event_counts — the
     same owner metrics.json uses — so a diff delta is a delta of exactly the
     numbers metrics.json reports. Commands are the display string
     (input_summary first), not command_text's concatenated match text — this is
     a report view for humans, not a regex haystack."""
-    counts = trace_event_counts(events)
+    counts = trace_event_counts(events, mediated_tools=mediated_tools)
     return {
+        "mediated_tools": mediated_tools,
         "commands": [str(e.get("input_summary") or e.get("command") or e.get("cmd") or e.get("name") or "")
                      for e in command_events(events)],
         "counts": {key: counts[key] for key in ("steps", "commands", "tool_calls", "file_reads", "file_writes")},
-        "skill_invoked": bool(counts["skill_events"]),
+        "skill_invoked": counts.get("skill_invoked") if mediated_tools is not None else bool(counts["skill_events"]),
     }
 
 
@@ -19562,6 +19948,11 @@ def build_trajectory_diff(results: list[dict[str, Any]]) -> dict[str, Any]:
             return False, "missing_trace_evidence"
         base_path = Path(base)
         events, _ = read_events_base(base_path)
+        mediated = read_tool_observation_base(base_path)
+        if mediated is not None:
+            profiles[base] = _trajectory_profile(events or [], mediated_tools=mediated)
+            profiles[base]["measurements"] = _tool_measurements(mediated, telemetry_domain.basis_from_run(read_metrics_base(base_path)))
+            return True, None
         if not events:
             return False, "missing_trace_evidence"
         if read_metrics_base(base_path).get("trace_observation_complete") is False:
@@ -19581,12 +19972,33 @@ def build_trajectory_diff(results: list[dict[str, Any]]) -> dict[str, Any]:
         without_profile = profiles[str(pair.without_skill.payload.get("run_base"))]
         bucket = by_case.setdefault(pair.key.case_id, {
             "pairs": 0, "deltas": {key: [] for key in delta_keys},
+            "metric_blocked": {key: [] for key in delta_keys},
+            "mediated_tools_present": False,
+            "operation_semantics_available": True,
             "skill_invoked": {"with_skill": [], "without_skill": []},
             "commands_seen": {"with_skill": [], "without_skill": []},
         })
         bucket["pairs"] += 1
+        left_observation, right_observation = with_profile["mediated_tools"], without_profile["mediated_tools"]
+        if left_observation is not None or right_observation is not None:
+            bucket["mediated_tools_present"] = True
         for key in delta_keys:
-            bucket["deltas"][key].append(with_profile["counts"][key] - without_profile["counts"][key])
+            if left_observation is None and right_observation is None:
+                bucket["deltas"][key].append(with_profile["counts"][key] - without_profile["counts"][key])
+                continue
+            left = (with_profile["measurements"][key] if left_observation is not None else
+                    telemetry_domain.Measurement.available(with_profile["counts"][key], provenance="trace_normalized",
+                        basis=telemetry_domain.basis_from_run(pair.with_skill.payload.get("metadata") or {})))
+            right = (without_profile["measurements"][key] if right_observation is not None else
+                     telemetry_domain.Measurement.available(without_profile["counts"][key], provenance="trace_normalized",
+                        basis=telemetry_domain.basis_from_run(pair.without_skill.payload.get("metadata") or {})))
+            compared = telemetry_domain.compare_numeric_pair(left, right)
+            if compared.availability == telemetry_domain.COMPARABLE:
+                bucket["deltas"][key].append(compared.value)
+            else:
+                bucket["metric_blocked"][key].append(compared.reason)
+        if with_profile["skill_invoked"] is None or without_profile["skill_invoked"] is None:
+            bucket["operation_semantics_available"] = False
         bucket["skill_invoked"]["with_skill"].append(1.0 if with_profile["skill_invoked"] else 0.0)
         bucket["skill_invoked"]["without_skill"].append(1.0 if without_profile["skill_invoked"] else 0.0)
         bucket["commands_seen"]["with_skill"].extend(c for c in with_profile["commands"] if c)
@@ -19607,10 +20019,14 @@ def build_trajectory_diff(results: list[dict[str, Any]]) -> dict[str, Any]:
         cases.append({
             "case_id": case_id,
             "pairs": bucket["pairs"],
-            "mean_deltas": {key: round(statistics.mean(values), 4) for key, values in bucket["deltas"].items()},
-            "skill_invoked": {arm: round(statistics.mean(values), 4) for arm, values in bucket["skill_invoked"].items()},
-            "commands_only_with_skill": ordered_unique([c for c in with_commands if c not in without_set]),
-            "commands_only_without_skill": ordered_unique([c for c in without_commands if c not in with_set]),
+            "mean_deltas": {key: round(statistics.mean(values), 4) if values and not bucket["metric_blocked"][key] else None for key, values in bucket["deltas"].items()},
+            **({"metric_pairing": {key: {"expected_pairs": bucket["pairs"], "observed_pairs": len(bucket["deltas"][key]),
+                                        "availability": "complete" if not reasons else "unavailable", "reasons": reasons}
+                                  for key, reasons in bucket["metric_blocked"].items()}}
+               if bucket["mediated_tools_present"] else {}),
+            "skill_invoked": {arm: round(statistics.mean(values), 4) if bucket["operation_semantics_available"] else None for arm, values in bucket["skill_invoked"].items()},
+            "commands_only_with_skill": ordered_unique([c for c in with_commands if c not in without_set]) if bucket["operation_semantics_available"] else None,
+            "commands_only_without_skill": ordered_unique([c for c in without_commands if c not in with_set]) if bucket["operation_semantics_available"] else None,
         })
     observed = {
         "pairs_compared": len(construction.pairs),
@@ -24026,6 +24442,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--assumed-cost-per-run-usd", type=float, help="labeled charge for one unpriced native answer call; requires --max-cost-usd")
 
     p = sub.add_parser("run-subagent", help="run prepared tasks through an in-process subagent backend (Claude CLI by default, --agent-cmd for any provider); hosts tool replay")
+    fault_filter = p.add_mutually_exclusive_group()
+    fault_filter.add_argument("--only-fault-cases", action="store_true", help="select declared tool challenge cases after validating the full prepared design")
+    fault_filter.add_argument("--skip-fault-cases", action="store_true", help="skip declared tool challenge cases after validating the full prepared design")
     p.add_argument("--tasks", required=True, help="prepared task JSONL from skill-benchmark prepare")
     p.add_argument("--runs", required=True, help="output runs directory")
     p.add_argument("--model", help="model id passed to the backend; a row-level model wins")

@@ -13,6 +13,7 @@ from typing import Any, TypeAlias
 from invocation_contracts import InvocationState
 from json_contracts import freeze_json_mapping, validate_json_text
 from telemetry import finite_nonnegative, validate_raw_usage
+from tool_fault_contracts import MEDIATED_KEYS, ToolObservation
 
 
 class Provider(str, Enum):
@@ -39,7 +40,7 @@ _RESERVED_EVIDENCE_KEYS = frozenset({
     "operation_observation_complete", "artifact_set_complete",
     "workspace_changes_captured", "workspace_changes_state",
     "observation_evidence", "telemetry", "telemetry_schema_version",
-})
+}) | MEDIATED_KEYS
 
 
 @dataclass(frozen=True)
@@ -59,8 +60,15 @@ class OutcomeContext:
     # The provider whose wire format the trace is in, when it is not the
     # runner's own: run-subagent's default backend drives Claude's CLI.
     trace_source: Provider | None = None
+    mediated_tools: ToolObservation | None = None
+    tool_journal_path: str | None = None
 
     def __post_init__(self) -> None:
+        if self.mediated_tools is not None:
+            if not isinstance(self.mediated_tools, ToolObservation) or not isinstance(self.tool_journal_path, str) or not self.tool_journal_path:
+                raise ValueError("mediated tools require a typed observation and stable journal path")
+        elif self.tool_journal_path is not None:
+            raise ValueError("tool journal path requires mediated tools")
         try:
             object.__setattr__(self, "provider", Provider(self.provider))
         except ValueError as exc:
@@ -238,7 +246,9 @@ def RunnerOutcome(*, provider: str, answer: str | None = None,
                   environment: Mapping[str, Any] | None = None,
                   diagnose_returncode: bool = True,
                   invocation_state: InvocationState | str | None = None,
-                  trace_source: str | None = None) -> AnswerOutcome:
+                  trace_source: str | None = None,
+                  mediated_tools: ToolObservation | None = None,
+                  tool_journal_path: str | None = None) -> AnswerOutcome:
     """Strict compatibility factory for the historical constructor spelling."""
     if not isinstance(timed_out, bool):
         raise TypeError("timed_out must be boolean")
@@ -269,6 +279,7 @@ def RunnerOutcome(*, provider: str, answer: str | None = None,
         metrics_extra={} if metrics_extra is None else metrics_extra,
         environment=environment, diagnose_returncode=diagnose_returncode,
         trace_source=None if trace_source is None else Provider(trace_source),
+        mediated_tools=mediated_tools, tool_journal_path=tool_journal_path,
     )
     if timed_out:
         if returncode not in {None, 124}:

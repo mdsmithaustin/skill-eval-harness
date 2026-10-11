@@ -274,8 +274,8 @@ Objective assertion types:
 | `skill_invoked` | Trace/process check that the runner loaded the skill, or did not, as expected. |
 | `command_ran` / `command_not_ran` | Trace/process checks over normalized command events. |
 | `command_order` | Trace/process check that commands appeared in a required order. |
-| `tool_call` | A tool call matching `tool`/`pattern` occurred (with `min_count`/`max_count` bounds), or an ordered `order` list of calls. BFCL-style set relations over completed-call **tool names** (exact, case-insensitive — *not* substring): `expected_no_call` (the named tool, or any name matching `pattern`, must never have been observed—even as started, failed, or in progress), `required_calls` (an order-independent subset of completed tool names that must all appear, extras allowed), `call_set` (an exact multiset of completed tool names—same names and multiplicities, no unexpected named calls). Use `pattern`/`order`/`command_ran` for regex or command-text matching. Positive selectors match completed call inputs, never outputs. |
-| `tool_sequence` | The completed trajectory (commands, tool calls, file reads/writes, skill loads — each keyed by its normalized casefolded name, a nameless shell command as `bash`) against a manifest `expected` list, under `mode`: `strict` (exact order and length, default), `unordered` (same multiset, order-free), `subset` (`actual` ⊆ `expected` as multisets — every completed call was on the list, some listed steps may have been skipped; an empty completed trajectory always satisfies this), `superset` (`actual` ⊇ `expected` as multisets — every expected call ran, extra steps allowed). The subject is always the *actual* trajectory, matching jevals/LangChain agentevals naming — see `docs/authoring-evals.md` for the full rule and a per-provider key table, since `expected` is written against one provider's tool-name vocabulary, not a shared one. Always reports `precision`/`recall`/`f1` (multiset overlap) in its evidence and as `score`; an optional `min_f1` additionally gates `passed`. Missing `events.json` fails closed (`unavailable`), never passes. |
+| `tool_call` | A tool call matching `tool`/`pattern` occurred (with `min_count`/`max_count` bounds), or an ordered `order` list of calls. BFCL-style set relations over completed-call **tool names** (exact, case-insensitive — *not* substring): `expected_no_call` (the named tool, or any name matching `pattern`, must never have been observed—even as started, failed, or in progress), `required_calls` (an order-independent subset of completed tool names that must all appear, extras allowed), `call_set` (an exact multiset of completed tool names—same names and multiplicities, no unexpected named calls). Use `pattern`/`order`/`command_ran` for regex or command-text matching. Positive selectors match completed call inputs, never outputs. `is_error` requires a known delivered error for every relevant call and cannot accompany `expected_no_call`. |
+| `tool_sequence` | The completed trajectory (commands, tool calls, file reads/writes, skill loads — each keyed by its normalized casefolded name, a nameless shell command as `bash`) against a manifest `expected` list, under `mode`: `strict` (exact order and length, default), `unordered` (same multiset, order-free), `subset` (`actual` ⊆ `expected` as multisets — every completed call was on the list, some listed steps may have been skipped; an empty completed trajectory always satisfies this), `superset` (`actual` ⊇ `expected` as multisets — every expected call ran, extra steps allowed). The subject is always the *actual* trajectory, matching jevals/LangChain agentevals naming — see `docs/authoring-evals.md` for the full rule and a per-provider key table, since `expected` is written against one provider's tool-name vocabulary, not a shared one. Closed populations report `precision`/`recall`/`f1` (multiset overlap) in their evidence and F1 as `score`; an optional `min_f1` additionally gates `passed`. A confirmed mediated prefix can satisfy a superset claim without a whole-population score. Missing `events.json` fails closed (`unavailable`), never passes. |
 | `tool_count_le` / `no_repeated_command_loop` | Trace/process budgets for tool use and thrashing. |
 | `total_tokens_le` / `elapsed_seconds_le` / `command_count_le` | Efficiency checks over `metrics.json`, `metadata.json`, or normalized events. |
 
@@ -634,6 +634,11 @@ For manifest or grading changes, add or update `tests/test_skill_benchmark.py`. 
 - Hidden prompts are not protected if you pass `--include-answer-key` to generation jobs.
 - A passing answer benchmark does not prove autonomous skill loading; run `skill-trigger-matrix` (any adapter-backed agent × model; `skill-pi-trigger-eval` is its Pi-only form) for that.
 
+Prepared answer cases can declare ordered `tool_faults` for direct Python callable output challenges.
+`prepare` validates and commits the declarations across arms and repetitions. The built-in CLI
+backends refuse selected fault cases before launch because they do not consume `tool_executor`.
+See [simulated tool output declarations](docs/authoring-evals.md#declare-simulated-tool-outputs).
+
 ## Repository layout
 
 ```text
@@ -663,6 +668,7 @@ skill-eval-harness/
 ├── spend_runtime.py            # serial admission and invocation ledger publication
 ├── judge_verdict.py            # strict verdicts and complete/partial/missing observation trees
 ├── jetty_contracts.py          # closed Jetty lifecycle and observation contract
+├── tool_fault_contracts.py     # ordered challenges and assessed callable output observations
 ├── trace_contracts.py          # normalized event-log and event lifecycle contracts
 ├── trigger_contracts.py        # autonomous-trigger invocation/detection/observation contract
 ├── telemetry.py                # schema-v3 availability/provenance/comparison domain

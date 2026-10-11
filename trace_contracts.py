@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any, Literal, TypeAlias
 
 from json_contracts import freeze_json_mapping
+from tool_fault_contracts import ToolObservation
 
 
 class EventState(str, Enum):
@@ -62,10 +63,13 @@ class InvalidEventLog:
 class LoadedEventLog:
     events: tuple[Mapping[str, Any], ...]
     schema_version: Literal[1, 2]
+    mediated_tools: ToolObservation | None = None
     state: Literal[EventLogState.LOADED] = field(
         default=EventLogState.LOADED, init=False)
 
     def __post_init__(self) -> None:
+        if self.mediated_tools is not None and not isinstance(self.mediated_tools, ToolObservation):
+            raise TypeError("loaded mediated tools must be a validated observation")
         if type(self.schema_version) is not int or self.schema_version not in {1, 2}:
             raise ValueError("loaded event log schema_version must be exactly 1 or 2")
         if not isinstance(self.events, tuple) or not all(
@@ -81,7 +85,7 @@ class LoadedEventLog:
 EventLogObservation: TypeAlias = MissingEventLog | InvalidEventLog | LoadedEventLog
 
 
-def parse_event_log(raw: Any) -> InvalidEventLog | LoadedEventLog:
+def parse_event_log(raw: Any, *, mediated_tools: ToolObservation | None = None) -> InvalidEventLog | LoadedEventLog:
     """Parse a loaded JSON value into one normalized event-log observation."""
     version_present = isinstance(raw, dict) and "schema_version" in raw
     version = raw["schema_version"] if version_present else None
@@ -100,7 +104,9 @@ def parse_event_log(raw: Any) -> InvalidEventLog | LoadedEventLog:
             } if event.get("status") is None else event)
             for event in events
         ]
-    return LoadedEventLog(tuple(events), resolved_version)
+    if isinstance(raw, dict) and "mediated_tools" in raw and mediated_tools is None:
+        return InvalidEventLog("mediated tools require prepared identity and journal reconstruction")
+    return LoadedEventLog(tuple(events), resolved_version, mediated_tools)
 
 
 _COMPLETED = {"completed", "complete", "succeeded", "success", "done", "finished"}

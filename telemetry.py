@@ -693,7 +693,8 @@ def basis_from_run(raw: Mapping[str, Any] | None, *, source: str | None = None,
 
 
 def telemetry_envelope(raw: Mapping[str, Any] | None, *, source: str | None = None,
-                       population: str = "answer", legacy_unverified: bool = False) -> dict[str, Any]:
+                       population: str = "answer", legacy_unverified: bool = False,
+                       tool_measurements: Mapping[str, Measurement[Any]] | None = None) -> dict[str, Any]:
     """Build the additive v3 envelope while preserving legacy blocks beside it."""
     if raw is not None and not isinstance(raw, Mapping):
         raise TypeError("telemetry envelope source must be a mapping or None")
@@ -729,6 +730,8 @@ def telemetry_envelope(raw: Mapping[str, Any] | None, *, source: str | None = No
     else:
         measurements["skill_invoked"] = Measurement.unavailable(
             observation_evidence.operation_incomplete_reason, basis=basis).to_dict()
+    if tool_measurements is not None:
+        measurements.update({key: value.to_dict() for key, value in tool_measurements.items()})
     if legacy_unverified:
         # Normalized v1/v2 fields can be useful historical observations but do
         # not establish the provider/billing basis needed for causal ratios.
@@ -745,6 +748,7 @@ def telemetry_envelope(raw: Mapping[str, Any] | None, *, source: str | None = No
         "population": basis["population"],
         "basis": {key: value for key, value in basis.items() if value is not None},
         "observation_evidence": observation_evidence.to_dict(),
+        **({"mediated_tool_measurements": list(tool_measurements)} if tool_measurements is not None else {}),
         "measurements": measurements,
     }
 
@@ -775,7 +779,7 @@ def measurement_from_envelope_or_nonnegative(raw: Mapping[str, Any], key: str, *
             "tool_calls", "commands", "file_reads", "file_writes",
             "errors", "retries", "repeated_command_max", "skill_invoked",
         }
-        if key in operation_keys:
+        if key in operation_keys and key not in (envelope.get("mediated_tool_measurements") or []):
             try:
                 evidence_raw = envelope.get("observation_evidence")
                 evidence = (ObservationEvidence.from_dict(evidence_raw)
