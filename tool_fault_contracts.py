@@ -392,7 +392,7 @@ class ToolObservation:
         sequence_detail: str | None = None
         positive_prefix = False
         if atype == "tool_count_le":
-            passed = len(selected) <= int(assertion.get("max", 0))
+            passed = len(selected) <= int(assertion.get("max", assertion.get("value", 0)))
         elif atype == "tool_sequence":
             expected = [str(value).casefold() for value in assertion.get("expected", ())]
             actual_counts, expected_counts = Counter(names), Counter(expected)

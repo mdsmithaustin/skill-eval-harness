@@ -8013,19 +8013,17 @@ def process_or_efficiency_assertion_result(
                                and event_is_completed(e)]
             observed_calls = [e for e in events
                               if e.get("type") in TRAJECTORY_STEP_TYPES]
+            tool = assertion.get("tool")
+            tool_folded = str(tool).casefold()
+            relevant_calls = [e for e in completed_calls
+                              if not tool or str(e.get("name", "")).casefold() == tool_folded
+                              or (tool_folded in {"bash", "shell", "command"} and e.get("type") == "command")]
             if "is_error" in assertion:
-                relevant = [e for e in completed_calls if not assertion.get("tool") or str(e.get("name", "")).casefold() == str(assertion["tool"]).casefold()]
-                if any(type(e.get("is_error")) is not bool for e in relevant):
+                if any(type(e.get("is_error")) is not bool for e in relevant_calls):
                     return None, "delivered_error_unavailable"
                 completed_calls = [e for e in completed_calls if e.get("is_error") is assertion["is_error"]]
-            tool = assertion.get("tool")
-            if tool:
-                tool_folded = str(tool).casefold()
-                selected = [command_text(e) or str(e.get("name", "")) for e in completed_calls
-                            if str(e.get("name", "")).casefold() == tool_folded
-                            or (tool_folded in {"bash", "shell", "command"} and e.get("type") == "command")]
-            else:
-                selected = [command_text(e) or str(e.get("name", "")) for e in completed_calls]
+                relevant_calls = [e for e in relevant_calls if e.get("is_error") is assertion["is_error"]]
+            selected = [command_text(e) or str(e.get("name", "")) for e in relevant_calls]
             # 6: BFCL-style call taxonomy over completed-call TOOL NAMES (exact,
             # case-insensitive) — NOT a substring/regex over the rendered command, so
             # `required_calls: ["Read"]` means the Read tool ran, and a shell `cat
@@ -8115,7 +8113,7 @@ def process_or_efficiency_assertion_result(
                 cursor = found + 1
             return True, f"matched order: {matched}"
         if atype == "tool_count_le":
-            max_allowed = int(assertion.get("max", 0))
+            max_allowed = int(assertion.get("max", assertion.get("value", 0)))
             tool = assertion.get("tool")
             completed_events = [e for e in events if event_is_completed(e)]
             if tool:
