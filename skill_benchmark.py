@@ -7632,7 +7632,7 @@ def _invoke_process(plan: ProcessInvocationPlan, dialogue: _BridgeSession | None
                     raise ValueError("tool bridge call requires ready state and exact fields")
                 if type(frame["id"]) is not int or not 1 <= frame["id"] <= 2**63 - 1:
                     raise ValueError("tool bridge request id must be a positive bounded integer")
-                response = session.journal.offer_bridge(frame)
+                response = session.journal.offer_bridge(frame, session.limits.frame_bytes)
                 outbound = _bridge_frame_bytes(response, session.limits.frame_bytes)
                 if outbound_total + len(outbound) > session.limits.outbound_bytes:
                     raise ValueError("tool bridge outbound stream exceeds configured bound")
@@ -15335,11 +15335,14 @@ class _ToolReceiptJournal:
             self._commit({"type": "confirmed", "turn": self.turn,
                           "exchange": pending["exchange"], "prepared_sha256": pending["record_sha256"]})
 
-    def offer_bridge(self, frame: Mapping[str, Any]) -> dict[str, Any]:
+    def offer_bridge(self, frame: Mapping[str, Any], frame_limit: int = 64 * 1024) -> dict[str, Any]:
         exchange = sum(row["type"] in {"prepared", "offered"} for row in self.rows) + 1
         _output, resolution = self.store._resolve_mediated(frame["tool"], frame["input"])
         if resolution is None:
             raise ValueError("offline tool bridge output has no strict JSON evidence")
+        response = tool_fault_domain.bridge_response(
+            self.identity, self.turn, exchange, frame["tool"], frame["input"], resolution, frame["id"])
+        _bridge_frame_bytes({**response, "payload_sha256": "sha256:" + "0" * 64}, frame_limit)
         self.pending = self._commit(tool_fault_domain.bridge_offer(
             self.identity, self.turn, exchange, frame["tool"], frame["input"], resolution, frame["id"]))
         return thaw_json_value(self.pending["payload"]["response"])

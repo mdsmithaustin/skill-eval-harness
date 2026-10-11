@@ -57,7 +57,7 @@ class BridgeObservationTests(unittest.TestCase):
             replay = root / "replay.json"
             replay.write_text(json.dumps({"version": 1, "records": [
                 {"tool": "search", "key": sb.ToolReplayStore.call_key("search", frame["input"]), "output": output}
-                for output in ("x" * 100000, "x" * 65000)]}))
+                for output in ("x" * 100000, "\U0001f6b2" * 200, "x" * 64900)]}))
             journal = sb._ToolReceiptJournal(root / "evidence" / "journal.jsonl", identity,
                                             sb.ToolReplayStore(replay, "strict"), {})
             journal.turn = 1
@@ -76,9 +76,13 @@ class BridgeObservationTests(unittest.TestCase):
             self.assertEqual(serialized, [])
             self.assertEqual(journal.path.read_bytes(), prefix)
             self.assertIsNone(journal.pending)
-            response = journal.offer_bridge({**frame, "id": 2})
+            with self.assertRaisesRegex(ValueError, "outbound frame exceeds"):
+                journal.offer_bridge({**frame, "id": 2}, 1024)
+            self.assertEqual(journal.path.read_bytes(), prefix)
+            self.assertIsNone(journal.pending)
+            response = journal.offer_bridge({**frame, "id": 3})
             encoded = sb._bridge_frame_bytes(response, 65536)
-            self.assertEqual(json.loads(encoded)["output"], "x" * 65000)
+            self.assertEqual(json.loads(encoded)["output"], "x" * 64900)
             self.assertEqual([row["type"] for row in journal.rows], ["opened", "turn_opened", "offered"])
             with self.assertRaisesRegex(sb.ToolReplayMiss, "unrecorded tool call"):
                 journal.store.resolve("search", frame["input"])

@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, TypeVar, overload
+from typing import Any, Generic, Literal, TypedDict, TypeVar, overload
 
 import regex
 
@@ -193,15 +193,36 @@ def callable_preparation(identity: Mapping[str, Any], turn: int, exchange: int,
                         "payload_sha256": _digest("callable-output-v1", resolution.output)}}
 
 
+class BridgeResponseBody(TypedDict):
+    type: Literal["result"]
+    protocol_version: Literal[1]
+    id: int
+    task_sha256: str
+    run: Any
+    turn_number: int
+    exchange_number: int
+    tool: str
+    input_sha256: str
+    source: Literal["fault", "recorded", "live"]
+    fault_id: str | None
+    output: Any
+    error: dict[str, Any]
+
+
+def bridge_response(identity: Mapping[str, Any], turn: int, exchange: int,
+                    tool: str, payload: Any, resolution: _Resolution, request_id: int) -> BridgeResponseBody:
+    return {"type": "result", "protocol_version": 1, "id": _positive(request_id),
+            "task_sha256": identity["task_sha256"], "run": thaw_json_value(identity["run"]),
+            "turn_number": turn, "exchange_number": exchange, "tool": tool,
+            "input_sha256": _digest("tool-input-v1", payload), "source": resolution.source,
+            "fault_id": resolution.fault_id, "output": thaw_json_value(resolution.output),
+            "error": dict(resolution.resolution_error)}
+
+
 def bridge_offer(identity: Mapping[str, Any], turn: int, exchange: int,
                  tool: str, payload: Any, resolution: _Resolution, request_id: int) -> dict[str, Any]:
+    response = bridge_response(identity, turn, exchange, tool, payload, resolution, request_id)
     prepared = callable_preparation(identity, turn, exchange, tool, payload, resolution)
-    response = {"type": "result", "protocol_version": 1, "id": _positive(request_id),
-                "task_sha256": identity["task_sha256"], "run": thaw_json_value(identity["run"]),
-                "turn_number": turn, "exchange_number": exchange, "tool": tool,
-                "input_sha256": prepared["input_sha256"], "source": resolution.source,
-                "fault_id": resolution.fault_id, "output": thaw_json_value(resolution.output),
-                "error": dict(resolution.resolution_error)}
     digest = _digest("tool-bridge-response-v1", response)
     return {**prepared, "type": "offered", "request_id": request_id,
             "payload": {"kind": "bridge_response", "output": response["output"],
@@ -424,19 +445,23 @@ class ToolObservation:
             return Unavailable("output_only_api_has_no_operation_semantics")
         tool = assertion.get("tool")
         selected = [row for row in rows if not tool or row["tool"].casefold() == str(tool).casefold()]
+        case_insensitive = bool(assertion.get("ci", True))
+        def hit(pattern: str, text: str) -> bool:
+            return regex.search(pattern, text, regex.VERSION0 | (regex.IGNORECASE if case_insensitive else 0),
+                                timeout=FAULT_MATCH_TIMEOUT_SECONDS) is not None
         if "is_error" in assertion:
             if assertion.get("expected_no_call"):
                 raise ValueError("expected_no_call cannot use is_error")
+            if atype == "tool_call" and assertion.get("pattern") and not any(
+                    assertion.get(key) for key in ("required_calls", "call_set", "order")):
+                selected = [row for row in selected if hit(str(assertion["pattern"]),
+                    row["input"] if isinstance(row["input"], str) else canonical_input(row["input"]))]
             error = next((row["payload"]["delivered_error"] for row in selected
                           if row["payload"]["delivered_error"]["availability"] != "known"), None)
             if error:
                 return Unavailable(error["reason"])
             selected = [row for row in selected if row["payload"]["delivered_error"]["value"] == assertion["is_error"]]
         names = [row["tool"].casefold() for row in (selected if "is_error" in assertion else rows)]
-        case_insensitive = bool(assertion.get("ci", True))
-        def hit(pattern: str, text: str) -> bool:
-            return regex.search(pattern, text, regex.VERSION0 | (regex.IGNORECASE if case_insensitive else 0),
-                                timeout=FAULT_MATCH_TIMEOUT_SECONDS) is not None
         text = [row["input"] if isinstance(row["input"], str) else canonical_input(row["input"]) for row in selected]
         score: float | None = None
         sequence_detail: str | None = None

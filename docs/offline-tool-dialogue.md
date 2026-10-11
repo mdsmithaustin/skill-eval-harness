@@ -69,6 +69,8 @@ Completion also requires natural zero exit, no pending response, full required p
 and observed original-group shutdown. A final followed by a hang, nonzero exit, or held pipes remains incomplete.
 Previously ACKed outputs can still establish positive prefix claims. Exact counts and absence require closure.
 Closed legacy output counts remain available. Claims that depend on unknown delivered errors remain unavailable.
+Input-pattern claims select their matching calls before checking delivered errors. An unrelated unknown error
+does not withhold a known matching claim. Whole-tool error counts still require every selected error to be known.
 Generic tool responses cannot establish file-read, command-exit, or skill-open success.
 
 ## Bounds and retained evidence
@@ -77,8 +79,10 @@ Defaults are 65,536 bytes per frame including its newline, 8,388,608 bytes of ag
 and 8,388,608 bytes of combined stdout and stderr. The `--tool-bridge-max-frame-bytes`,
 `--tool-bridge-max-outbound-bytes`, and `--tool-bridge-max-stream-bytes` flags can lower those limits.
 All pipe activity shares `--timeout`. Partial writes and unterminated input consume the same deadline.
-Outgoing values pass a finite minimum-size walk before encoding; oversized scalars or containers
-are rejected before string escaping. The encoded UTF-8 bytes must also fit the frame bound.
+After resolution consumes its budget, the full response passes the finite minimum-size walk and bounded UTF-8
+encoding before output receipt hashing or journal publication. The walk rejects values whose minimum size exceeds
+the frame bound before string escaping. The response includes its output, input hash, fixed metadata, and a
+fixed-width digest placeholder. The actual committed response passes the encoded frame check again before sending.
 Reads and writes use at most 16 KiB chunks. Cleanup has a separate 64 KiB drain bound and a bounded grace period.
 Crossing bytes remain recorded as failed transport. They cannot become a valid truncated frame.
 
