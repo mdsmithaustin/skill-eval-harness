@@ -15373,16 +15373,17 @@ class _ToolReceiptJournal:
         plan = ProcessInvocationPlan.from_values(backend.argv, input_text=opening_bytes.decode("utf-8"),
                                                 cwd=workspace, timeout_s=backend.timeout)
         attempt = _invoke_tool_dialogue(plan, session)
+        evidence = _replace(_subagent_paid_evidence(attempt.final), bridge_process=attempt.facts)
+        self.interruption = attempt.interruption
         if attempt.outcome.returncode is None or attempt.outcome.elapsed_ms is None:
-            return _SubagentResponseRejected(attempt.error or "bridge returned no process result", _subagent_paid_evidence(attempt.final))
+            return _SubagentResponseRejected(attempt.error or "bridge returned no process result", evidence)
         process = InvocationResult(stdout=attempt.outcome.stdout, stderr=attempt.outcome.stderr,
             returncode=attempt.outcome.returncode, elapsed_ms=attempt.outcome.elapsed_ms,
             invocation_state=attempt.outcome.state, timed_out=attempt.outcome.timed_out,
             stdout_utf8_valid=attempt.outcome.metadata.get("stdout_utf8_valid") is not False,
             stderr_utf8_valid=attempt.outcome.metadata.get("stderr_utf8_valid") is not False,
             adapter_metadata=attempt.outcome.metadata)
-        evidence = _replace(_subagent_paid_evidence(attempt.final, process), bridge_process=attempt.facts)
-        self.interruption = attempt.interruption
+        evidence = _replace(evidence, process=process)
         error = attempt.error
         if error is None:
             try:
