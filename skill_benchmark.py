@@ -7221,7 +7221,7 @@ class _ToolBridgeBackend:
 
 def _invoke_tool_dialogue(plan: ProcessInvocationPlan, session: _BridgeSession) -> _BridgeStoppedAttempt:
     if not _bridge_supported():
-        raise ValueError("tool bridge requires POSIX nonreaping waitid and process-group controls")
+        raise ValueError("tool bridge requires POSIX nonreaping waitid, process-group controls, and Linux procfs")
     result = _invoke_process(plan, session)
     if not isinstance(result, _BridgeStoppedAttempt):
         raise TypeError("dialogue invocation returned an ordinary outcome")
@@ -7229,7 +7229,7 @@ def _invoke_tool_dialogue(plan: ProcessInvocationPlan, session: _BridgeSession) 
 
 
 def _bridge_supported() -> bool:
-    return os.name == "posix" and all(callable(getattr(os, name, None)) for name in
+    return os.name == "posix" and Path("/proc/self/stat").is_file() and all(callable(getattr(os, name, None)) for name in
         ("waitid", "killpg", "set_blocking")) and all(isinstance(getattr(os, name, None), int)
         for name in ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT"))
 
@@ -7756,6 +7756,11 @@ def _invoke_process(plan: ProcessInvocationPlan, dialogue: _BridgeSession | None
                 handle.close()
             except OSError as exc:
                 error = error or f"tool bridge raw capture failed: {exc}"
+        group_stopped, group_observation = recovery_group_stopped(proc.pid)
+        group_deadline = time.monotonic() + AGENT_STOP_GRACE_S
+        while not group_stopped and time.monotonic() < group_deadline:
+            time.sleep(PROCESS_LEADER_POLL_INTERVAL_S)
+            group_stopped, group_observation = recovery_group_stopped(proc.pid)
         try:
             proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
         except subprocess.TimeoutExpired:
@@ -7765,11 +7770,6 @@ def _invoke_process(plan: ProcessInvocationPlan, dialogue: _BridgeSession | None
                 proc.wait(timeout=PROCESS_PIPE_DRAIN_GRACE_S)
             except subprocess.TimeoutExpired:
                 error = error or "tool bridge leader reap timed out"
-        group_stopped, group_observation = recovery_group_stopped(proc.pid)
-        group_deadline = time.monotonic() + AGENT_STOP_GRACE_S
-        while not group_stopped and time.monotonic() < group_deadline:
-            time.sleep(PROCESS_LEADER_POLL_INTERVAL_S)
-            group_stopped, group_observation = recovery_group_stopped(proc.pid)
         out, err = bytes(streams["stdout"]), bytes(streams["stderr"])
         if final is None:
             for line in out.split(b"\n")[:-1]:
@@ -15849,7 +15849,7 @@ def run_subagent_tasks(
     mode = replay_mode or tool_replay_mode()
     bridge = isinstance(agent_fn, _ToolBridgeBackend)
     if bridge and (mode != "strict" or live_tools or not _bridge_supported()):
-        die("tool bridge requires strict offline replay and POSIX nonreaping waitid/process-group controls")
+        die("tool bridge requires strict offline replay, POSIX nonreaping waitid/process-group controls, and Linux procfs")
     workspace_builder = registered_workspace_builder("subagent")
     validated: list[tuple[dict[str, Any], PreparedTask, str | None, Path, tuple[str, ...]]] = []
     seen_identities: set[tuple[str, str | None, str, int, str]] = set()
@@ -16322,7 +16322,7 @@ def run_subagent(args: argparse.Namespace) -> int:
         if (getattr(args, "tool_replay", None) or tool_replay_mode()) != "strict":
             die("tool bridge requires --tool-replay strict")
         if not _bridge_supported():
-            die("tool bridge requires POSIX nonreaping waitid and process-group controls")
+            die("tool bridge requires POSIX nonreaping waitid, process-group controls, and Linux procfs")
         if any(task.get("recovery") for task in selected):
             die("tool bridge does not support recovery tasks")
         try:

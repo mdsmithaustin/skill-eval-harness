@@ -401,13 +401,9 @@ class ToolObservation:
             hit = next((row for row in rows if row["exchange"] == claim.exchange_number), None)
             return Observed(freeze_json_value(hit["payload"]["output"], "delivered output")) if hit else Unavailable(reason)
         if isinstance(claim, SuccessfulOperations):
-            if not closed:
-                return Unavailable(reason)
-            if any(row["payload"]["delivered_error"]["availability"] != "known" for row in rows):
-                return Unavailable("output_only_api_has_no_operation_success" if any(
-                    row["payload"]["kind"] == "callable_output" for row in rows) else "delivered_error_unavailable")
-            return Observed(tuple(canonical_input(row["input"]) for row in rows
-                                  if row["payload"]["delivered_error"]["value"] is False))
+            return Observed(()) if closed and not rows else Unavailable(
+                "bridge_has_no_operation_semantics" if self._identity.get("route") == "offline_bridge"
+                else "output_only_api_has_no_operation_success")
         if isinstance(claim, Count):
             selected = [row for row in rows if claim.tool is None or row["tool"].casefold() == claim.tool.casefold()]
             if not closed:

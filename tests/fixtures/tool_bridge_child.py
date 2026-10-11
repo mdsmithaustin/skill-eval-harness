@@ -27,6 +27,8 @@ if mode == "invalid_utf8":
     os.write(1, b'\xff\n')
     raise SystemExit
 send({"type": "call", "id": 1, "tool": "search", "input": {"q": "alpha"}})
+if mode == "blocked_response":
+    time.sleep(5)
 response = json.loads(sys.stdin.readline())
 if mode == "offer_timeout":
     time.sleep(5)

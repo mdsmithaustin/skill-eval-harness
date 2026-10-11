@@ -42,15 +42,47 @@ class BridgeCliBoundaryTests(unittest.TestCase):
             self.assertFalse(runs.exists())
 
 
+class BridgeObservationTests(unittest.TestCase):
+    def test_direct_acknowledged_search_cannot_establish_skill_open_success(self):
+        import skill_benchmark as sb
+        import tool_fault_contracts as domain
+        identity = {"task_sha256": "sha256:" + "a" * 64, "case_input_sha256": "sha256:" + "b" * 64,
+                    "run": {"case_id": "c", "variant": "with_skill", "run_number": 1,
+                            "model": None, "population": "answer"},
+                    "faults": [{"tool": "search", "output": "alpha", "is_error": False}],
+                    "expected_turns": 1, "route": "offline_bridge"}
+        rows = []
+        def append(transition):
+            rows.append(domain.journal_record(rows, transition))
+        append({"type": "opened", "identity": identity})
+        append({"type": "turn_opened", "turn": 1})
+        resolution = domain._Resolution("fault", domain.fault_identity(identity["case_input_sha256"], 1),
+            "alpha", {"availability": "known", "value": False})
+        append(domain.bridge_offer(identity, 1, 1, "search", {"q": "alpha"}, resolution, 1))
+        offer = rows[-1]
+        append({"type": "acknowledged", "turn": 1, "exchange": 1,
+                "offered_sha256": offer["record_sha256"], "ack": {"type": "ack", "protocol_version": 1,
+                "id": 1, "turn_number": 1, "exchange_number": 1,
+                "payload_sha256": offer["payload"]["response"]["payload_sha256"]}})
+        append({"type": "turn_closed", "turn": 1})
+        append({"type": "closed"})
+        observation = domain.ToolObservation(identity, tuple(rows))
+        self.assertEqual(observation.assess(domain.Count("errors")).value, 0)
+        self.assertEqual(observation.assess(domain.Count("tool_calls")).value, 1)
+        self.assertEqual(observation.assess(domain.SuccessfulOperations()).reason, "bridge_has_no_operation_semantics")
+        self.assertEqual(sb.detect_trigger_records([], [Path("/mounted/SKILL.md")],
+                         mediated_tools=observation).triggered, False)
+
+
 @unittest.skipUnless(hasattr(os, "waitid") and hasattr(os, "WNOWAIT"),
                      "bridge requires nonreaping waitid")
 class BridgeProcessTests(unittest.TestCase):
-    def prepare(self, root, *, legacy=False):
+    def prepare(self, root, *, legacy=False, declared_error=True, output="alpha"):
         import skill_benchmark as sb
         case = {"id": "c", "split": "tune", "prompt": "Return alpha.",
                 "assertions": [{"name": "answer", "type": "contains", "value": "alpha"}]}
         if not legacy:
-            case["tool_faults"] = [{"tool": "search", "output": "alpha", "is_error": True}]
+            case["tool_faults"] = [{"tool": "search", "output": output, "is_error": declared_error}]
         manifest = make_eval_repo(root, cases=[case])
         tasks = root / "tasks.jsonl"
         self.assertEqual(run_cli("prepare", str(manifest), "--out", str(tasks))[0], 0)
@@ -124,6 +156,34 @@ class BridgeProcessTests(unittest.TestCase):
             del events["mediated_tools"]
             (base / "events.json").write_text(json.dumps(events))
             self.assertEqual(sb.read_tool_observation_base(base).coverage, "missing")
+
+    def test_same_output_known_false_is_delivered_without_operation_semantics(self):
+        import skill_benchmark as sb
+        import tool_fault_contracts as domain
+        with tempfile.TemporaryDirectory() as directory:
+            tasks, rows, runs = self.prepare(Path(directory), declared_error=False)
+            result = self.execute(tasks, runs)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            base = runs / rows[0]["run_dir"]
+            self.assertEqual((base / "output.md").read_text(), "alpha known False")
+            observation = sb.read_tool_observation_base(base)
+            self.assertEqual(observation.assess(domain.Count("errors")).value, 0)
+            self.assertEqual(observation.assess(domain.ExactOutput(1)).value, "alpha")
+            self.assertEqual(sb.process_or_efficiency_assertion_result(
+                {"type": "tool_call", "tool": "search", "is_error": False}, base, {})[0], True)
+            self.assertIsInstance(observation.assess(domain.Count("file_reads")), domain.Unavailable)
+
+    def test_blocked_response_write_consumes_deadline_without_ack(self):
+        import skill_benchmark as sb
+        with tempfile.TemporaryDirectory() as directory:
+            tasks, rows, runs = self.prepare(Path(directory), output="x" * 60000)
+            result = self.execute(tasks, runs, "blocked_response")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            observation = sb.read_tool_observation_base(runs / rows[0]["run_dir"])
+            self.assertEqual(observation.coverage, "open")
+            self.assertEqual(observation.canonical_rows(), [])
+            facts = json.loads(next(runs.glob(".tool-observations/*/turn-1/process.json")).read_text())
+            self.assertEqual((facts["timed_out"], facts["group_stopped"], facts["reaped"]), (True, True, True))
 
     def test_offer_and_acked_prefix_timeout_remain_distinct(self):
         import skill_benchmark as sb
@@ -199,6 +259,32 @@ class BridgeProcessTests(unittest.TestCase):
             ledger = json.loads(next((runs / "spend").glob("*/spend-ceiling.json")).read_text())
             self.assertEqual([row["charge"]["amount_usd"] for row in ledger["calls"]], ["0.02", "0.02"])
             self.assertEqual([row["charge"]["basis"] for row in ledger["calls"]], ["observed", "observed"])
+
+    def test_direct_group_shutdown_is_observed_before_leader_reap(self):
+        from unittest import mock
+
+        import skill_benchmark as sb
+        with tempfile.TemporaryDirectory() as directory:
+            tasks, rows, runs = self.prepare(Path(directory))
+            command = self.command(tasks, runs, "held_pipes")
+            child = shlex.split(command[command.index("--agent-cmd") + 1])
+            backend = sb._ToolBridgeBackend(tuple(child), 1, sb._BridgeLimits())
+            observations = {}
+            stopped_before_wait = []
+            observe = sb.recovery_group_stopped
+            wait = sb.subprocess.Popen.wait
+            def group_stopped(pgid):
+                result = observe(pgid)
+                observations[pgid] = result[0]
+                return result
+            def reap(process, *args, **kwargs):
+                if process.pid in observations:
+                    stopped_before_wait.append(observations[process.pid])
+                return wait(process, *args, **kwargs)
+            with mock.patch.object(sb, "recovery_group_stopped", group_stopped), mock.patch.object(
+                    sb.subprocess.Popen, "wait", reap):
+                self.assertEqual(sb.run_subagent_tasks(rows, runs, backend, replay_mode="strict"), 0)
+            self.assertEqual(stopped_before_wait, [True, True])
 
     def test_parent_interrupt_settles_retained_price_after_cleanup(self):
         for signum in (signal.SIGINT, signal.SIGTERM):
