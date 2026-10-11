@@ -469,6 +469,7 @@ LIVE_SMOKES = {
 
 # Skip reasons allowed only where the platform lacks the capability.
 PLATFORM_SKIPS = {
+    "bridge requires nonreaping waitid": lambda: not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"),
     "process-group cleanup requires POSIX": lambda: not hasattr(os, "killpg"),
     "tomllib is stdlib from Python 3.11": lambda: sys.version_info < (3, 11),
 }
