@@ -114,5 +114,5 @@ The `sync-upstream-YYYY-MM-DD` namespace is distinct from version tags such as
 
 | Date | Record |
 | --- | --- |
-| 2026-10-09 | [Merge of pinned upstream main with fork behavior preserved](2026-10-09.md) |
+| 2026-10-09 | [Accepted normal merge and historical repair evidence](2026-10-09.md), followed by the [adoption summary](../adopting-upstream-2026-10-09.md). |
 | 2026-10-05 | [Merge of upstream main with fork behavior preserved](2026-10-05.md) |

@@ -84,7 +84,9 @@ Fork maintainers use the [upstream sync workflow](upstream-syncs/README.md) to p
 merge ancestry and record accepted checkpoints. The [2026-10-05 sync record](upstream-syncs/2026-10-05.md)
 documents the pinned inputs, preservation choices, and verification limits. The
 [2026-10-09 sync record](upstream-syncs/2026-10-09.md) records the next pinned integration
-and its local verification limits.
+and its historical local verification limits. The
+[adoption summary](adopting-upstream-2026-10-09.md) explains the accepted PR26 through PR39 sequence,
+public proof, deferred scope, and remaining documentation and cleanup gates.
 
 ## Adding a user journey
 
