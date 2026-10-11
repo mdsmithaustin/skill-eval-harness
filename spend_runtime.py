@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import uuid
@@ -37,6 +38,7 @@ class Priced(Generic[T]):
     cost: Measurement[Money]
     observed_subtotal: Money | None = None
     no_model_spend: NoModelSpend | None = None
+    interruption: BaseException | None = None
 
     def __post_init__(self) -> None:
         if self.no_model_spend is not None and (
@@ -73,9 +75,9 @@ class MatrixNotStarted:
     reason: MatrixStopReason
 
 
-class BoundedRunError(BaseException, Generic[T]):
+class BoundedRunError(BaseException):
     def __init__(self, cause: BaseException,
-                 executions: tuple[Started[T] | NotStarted | MatrixNotStarted | WorkerRaised, ...]) -> None:
+                 executions: tuple[Started[Any] | NotStarted | MatrixNotStarted | WorkerRaised, ...]) -> None:
         super().__init__(str(cause))
         self.cause = cause
         self.executions = executions
@@ -111,12 +113,17 @@ class SpendAdmission:
         os.replace(temporary, self.path)
         try:
             descriptor = os.open(self.path.parent, os.O_RDONLY)
-        except OSError:
+        except OSError as exc:
+            if (self.ledger.scope == "paid_matrix_calls" and os.name != "nt"
+                    and exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.ENOSYS}):
+                raise
             return
         try:
             os.fsync(descriptor)
-        except OSError:
-            pass
+        except OSError as exc:
+            if (self.ledger.scope == "paid_matrix_calls" and os.name != "nt"
+                    and exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.ENOSYS}):
+                raise
         finally:
             os.close(descriptor)
 
@@ -181,6 +188,7 @@ class SpendAdmission:
                         results[index] = WorkerRaised(cell.call, exc)
                         continue
                     else:
+                        fatal = fatal or priced.interruption
                         results[index] = Started(cell.call, priced.value)
                         retained.append((index, priced.value))
                     if self.ledger is not None and not cell.offline:
@@ -225,7 +233,11 @@ class SpendAdmission:
                             raise RuntimeError("admitted matrix call has no active handle")
                         self.ledger = self.ledger.transition(InFlight(cell.call))
                         self._persist()
-                    active[cursor] = executor.submit(invoke, cell.call)
+                    try:
+                        active[cursor] = executor.submit(invoke, cell.call)
+                    except BaseException as exc:
+                        results[cursor] = WorkerRaised(cell.call, exc)
+                        raise
                     cursor += 1
                 if active:
                     wait(tuple(active.values()), timeout=0.05, return_when=FIRST_COMPLETED)
@@ -233,8 +245,10 @@ class SpendAdmission:
             fatal = fatal or exc
             try:
                 settle_ready(drain=True)
+                if isinstance(fatal, KeyboardInterrupt):
+                    self._persist()
             except BaseException as drain_error:  # noqa: BLE001
-                fatal.__context__ = drain_error
+                exc.__context__ = drain_error
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
         if fatal is not None:

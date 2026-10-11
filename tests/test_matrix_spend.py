@@ -40,6 +40,56 @@ class MatrixSpendTests(unittest.TestCase):
             self.assertEqual(len(report["spend"]["calls"]), 4)
             self.assertEqual(report["spend"]["scope"], "paid_matrix_calls")
 
+    def test_detection_failure_retains_paid_dollars_and_complete_process(self):
+        from trigger_contracts import InvocationOutcome, matrix_observation_from_row
+        returned = InvocationOutcome.from_process(
+            stdout='{"type":"result","subtype":"success","total_cost_usd":0.6}\n',
+            stderr="", returncode=0, elapsed_ms=1)
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(matrix.ClaudeAdapter, "_run_argv", return_value=returned) as invoke, \
+             mock.patch.object(matrix.ClaudeAdapter, "detect", side_effect=RuntimeError("detection")):
+            root = Path(td)
+            rows = matrix.cases_from_manifest(matrix.load_manifest(MANIFEST), "tune")[:1]
+            report = matrix.run_matrix(MANIFEST, rows, ["claude"], [None], 3, 5, 1,
+                                       spend_policy=SpendPolicy.from_raw("0.5"), spend_root=root / "spend")
+        invoke.assert_called_once()
+        self.assertEqual(report["spend"]["spent_usd"], "0.6")
+        self.assertEqual(report["results"][0]["original_invocation"]["returncode"], 0)
+        self.assertEqual(report["results"][0]["incomplete_reason"], "discovery")
+        self.assertEqual(report["summary"]["total"], 3)
+        self.assertEqual(matrix.matrix_exit_code(report), 2)
+        for row in report["results"]:
+            matrix_observation_from_row(row)
+        import skill_benchmark as benchmark
+        self.assertEqual(len(benchmark._trigger_report_rows(report, "paid").observations), 3)
+
+    def test_positive_known_missing_route_preflight_has_no_persistent_writes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with self.assertRaisesRegex(SystemExit, "requires --assumed"):
+                self.run_matrix(root, ["claude", "codex"], SpendPolicy.from_raw(1))
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_substituted_stub_gets_no_offline_authority(self):
+        class Replaced(matrix.StubAdapter):
+            def invoke(self, *args):
+                raise AssertionError("must not run")
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(matrix.ADAPTERS, {"stub": Replaced}):
+            report = self.run_matrix(Path(td), ["stub"], SpendPolicy.from_raw(0))
+        self.assertEqual(report["summary"]["observed"], 0)
+        self.assertEqual(len(report["spend"]["calls"]), 4)
+
+    def test_permitted_cap_keeps_offline_protocol_and_results(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            uncapped = self.run_matrix(root / "uncapped", ["stub"], None)
+            capped = self.run_matrix(root / "capped", ["stub"], SpendPolicy.from_raw(1))
+        self.assertEqual(uncapped["protocol"], capped["protocol"])
+        self.assertEqual(uncapped["design"], capped["design"])
+        self.assertEqual(uncapped["summary"], capped["summary"])
+        self.assertEqual(capped["spend"]["calls"], [])
+
+
 
 class BoundedAdmissionTests(unittest.TestCase):
     def population(self, offline=()):
@@ -86,6 +136,96 @@ class BoundedAdmissionTests(unittest.TestCase):
                         admission.bounded_map(population, invoke, workers=2)
                     self.assertIsInstance(caught.exception.cause, OSError)
                     invoke.assert_not_called()
+
+    def test_supported_directory_sync_failure_is_fatal_but_unsupported_is_allowed(self):
+        import errno
+        import os
+        import stat
+
+        from spend_runtime import BoundedRunError, Priced, SpendAdmission
+        from telemetry import Measurement, Money
+        population = self.population()
+        real_sync = os.fsync
+        for number in (errno.EIO, errno.EINVAL):
+            with self.subTest(errno=number), tempfile.TemporaryDirectory() as td:
+                with SpendAdmission.open(SpendPolicy.from_raw(1), population.paid_plan,
+                                         root=Path(td)) as admission:
+                    def sync(fd, error_number=number):
+                        if stat.S_ISDIR(os.fstat(fd).st_mode):
+                            raise OSError(error_number, "directory sync")
+                        real_sync(fd)
+                    invoke = mock.Mock(return_value=Priced("done", Measurement.available(
+                        Money.from_raw(1), provenance="provider_reported")))
+                    with mock.patch("spend_runtime.os.fsync", side_effect=sync):
+                        if number == errno.EIO:
+                            with self.assertRaises(BoundedRunError):
+                                admission.bounded_map(population, invoke, workers=1)
+                            invoke.assert_not_called()
+                        else:
+                            admission.bounded_map(population, invoke, workers=1)
+                            invoke.assert_called_once()
+
+
+
+class RetainedEvidenceTests(unittest.TestCase):
+    def test_redactor_failure_retains_original_process_and_dollars(self):
+        import sys
+
+        import skill_benchmark as benchmark
+        from invocation_contracts import ProcessInvocationPlan, RawProcessCapture
+        capture = RawProcessCapture()
+        stream = '{"type":"result","total_cost_usd":0.6,"usage":{"input_tokens":true}}\n'
+        def fail(text):
+            raise ValueError("redaction failed")
+        with tempfile.TemporaryDirectory() as td:
+            plan = ProcessInvocationPlan.from_values(
+                [sys.executable, "-c", f"print({stream!r}, end='')"], input_text=None,
+                cwd=td, timeout_s=5, redact_output=fail, raw_capture=capture)
+            with self.assertRaisesRegex(ValueError, "redaction failed"):
+                benchmark.invoke_argv_with_timeout(plan)
+        self.assertEqual(capture.facts.returncode, 0)
+        raw = matrix._raw_invocation(matrix._CellCapture(capture))
+        cost, floor = matrix._matrix_dollars("claude", raw)
+        self.assertEqual(str(cost.value.amount), "0.6")
+        self.assertIsNone(floor)
+
+    def test_timeout_price_is_a_floor_and_codex_dollars_are_unknown(self):
+        from trigger_contracts import InvocationOutcome
+        invocation = InvocationOutcome.from_timeout(
+            stdout='{"type":"result","total_cost_usd":0.7}\n', stderr="", elapsed_ms=1)
+        cost, floor = matrix._matrix_dollars("claude", invocation)
+        self.assertIsNone(cost.value)
+        self.assertEqual(str(floor.amount), "0.7")
+        cost, floor = matrix._matrix_dollars("codex", invocation)
+        self.assertIsNone(cost.value)
+        self.assertIsNone(floor)
+
+    def test_not_started_and_failure_rows_round_trip_with_full_denominator(self):
+        from trigger_contracts import (
+            FailedTriggerObservation,
+            InvocationOutcome,
+            NotStartedTriggerObservation,
+            TriggerExpectation,
+            TriggerFailureStage,
+            TriggerNotStartedReason,
+            TriggerRepetitionIdentity,
+            matrix_observation_from_row,
+        )
+        from trigger_reporting import summarize_trigger_cohort, trigger_cohort_as_dict
+        common = ("claude", None, "query", TriggerExpectation.TRIGGER,
+                  TriggerRepetitionIdentity("id", 1), None, {})
+        refused = NotStartedTriggerObservation(*common, TriggerNotStartedReason.COST_CEILING)
+        original = InvocationOutcome.from_process(stdout="", stderr="", returncode=0, elapsed_ms=1)
+        failed = FailedTriggerObservation(*common, TriggerFailureStage.DISCOVERY, original)
+        self.assertEqual(matrix_observation_from_row(refused.as_row()), refused)
+        self.assertEqual(matrix_observation_from_row(failed.as_row()), failed)
+        summary = trigger_cohort_as_dict(summarize_trigger_cohort([refused, failed]))
+        self.assertEqual(summary["incomplete_reasons"], {"cost_ceiling": 1, "discovery": 1})
+        self.assertFalse(any(key.endswith("rate") for key in summary))
+        row = refused.as_row()
+        row["returncode"] = 0
+        with self.assertRaises(ValueError):
+            matrix_observation_from_row(row)
 
 
 if __name__ == "__main__":

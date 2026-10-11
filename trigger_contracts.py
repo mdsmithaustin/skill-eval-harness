@@ -1028,3 +1028,162 @@ class TriggerObservation:
                    {"source": "missing"}, {"source": "missing"},
                    {"error": message, **dict({} if metadata is None else metadata)},
                    identity, SkillAttribution.absent(constraints) if constraints else LegacyAttribution())
+
+
+class TriggerNotStartedReason(str, Enum):
+    COST_CEILING = "cost_ceiling"
+    COST_UNOBSERVABLE = "cost_unobservable"
+    INTERRUPTED = "interrupted"
+    INFRASTRUCTURE_FAILED = "infrastructure_failed"
+
+
+class TriggerFailureStage(str, Enum):
+    MOUNT = "mount"
+    INVOCATION = "invocation"
+    DISCOVERY = "discovery"
+    RELEASE = "release"
+    CLEANUP = "cleanup"
+    REDACTION = "redaction"
+    WORKER = "worker"
+
+
+@dataclass(frozen=True)
+class IncompleteCellResult:
+    state: TriggerNotStartedReason | TriggerFailureStage
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.state, (TriggerNotStartedReason, TriggerFailureStage)):
+            raise TypeError("incomplete cell result requires a closed reason")
+
+
+@dataclass(frozen=True)
+class _UnmeasuredTriggerObservation:
+    agent: str
+    model: str | None
+    query: str
+    expectation: TriggerExpectation
+    identity: TriggerRepetitionIdentity
+    constraints: SkillTriggerConstraints | None
+    metadata: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        for name in ("agent", "query"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"trigger {name} must be nonempty")
+            validate_json_text(value, f"trigger {name}")
+        validated_trigger_model(self.model)
+        if not isinstance(self.expectation, TriggerExpectation):
+            raise TypeError("trigger expectation must be typed")
+        if not isinstance(self.identity, TriggerRepetitionIdentity):
+            raise TypeError("unmeasured trigger requires repetition identity")
+        if self.constraints is not None:
+            if not isinstance(self.constraints, SkillTriggerConstraints):
+                raise TypeError("trigger constraints must be typed")
+            if self.expectation.should_trigger != bool(self.constraints.expected):
+                raise ValueError("trigger expectation disagrees with constraints")
+        metadata = freeze_json_mapping(self.metadata, "unmeasured trigger metadata")
+        if set(metadata) & (_TRIGGER_RESERVED_METADATA | {
+                "execution_state", "incomplete_reason", "original_invocation"}):
+            raise ValueError("unmeasured trigger metadata collides with derived fields")
+        object.__setattr__(self, "metadata", metadata)
+
+    @property
+    def passed(self) -> None:
+        return None
+
+    def _row(self) -> dict[str, Any]:
+        return {"population": "trigger", "agent": self.agent, "model": self.model,
+                "query": self.query, "should_trigger": self.expectation.should_trigger,
+                **self.identity.as_dict(),
+                **(SkillAttribution.absent(self.constraints).as_dict() if self.constraints else {}),
+                "triggered": None, "pass": None, "observation_complete": False,
+                "measurement_status": "incomplete", "usage_normalized": {"source": "missing"},
+                "cost_normalized": {"source": "missing"},
+                "observation_metadata": dict(self.metadata), **dict(self.metadata)}
+
+
+@dataclass(frozen=True)
+class NotStartedTriggerObservation(_UnmeasuredTriggerObservation):
+    reason: TriggerNotStartedReason
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.reason, TriggerNotStartedReason):
+            raise TypeError("not-started trigger requires a closed reason")
+
+    @property
+    def result(self) -> IncompleteCellResult:
+        return IncompleteCellResult(self.reason)
+
+    def as_row(self) -> dict[str, Any]:
+        return {**self._row(), "execution_state": "not_started",
+                "incomplete_reason": self.reason.value}
+
+
+@dataclass(frozen=True)
+class FailedTriggerObservation(_UnmeasuredTriggerObservation):
+    stage: TriggerFailureStage
+    original_invocation: InvocationOutcome | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.stage, TriggerFailureStage):
+            raise TypeError("failed trigger requires a closed stage")
+        if self.original_invocation is not None:
+            if not isinstance(self.original_invocation, InvocationOutcome):
+                raise TypeError("original invocation must be typed")
+            if (self.original_invocation.stdout or self.original_invocation.stderr
+                    or self.original_invocation.provider_error or self.original_invocation.metadata):
+                raise ValueError("failure rows retain process facts without private wire text")
+
+    @property
+    def result(self) -> IncompleteCellResult:
+        return IncompleteCellResult(self.stage)
+
+    def as_row(self) -> dict[str, Any]:
+        return {**self._row(), "execution_state": "discovery_failed",
+                "incomplete_reason": self.stage.value,
+                "original_invocation": (self.original_invocation.as_legacy_dict()
+                                        if self.original_invocation is not None else None)}
+
+
+MatrixObservation: TypeAlias = TriggerObservation | NotStartedTriggerObservation | FailedTriggerObservation
+
+
+def matrix_observation_from_row(raw: Mapping[str, Any], *, default_agent: str | None = None) -> MatrixObservation:
+    if not isinstance(raw, Mapping):
+        raise TypeError("trigger row must be a mapping")
+    execution = raw.get("execution_state")
+    if execution is None:
+        return TriggerObservation.from_row(raw, default_agent=default_agent)
+    identity = TriggerRepetitionIdentity.from_row(raw)
+    metadata = raw.get("observation_metadata")
+    if identity is None or not isinstance(metadata, Mapping):
+        raise ValueError("unmeasured trigger requires identity and metadata")
+    should_trigger = raw.get("should_trigger")
+    if not isinstance(should_trigger, bool):
+        raise TypeError("trigger should_trigger must be boolean")
+    expectation = TriggerExpectation.from_bool(should_trigger)
+    common: dict[str, Any] = {
+        "agent": raw.get("agent", default_agent), "model": raw.get("model"),
+        "query": raw.get("query"), "expectation": expectation, "identity": identity,
+        "constraints": parse_skill_constraints(raw), "metadata": metadata}
+    observation: NotStartedTriggerObservation | FailedTriggerObservation
+    if execution == "not_started":
+        observation = NotStartedTriggerObservation(
+            **common, reason=TriggerNotStartedReason(raw.get("incomplete_reason")))
+    elif execution == "discovery_failed":
+        original = raw.get("original_invocation")
+        invocation = (InvocationOutcome.from_legacy_dict(common["agent"], original)
+                      if isinstance(original, Mapping) else None)
+        if original is not None and not isinstance(original, Mapping):
+            raise TypeError("original invocation must be an object or null")
+        observation = FailedTriggerObservation(
+            **common, stage=TriggerFailureStage(raw.get("incomplete_reason")),
+            original_invocation=invocation)
+    else:
+        raise ValueError("unknown trigger execution state")
+    if observation.as_row() != dict(raw):
+        raise ValueError("unmeasured trigger row contradicts its canonical fields")
+    return observation

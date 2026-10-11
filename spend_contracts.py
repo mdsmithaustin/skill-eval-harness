@@ -200,8 +200,13 @@ SpendCall = AnswerCall | SubagentTurnCall | JudgeCall | JettyCall | MatrixCall
 @dataclass(frozen=True)
 class SpendPlan:
     calls: tuple[SpendCall, ...]
+    scope: Literal["all_calls", "paid_matrix_calls"] = "all_calls"
 
     def __post_init__(self) -> None:
+        if self.scope not in {"all_calls", "paid_matrix_calls"}:
+            raise ValueError("unknown spend plan scope")
+        if self.scope == "paid_matrix_calls" and not all(isinstance(call, MatrixCall) for call in self.calls):
+            raise ValueError("paid matrix plan requires matrix calls")
         if not isinstance(self.calls, tuple) or not all(isinstance(call, (AnswerCall, SubagentTurnCall, JudgeCall, JettyCall, MatrixCall)) for call in self.calls):
             raise TypeError("spend plan requires a tuple of spend calls")
         if len({call.call_id for call in self.calls}) != len(self.calls):
@@ -229,7 +234,7 @@ class MatrixPopulation:
 
     @property
     def paid_plan(self) -> SpendPlan:
-        return SpendPlan(tuple(cell.call for cell in self.cells if not cell.offline))
+        return SpendPlan(tuple(cell.call for cell in self.cells if not cell.offline), "paid_matrix_calls")
 
 
 @dataclass(frozen=True)
@@ -348,6 +353,7 @@ class SpendLedger:
     invocation_id: str
     policy: SpendPolicy
     states: Mapping[str, CallState]
+    scope: Literal["all_calls", "paid_matrix_calls"] = "all_calls"
 
     def __post_init__(self) -> None:
         if not isinstance(self.invocation_id, str) or re.fullmatch(r"[0-9a-f]{32}", self.invocation_id) is None:
@@ -362,11 +368,12 @@ class SpendLedger:
                 raise TypeError("settled call requires a closed charge state")
             if isinstance(state, Refused) and not isinstance(state.reason, SpendStopReason):
                 raise TypeError("refused call requires a SpendStopReason")
+        SpendPlan(tuple(state.call for state in self.states.values()), self.scope)
         object.__setattr__(self, "states", MappingProxyType(dict(self.states)))
 
     @classmethod
     def planned(cls, invocation_id: str, policy: SpendPolicy, plan: SpendPlan) -> SpendLedger:
-        return cls(invocation_id, policy, {call.call_id: Planned(call) for call in plan.calls})
+        return cls(invocation_id, policy, {call.call_id: Planned(call) for call in plan.calls}, plan.scope)
 
     @property
     def spent(self) -> Money:
@@ -426,7 +433,7 @@ class SpendLedger:
         return {"schema_version": 1, "invocation_id": self.invocation_id,
                 **self.policy.as_dict(), "spent_usd": format(self.spent.amount, "f"),
                 "spent_availability": "partial" if self.partial else "complete",
-                "calls": calls}
+                "calls": calls, **({"scope": self.scope} if self.scope != "all_calls" else {})}
 
     @classmethod
     def from_dict(cls, raw: Any) -> SpendLedger:
@@ -491,7 +498,7 @@ class SpendLedger:
             else:
                 raise ValueError("unknown spend call state")
             states[call.call_id] = state
-        ledger = cls(raw.get("invocation_id"), policy, states)
+        ledger = cls(raw.get("invocation_id"), policy, states, raw.get("scope", "all_calls"))
         if ledger.as_dict() != raw:
             raise ValueError("spend ledger contradicts its canonical records")
         return ledger

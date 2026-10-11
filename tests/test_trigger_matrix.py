@@ -53,7 +53,7 @@ from trigger_contracts import (
     InvocationOutcome,
     InvocationState,
     TriggerEvidenceKind,
-    TriggerObservation,
+    matrix_observation_from_row,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -3317,7 +3317,7 @@ class CatalogAttributionTests(unittest.TestCase):
         self.assertIsNone(row["pass"])
         self.assertIsNone(row["triggered"])
         self.assertEqual(report["summary"]["measurement_status"], "incomplete")
-        self.assertEqual(TriggerObservation.from_row(row).constraints.expected, frozenset({self.REVIEW}))
+        self.assertEqual(matrix_observation_from_row(row).constraints.expected, frozenset({self.REVIEW}))
 
     def test_selected_duplicate_exposed_name_rejected_before_any_invocation(self):
         with tempfile.TemporaryDirectory() as td:
