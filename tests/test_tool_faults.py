@@ -101,6 +101,9 @@ class DirectCallableFaultTests(unittest.TestCase):
                     (None, "output_only_api"))
                 self.assertEqual(sb.read_metrics_base(base).get("errors"), None)
                 self.assertEqual(sb.read_metrics_base(base)["tool_calls"], 2)
+                sequence = observation.assess(faults.ToolClaim({"type": "tool_sequence", "expected": ["search", "search"]}))
+                self.assertEqual(sequence.value[2], 1.0)
+                self.assertIn("precision=1.0000; recall=1.0000; f1=1.0000", sequence.value[1])
                 replay = json.loads((base / "tool-replay.json").read_text())
                 self.assertEqual([record["output"] for record in replay["records"]], ["live"])
                 self.assertEqual([event["type"] for event in sb.read_events_base(base)[0]], ["error"])
@@ -124,6 +127,35 @@ class DirectCallableFaultTests(unittest.TestCase):
                 {"type": "tool_call", "tool": "other", "expected_no_call": True}, base, {})[0], None)
             self.assertEqual(sb.process_or_efficiency_assertion_result(
                 {"type": "tool_count_le", "max": 2}, base, {})[0], None)
+            sequence = sb.process_or_efficiency_assertion_result(
+                {"type": "tool_sequence", "mode": "superset", "expected": ["search"]}, base, {})
+            self.assertEqual(sequence[0], True)
+            self.assertEqual(len(sequence), 2)
+
+    def test_saved_closed_turn_survives_later_incomplete_journal_tail(self):
+        import skill_benchmark as sb
+        import tool_fault_contracts as faults
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, rows = self.prepare(root, turns=True, faults=[{"tool": "search", "output": "fixture"}])
+            def callback(*, tool_executor, history, **kwargs):
+                tool_executor("search", {})
+                if history:
+                    raise RuntimeError("later callback failed")
+                return {"answer": "alpha", "telemetry_scope": "turn_delta"}
+            runs = root / "runs"
+            sb.run_subagent_tasks(rows, runs, callback, replay_mode="strict")
+            base = runs / rows[0]["run_dir"]
+            turn = base / "turn-1"
+            self.assertEqual(sb.read_tool_observation_base(turn).coverage, "closed")
+            member = json.loads((turn / "events.json").read_text())["mediated_tools"]
+            with Path(member["journal_path"]).open("a") as handle:
+                handle.write('{"version":1,')
+            observation = sb.read_tool_observation_base(turn)
+            self.assertEqual(observation.coverage, "closed")
+            self.assertEqual(observation.assess(faults.Count("tool_calls")).value, 1)
+            self.assertEqual(observation.assess(faults.ExactOutput(1)).value, "fixture")
+            self.assertEqual(sb.read_tool_observation_base(base).coverage, "open")
 
     def test_direct_closed_empty_differs_from_missing_expected_member(self):
         import skill_benchmark as sb

@@ -6752,6 +6752,13 @@ def read_tool_observation_base(base: Path, raw_events: Any = None) -> tool_fault
     except (OSError, KeyError, TypeError, ValueError) as exc:
         reason = f"invalid_tool_observation: {exc}"
         if rows and isinstance(member, dict) and tool_fault_domain.strict_json_equal(member.get("identity"), expected):
+            if turn is not None:
+                try:
+                    saved_turn = tool_fault_domain.reconstruct_tool_observation(rows, member, expected)
+                    if saved_turn.coverage == "closed":
+                        return saved_turn
+                except (KeyError, TypeError, ValueError):
+                    pass
             prefix = tool_fault_domain.ToolObservation(expected, tuple(rows), turn, reason)
             canonical = prefix.canonical_rows()
             saved = member.get("canonical_rows")
@@ -11950,9 +11957,6 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
             die(f"recovery artifacts already exist: {pt.run_dir}")
         seen_destinations.add(base)
         validated.append((task, pt, row_model, base))
-    answer_design_from_tasks(tasks, default_model=model)
-    if any(pt.tool_faults for _, pt, _, _ in validated):
-        die(f"tool_faults are unsupported by the {backend.name} native backend")
     registration = BACKENDS.get(backend.name)
     cost_support = registration.capabilities.dollar_cost if registration is not None else "trace_normalized"
     if spend_policy is not None:
@@ -11964,6 +11968,8 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                 and spend_policy.assumed_cost_per_run is None):
             die(f"{backend.name} does not report dollar cost; --max-cost-usd requires --assumed-cost-per-run-usd")
     design = answer_design_from_tasks(tasks, default_model=model)
+    if any(pt.tool_faults for _, pt, _, _ in validated):
+        die(f"tool_faults are unsupported by the {backend.name} native backend")
     calls = tuple(AnswerCall(answer_design_identity(design, pt, row_model)["task_sha256"],
                              RunCoordinate.of(pt.case_id, pt.variant_truth, pt.run_number, row_model))
                   for _, pt, row_model, _ in validated)
@@ -15438,17 +15444,17 @@ def run_subagent_tasks(
         seen_destinations.add(base)
         turns = tuple(str(t) for t in task.get("turns") or [] if str(t))
         validated.append((task, pt, row_model, base, turns))
+    if spend_policy is not None:
+        for _, pt, _, _, _ in validated:
+            if pt.recovery is not None:
+                print(f"capped recovery is unsupported for case {pt.case_id}; omit --max-cost-usd", file=sys.stderr)
+                return 2
     design = answer_design_from_tasks(tasks, default_model=model)
     if fault_selection not in {"all", "only", "skip"}:
         raise ValueError("unknown fault selection")
     validated = [item for item in validated if fault_selection == "all" or bool(item[1].tool_faults) == (fault_selection == "only")]
     if not validated:
         return 0
-    if spend_policy is not None:
-        for _, pt, _, _, _ in validated:
-            if pt.recovery is not None:
-                print(f"capped recovery is unsupported for case {pt.case_id}; omit --max-cost-usd", file=sys.stderr)
-                return 2
     if mode == "off" and any(pt.tool_faults for _, pt, _, _, _ in validated):
         die("tool_faults require enabled tool replay on the direct callable route")
     call_sets = tuple(tuple(SubagentTurnCall(
@@ -15869,8 +15875,10 @@ def shell_agent_backend(agent_cmd: str, timeout: int = DEFAULT_RUNNER_TIMEOUT_S)
 def run_subagent(args: argparse.Namespace) -> int:
     tasks = load_prepared_tasks(Path(args.tasks))
     runs = Path(args.runs)
-    answer_design_from_tasks(tasks, default_model=getattr(args, "model", None))
-    selection = "only" if args.only_fault_cases else "skip" if args.skip_fault_cases else "all"
+    selection = "only" if getattr(args, "only_fault_cases", False) else "skip" if getattr(args, "skip_fault_cases", False) else "all"
+    if selection != "all" or any(any(field in task for field in (
+            "tool_faults", "tool_fault_task_sha256", "tool_fault_case_input_sha256")) for task in tasks):
+        answer_design_from_tasks(tasks, default_model=getattr(args, "model", None))
     selected = [task for task in tasks if selection == "all" or ("tool_faults" in task) == (selection == "only")]
     if any("tool_faults" in task for task in selected):
         die("tool_faults execution requires a direct Python callable; built-in CLI backends do not consume tool_executor")
@@ -19967,13 +19975,16 @@ def build_trajectory_diff(results: list[dict[str, Any]]) -> dict[str, Any]:
         bucket = by_case.setdefault(pair.key.case_id, {
             "pairs": 0, "deltas": {key: [] for key in delta_keys},
             "metric_blocked": {key: [] for key in delta_keys},
+            "mediated_tools_present": False,
             "operation_semantics_available": True,
             "skill_invoked": {"with_skill": [], "without_skill": []},
             "commands_seen": {"with_skill": [], "without_skill": []},
         })
         bucket["pairs"] += 1
+        left_observation, right_observation = with_profile["mediated_tools"], without_profile["mediated_tools"]
+        if left_observation is not None or right_observation is not None:
+            bucket["mediated_tools_present"] = True
         for key in delta_keys:
-            left_observation, right_observation = with_profile["mediated_tools"], without_profile["mediated_tools"]
             if left_observation is None and right_observation is None:
                 bucket["deltas"][key].append(with_profile["counts"][key] - without_profile["counts"][key])
                 continue
@@ -20011,9 +20022,10 @@ def build_trajectory_diff(results: list[dict[str, Any]]) -> dict[str, Any]:
             "case_id": case_id,
             "pairs": bucket["pairs"],
             "mean_deltas": {key: round(statistics.mean(values), 4) if values and not bucket["metric_blocked"][key] else None for key, values in bucket["deltas"].items()},
-            "metric_pairing": {key: {"expected_pairs": bucket["pairs"], "observed_pairs": len(bucket["deltas"][key]),
-                                     "availability": "complete" if not reasons else "unavailable", "reasons": reasons}
-                               for key, reasons in bucket["metric_blocked"].items()},
+            **({"metric_pairing": {key: {"expected_pairs": bucket["pairs"], "observed_pairs": len(bucket["deltas"][key]),
+                                        "availability": "complete" if not reasons else "unavailable", "reasons": reasons}
+                                  for key, reasons in bucket["metric_blocked"].items()}}
+               if bucket["mediated_tools_present"] else {}),
             "skill_invoked": {arm: round(statistics.mean(values), 4) if bucket["operation_semantics_available"] else None for arm, values in bucket["skill_invoked"].items()},
             "commands_only_with_skill": ordered_unique([c for c in with_commands if c not in without_set]) if bucket["operation_semantics_available"] else None,
             "commands_only_without_skill": ordered_unique([c for c in without_commands if c not in with_set]) if bucket["operation_semantics_available"] else None,

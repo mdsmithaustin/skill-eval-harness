@@ -504,6 +504,8 @@ the same synchronous callback path or a normal callback return. Concurrent or re
 use is unsupported. A caught wrapper failure cannot confirm the failed output. Earlier
 confirmed outputs remain usable when a later tail fails. A positive confirmed prefix can
 prove tool existence, required calls, a lower bound, or a witnessed ordered subsequence.
+An earlier saved closed turn keeps its closure when an incomplete append affects only a
+later journal tail. The root population still withholds closure for that tail.
 Absence, upper bounds, exact counts, exact multisets, strict whole sequences, and F1 scores
 require a closed population. Error selectors and operation-success claims remain unavailable
 on a nonempty callable population. Independent answer assertions retain their own evidence.

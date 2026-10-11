@@ -1,4 +1,3 @@
-"""Ordered tool challenges and assessed output-only callable observations."""
 from __future__ import annotations
 
 import hashlib
@@ -390,6 +389,7 @@ class ToolObservation:
                                 timeout=FAULT_MATCH_TIMEOUT_SECONDS) is not None
         text = [row["input"] if isinstance(row["input"], str) else canonical_input(row["input"]) for row in selected]
         score: float | None = None
+        sequence_detail: str | None = None
         positive_prefix = False
         if atype == "tool_count_le":
             passed = len(selected) <= int(assertion.get("max", 0))
@@ -400,6 +400,8 @@ class ToolObservation:
             precision = matches / len(names) if names else 0.0
             recall = matches / len(expected) if expected else 0.0
             score = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+            if closed:
+                sequence_detail = f"; precision={precision:.4f}; recall={recall:.4f}; f1={score:.4f}"
             mode = assertion.get("mode", "strict")
             passed = (names == expected if mode == "strict" else actual_counts == expected_counts if mode == "unordered"
                       else not actual_counts - expected_counts if mode == "subset" else not expected_counts - actual_counts)
@@ -433,6 +435,8 @@ class ToolObservation:
         if not closed and not positive_prefix:
             return Unavailable(reason)
         detail = f"mediated {atype}; outputs={names}; coverage={self.coverage}"
+        if sequence_detail is not None:
+            detail += sequence_detail
         return Observed((passed, detail, score))
 
 
