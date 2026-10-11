@@ -205,9 +205,12 @@ with the same harness implementation after upgrading.
   for those; `cfdoctor` had to disclaim generic Cloudflare status questions.
 - **Models disagree** → the weakest model you support sets the bound. A description
   Opus routes correctly on cadence alone may need Haiku's keywords spelled out.
-- **`incomplete_observations` > 0** → those runs crashed or timed out. The cell and
-  report are incomplete, so no quality rate is emitted — fix and rerun them before
-  interpreting the measurement.
+- **`incomplete_observations` > 0** → inspect `incomplete_reasons`.
+  `cost_ceiling` and `cost_unobservable` mark planned refusals before execution.
+  Distinguish these from execution or discovery failures. In all cases, the cell
+  and report remain incomplete and emit no quality rates. Obtain a complete cohort
+  before interpreting the measurement. See
+  [trigger matrices and Pi evaluations](limit-native-spend.md#trigger-matrices-and-pi-evaluations).
 
 Trigger cases are cheap to run compared to answer-quality cases, so repetition is
 affordable: one run per cell is a coin flip, and this repo's own ablation study saw
