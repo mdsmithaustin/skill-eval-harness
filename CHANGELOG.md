@@ -4,6 +4,13 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add ordered `tool_faults` declarations for direct callable output challenges. Preparation
+  commits present declarations across experimental coordinates. Output-only observations
+  preserve unavailable delivered errors, conservative prefix claims, replay-v1 compatibility,
+  and returned price evidence through later journal failure. Built-in CLI, native, and Jetty
+  routes refuse unsupported selected execution. `run-subagent` adds explicit fault-case filters.
+
+
 - Trigger matrix and Pi evaluation accept per-invocation dollar admission ceilings. One bounded
   controller settles ready cells before new admission, retains original paid evidence across
   discovery failures, and reports every planned repetition. Paid refusals exit 2 without

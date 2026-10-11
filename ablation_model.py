@@ -52,6 +52,7 @@ from manifest_contracts import (
     ablation_id_of,
     is_ablation_variant,
 )
+from tool_fault_contracts import FaultDefinition, fault_rows, parse_faults
 
 
 def _require(d: dict[str, Any], key: str, types: type | tuple[type, ...], ctx: str) -> Any:
@@ -691,6 +692,7 @@ class PreparedTask:
     answer_key: dict[str, Any] | None = None
     skill_root_keys: tuple[str, ...] = ()
     recovery: RecoveryCase | None = None
+    tool_faults: tuple[FaultDefinition, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "case_id", CaseId.parse(self.case_id))
@@ -760,6 +762,8 @@ class PreparedTask:
             # empty instruction would silently mount with_skill under an ablation
             # label instead of failing loudly at the boundary.
             raise ValueError("instruction-simulated ablation task requires a non-empty instruction")
+        if not isinstance(self.tool_faults, tuple) or not all(isinstance(fault, FaultDefinition) for fault in self.tool_faults):
+            raise ValueError("PreparedTask.tool_faults must be immutable declarations")
         if self.answer_key is not None and not isinstance(self.answer_key, dict):
             raise ValueError("answer_key must be an object or None")
 
@@ -823,6 +827,8 @@ class PreparedTask:
             row.update(self.answer_key)
         if self.recovery is not None:
             row["recovery"] = self.recovery.as_dict()
+        if self.tool_faults:
+            row["tool_faults"] = fault_rows(self.tool_faults)
         row["tags"] = list(self.tags)
         return row
 
@@ -856,6 +862,7 @@ class PreparedTask:
             prompt=row.get("prompt", ""),
             tags=collections["tags"],
             recovery=RecoveryCase.parse(row["recovery"]) if "recovery" in row else None,
+            tool_faults=parse_faults(row["tool_faults"]) if "tool_faults" in row else (),
             ablation=rec,
             skill_tree_hash=row.get("skill_tree_hash"),
             answer_key=answer_key,

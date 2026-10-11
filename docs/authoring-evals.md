@@ -466,3 +466,59 @@ re-run the normalization yourself) before assuming a key carries over to another
 The shortest version of this whole guide: write the prompt, run both arms, look at what the
 model actually did, and only then write the check that would have caught the difference.
 [`LESSONS_LEARNED.md`](../LESSONS_LEARNED.md) records the round where each pitfall above bit us.
+
+## Declare simulated tool outputs
+
+An answer case can contain a nonempty ordered `tool_faults` list. Each declaration requires
+`tool` and strict JSON `output`. Optional `match` is a nonempty regular expression over canonical
+input JSON. It uses the pinned `regex` engine with a 0.25 second search timeout. Optional
+`is_error` is a boolean, defaulting to false. Optional `times` is a positive integer.
+Omitting `times` gives an unlimited budget. Null optional fields, unknown keys, nonfinite
+outputs, boolean budgets, and malformed patterns fail validation. Trigger cases reject declarations.
+
+```json
+"tool_faults": [
+  {"tool": "search", "match": "alpha", "output": {"text": "denied"}, "is_error": true, "times": 1}
+]
+```
+
+The first eligible declaration replaces the output before replay-v1 FIFO lookup. One run keeps
+its budget across turns. Each arm and repetition starts fresh. Fault outputs do not enter
+ordinary replay recordings. Preparation carries the same immutable declarations into each
+case and task fingerprint. Cases without the field keep their existing rows and fingerprints.
+
+Execution uses the direct `run_subagent_tasks` Python seam with enabled `replay_mode`.
+The existing callback receives `tool_executor(tool, input)` and its arbitrary output.
+The shell and Claude CLI backends ignore that executor, so `run-subagent` refuses selected
+fault cases before output creation or launch. Native runners and Jetty export also refuse them.
+`--skip-fault-cases` selects ordinary cases and `--only-fault-cases` selects challenge cases.
+Both validate the complete prepared design before selection. Altering a committed declaration
+requires preparing the tasks again.
+
+A declaration's `is_error` describes the challenge. The output-only callback does not receive
+a separate error field. A dictionary output containing `is_error` remains an ordinary output
+value. Equal outputs with different declaration bits cannot establish a causal error treatment.
+
+A run-local journal confirms a prepared output only after the next normal executor entry on
+the same synchronous callback path or a normal callback return. Concurrent or reentrant tool
+use is unsupported. A caught wrapper failure cannot confirm the failed output. Earlier
+confirmed outputs remain usable when a later tail fails. A positive confirmed prefix can
+prove tool existence, required calls, a lower bound, or a witnessed ordered subsequence.
+Absence, upper bounds, exact counts, exact multisets, strict whole sequences, and F1 scores
+require a closed population. Error selectors and operation-success claims remain unavailable
+on a nonempty callable population. Independent answer assertions retain their own evidence.
+
+Store-owned fault and replay values have private immutable evidence snapshots. Replay keeps
+its returned object identity. A live mutable object also retains its identity, but creates an
+identified evidence gap because another alias can mutate it. No callback output is unwrapped.
+The mediated audit member in `events.json` stays outside the legacy `events` list. Saved readers
+reconstruct it against the prepared answer design and journal. Missing expected evidence is
+unavailable. Trajectory reports retain expected pairs per metric and withhold means when
+any pair lacks that metric.
+
+Journals live under `runs/.tool-observations/` outside disposable workspace and publication
+staging. Successful file and directory fsync calls establish the recorded prefix on the tested
+local filesystem. Failed writes leave uncertain evidence. SIGKILL, stalled filesystems, and
+same-user edits are outside that guarantee. This contract does not claim immediate physical
+return evidence or model consumption. A normally returned safe `usage.cost_usd` remains
+eligible for the existing admission settlement even when subsequent journal confirmation fails.
