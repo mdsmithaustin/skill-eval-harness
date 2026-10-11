@@ -155,7 +155,46 @@ class JettyCall:
                                          separators=(",", ":")).encode()).hexdigest()
 
 
-SpendCall = AnswerCall | SubagentTurnCall | JudgeCall | JettyCall
+@dataclass(frozen=True)
+class MatrixCall:
+    agent: str
+    requested_model: str | None
+    query_id: str
+    query_input_sha256: str
+    repeat: int
+    treatment_sha256: str
+    protocol_sha256: str
+
+    def __post_init__(self) -> None:
+        for name in ("agent", "query_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"matrix {name} must be nonempty")
+            validate_json_text(value, f"matrix {name}")
+        if self.requested_model is not None:
+            if not isinstance(self.requested_model, str) or not self.requested_model.strip():
+                raise ValueError("matrix requested model must be nonempty or None")
+            validate_json_text(self.requested_model, "matrix requested model")
+        for name in ("query_input_sha256", "treatment_sha256", "protocol_sha256"):
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", getattr(self, name)) is None:
+                raise ValueError(f"matrix {name} requires SHA-256")
+        if type(self.repeat) is not int or self.repeat < 1:
+            raise ValueError("matrix repeat must be positive")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"kind": "matrix", "agent": self.agent,
+                "requested_model": self.requested_model, "query_id": self.query_id,
+                "query_input_sha256": self.query_input_sha256, "repeat": self.repeat,
+                "treatment_sha256": self.treatment_sha256,
+                "protocol_sha256": self.protocol_sha256}
+
+    @property
+    def call_id(self) -> str:
+        return hashlib.sha256(json.dumps(self.as_dict(), sort_keys=True,
+                                         separators=(",", ":")).encode()).hexdigest()
+
+
+SpendCall = AnswerCall | SubagentTurnCall | JudgeCall | JettyCall | MatrixCall
 
 
 @dataclass(frozen=True)
@@ -163,10 +202,34 @@ class SpendPlan:
     calls: tuple[SpendCall, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.calls, tuple) or not all(isinstance(call, (AnswerCall, SubagentTurnCall, JudgeCall, JettyCall)) for call in self.calls):
+        if not isinstance(self.calls, tuple) or not all(isinstance(call, (AnswerCall, SubagentTurnCall, JudgeCall, JettyCall, MatrixCall)) for call in self.calls):
             raise TypeError("spend plan requires a tuple of spend calls")
         if len({call.call_id for call in self.calls}) != len(self.calls):
             raise ValueError("spend plan contains duplicate call identities")
+
+
+@dataclass(frozen=True)
+class MatrixScheduleCell:
+    call: MatrixCall
+    offline: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.call, MatrixCall) or type(self.offline) is not bool:
+            raise TypeError("matrix schedule requires a call and offline authority")
+
+
+@dataclass(frozen=True)
+class MatrixPopulation:
+    cells: tuple[MatrixScheduleCell, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.cells, tuple) or not all(isinstance(cell, MatrixScheduleCell) for cell in self.cells):
+            raise TypeError("matrix population requires immutable cells")
+        SpendPlan(tuple(cell.call for cell in self.cells))
+
+    @property
+    def paid_plan(self) -> SpendPlan:
+        return SpendPlan(tuple(cell.call for cell in self.cells if not cell.offline))
 
 
 @dataclass(frozen=True)
@@ -326,6 +389,13 @@ class SpendLedger:
     def refusal(self) -> SpendStopReason | None:
         if self.partial:
             return SpendStopReason.COST_UNOBSERVABLE
+        return self.settled_refusal
+
+    @property
+    def settled_refusal(self) -> SpendStopReason | None:
+        if any(isinstance(state, Settled) and isinstance(state.charge, UnpricedCall)
+               for state in self.states.values()):
+            return SpendStopReason.COST_UNOBSERVABLE
         if self.spent.amount >= self.policy.ceiling.amount:
             return SpendStopReason.COST_CEILING
         return None
@@ -381,6 +451,11 @@ class SpendLedger:
                 call = JudgeCall(call_raw.get("judge_task_id"), call_raw.get("judge_input_sha256"),
                                  call_raw.get("backend"), call_raw.get("requested_model"),
                                  call_raw.get("repeat"))
+            elif call_raw.get("kind") == "matrix":
+                call = MatrixCall(call_raw.get("agent"), call_raw.get("requested_model"),
+                                  call_raw.get("query_id"), call_raw.get("query_input_sha256"),
+                                  call_raw.get("repeat"), call_raw.get("treatment_sha256"),
+                                  call_raw.get("protocol_sha256"))
             elif call_raw.get("kind") == "jetty":
                 call = JettyCall(call_raw.get("task_contract_sha256"), call_raw.get("journal_attempt_id"))
             else:

@@ -4,14 +4,18 @@ import json
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from spend_contracts import (
     SPEND_LEDGER_NAME,
     InFlight,
+    MatrixCall,
+    MatrixPopulation,
     NoModelSpend,
     Refused,
     Settled,
@@ -50,6 +54,31 @@ class Started(Generic[T]):
 class NotStarted:
     call: SpendCall
     reason: SpendStopReason
+
+
+@dataclass(frozen=True)
+class WorkerRaised:
+    call: MatrixCall
+    error: BaseException
+
+
+class MatrixStopReason(str, Enum):
+    INTERRUPTED = "interrupted"
+    INFRASTRUCTURE_FAILED = "infrastructure_failed"
+
+
+@dataclass(frozen=True)
+class MatrixNotStarted:
+    call: MatrixCall
+    reason: MatrixStopReason
+
+
+class BoundedRunError(BaseException, Generic[T]):
+    def __init__(self, cause: BaseException,
+                 executions: tuple[Started[T] | NotStarted | MatrixNotStarted | WorkerRaised, ...]) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.executions = executions
 
 
 class SpendAdmission:
@@ -114,6 +143,107 @@ class SpendAdmission:
         self.ledger = self.ledger.transition(Settled(call, charge))
         self._persist()
         return Started(call, priced.value)
+
+
+    def bounded_map(self, population: MatrixPopulation,
+                    invoke: Callable[[MatrixCall], Priced[T]], *, workers: int,
+                    publish: Callable[[T], T] | None = None,
+                    stopped: Callable[[], bool] = lambda: False,
+                    ) -> tuple[Started[T] | NotStarted | MatrixNotStarted | WorkerRaised, ...]:
+        if type(workers) is not int or workers < 1:
+            raise ValueError("workers must be positive")
+        if self.ledger is not None and tuple(self.ledger.states) != tuple(
+                call.call_id for call in population.paid_plan.calls):
+            raise ValueError("matrix ledger must match the derived paid plan")
+        results: dict[int, Started[T] | NotStarted | MatrixNotStarted | WorkerRaised] = {}
+        active: dict[int, Future[Priced[T]]] = {}
+        cursor = 0
+        fatal: BaseException | None = None
+        executor = ThreadPoolExecutor(max_workers=workers)
+
+        def settle_ready(*, drain: bool = False) -> None:
+            nonlocal fatal
+            while True:
+                ready = [index for index, future in active.items() if drain or future.done()]
+                if not ready:
+                    return
+                retained: list[tuple[int, T]] = []
+                for index in sorted(ready):
+                    cell = population.cells[index]
+                    future = active.pop(index)
+                    try:
+                        priced = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        results[index] = WorkerRaised(cell.call, exc)
+                        priced = Priced(None, Measurement.unavailable("invocation_raised"))
+                    except BaseException as exc:  # noqa: BLE001
+                        fatal = fatal or exc
+                        results[index] = WorkerRaised(cell.call, exc)
+                        continue
+                    else:
+                        results[index] = Started(cell.call, priced.value)
+                        retained.append((index, priced.value))
+                    if self.ledger is not None and not cell.offline:
+                        charge = price_measurement(self.ledger.policy, priced.cost,
+                                                   observed_subtotal=priced.observed_subtotal,
+                                                   no_model_spend=priced.no_model_spend)
+                        self.ledger = self.ledger.transition(Settled(cell.call, charge))
+                if fatal is None:
+                    self._persist()
+                    if publish is not None:
+                        for index, value in retained:
+                            results[index] = Started(population.cells[index].call, publish(value))
+                if drain:
+                    return
+
+        try:
+            while cursor < len(population.cells) or active:
+                if stopped():
+                    raise KeyboardInterrupt
+                settle_ready()
+                if fatal is not None:
+                    raise fatal
+                while cursor < len(population.cells) and len(active) < workers:
+                    settle_ready()
+                    if stopped():
+                        raise KeyboardInterrupt
+                    if fatal is not None:
+                        raise fatal
+                    cell = population.cells[cursor]
+                    refusal = (self.ledger.settled_refusal
+                               if self.ledger is not None and not cell.offline else None)
+                    if refusal is not None and self.ledger is not None:
+                        self.ledger = self.ledger.transition(Refused(cell.call, refusal))
+                        self._persist()
+                        results[cursor] = NotStarted(cell.call, refusal)
+                        cursor += 1
+                        continue
+                    if self.ledger is not None and not cell.offline:
+                        if any(isinstance(state, InFlight) and state.call.call_id not in {
+                                population.cells[index].call.call_id for index in active}
+                               for state in self.ledger.states.values()):
+                            raise RuntimeError("admitted matrix call has no active handle")
+                        self.ledger = self.ledger.transition(InFlight(cell.call))
+                        self._persist()
+                    active[cursor] = executor.submit(invoke, cell.call)
+                    cursor += 1
+                if active:
+                    wait(tuple(active.values()), timeout=0.05, return_when=FIRST_COMPLETED)
+        except BaseException as exc:  # noqa: BLE001
+            fatal = fatal or exc
+            try:
+                settle_ready(drain=True)
+            except BaseException as drain_error:  # noqa: BLE001
+                fatal.__context__ = drain_error
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+        if fatal is not None:
+            reason = (MatrixStopReason.INTERRUPTED if isinstance(fatal, KeyboardInterrupt)
+                      else MatrixStopReason.INFRASTRUCTURE_FAILED)
+            for index, cell in enumerate(population.cells):
+                results.setdefault(index, MatrixNotStarted(cell.call, reason))
+            raise BoundedRunError(fatal, tuple(results[index] for index in range(len(population.cells))))
+        return tuple(results[index] for index in range(len(population.cells)))
 
 
 def spend_invocations(root: Path) -> list[dict[str, Any]]:
