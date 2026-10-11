@@ -7229,7 +7229,7 @@ def _invoke_tool_dialogue(plan: ProcessInvocationPlan, session: _BridgeSession) 
 
 
 def _bridge_supported() -> bool:
-    return os.name == "posix" and Path("/proc/self/stat").is_file() and all(callable(getattr(os, name, None)) for name in
+    return sys.platform == "linux" and Path("/proc/self/stat").is_file() and all(callable(getattr(os, name, None)) for name in
         ("waitid", "killpg", "set_blocking")) and all(isinstance(getattr(os, name, None), int)
         for name in ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT"))
 
@@ -7721,8 +7721,9 @@ def _invoke_process(plan: ProcessInvocationPlan, dialogue: _BridgeSession | None
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-            for pipe in (stdin, stdout_pipe, stderr_pipe):
-                os.set_blocking(pipe.fileno(), False)
+            if sys.platform == "linux":
+                for pipe in (stdin, stdout_pipe, stderr_pipe):
+                    os.set_blocking(pipe.fileno(), False)
             selector.register(stdin, selectors.EVENT_WRITE, "stdin")
             selector.register(stdout_pipe, selectors.EVENT_READ, "stdout")
             selector.register(stderr_pipe, selectors.EVENT_READ, "stderr")
