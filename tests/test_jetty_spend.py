@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from helpers import FakeJettyClient, attest_jetty_payload, jetty_payload, jetty_task_upload, run_cli
+from helpers import (
+    FakeJettyClient,
+    attest_jetty_payload,
+    jetty_payload,
+    jetty_task_upload,
+    run_cli,
+)
 
 import skill_benchmark as sb
 

@@ -4870,6 +4870,12 @@ class JettyAttemptJournal:
                     native_ids.add(ref)
                 elif ref != {"kind": "legacy_current", "task_contract_sha256": digest, "scope": "schema1-current"} or prior is not None:
                     raise ValueError("invalid scoped legacy Jetty attempt reference")
+                if isinstance(ref, str):
+                    predecessor_state = upload["state"] if prior is None else prior["receipts"][-1]["state"]
+                    if predecessor_state not in {"upload_completed", "submitting", "submission_unknown"}:
+                        raise ValueError("Jetty submission has no reusable upload receipt")
+                    if prior is not None and predecessor_state in {"submitting", "submission_unknown"} and attempt.get("replaces_unknown") != prior["ref"]:
+                        raise ValueError("Jetty unknown submission requires an explicit replacement")
                 if "replaces_unknown" in attempt and (prior is None or attempt["replaces_unknown"] != prior["ref"] or prior["receipts"][-1]["state"] not in {"submitting", "submission_unknown"}):
                     raise ValueError("Jetty replacement does not name its unknown predecessor")
                 receipts = attempt.get("receipts")
@@ -5195,19 +5201,32 @@ def prepare_jetty_execution(payloads: list[dict[str, Any]], journal: JettyAttemp
         model = request.get("model")
         if model is not None and (not isinstance(model, str) or not model.strip()):
             raise ValueError("Jetty payload model must be nonblank or null")
+        case_id = harness.get("case_id")
+        variant = harness.get("variant")
+        run_number = harness.get("run_number")
+        if not isinstance(case_id, str) or not case_id:
+            raise ValueError("Jetty payload case_id must be a non-empty string")
+        if (not isinstance(variant, str)
+                or variant not in {"with_skill", "without_skill", "old_skill"}
+                and not is_ablation_variant(variant)):
+            raise ValueError("Jetty payload variant is not an execution arm")
+        if type(run_number) is not int or run_number < 1:
+            raise ValueError("Jetty payload run_number must be a positive integer")
         digest = harness.get("jetty_task_contract_sha256")
         if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
             raise RuntimeError("Jetty payload has no valid task contract digest")
         if digest in digests:
             raise ValueError(f"duplicate Jetty payload task contract digest: {digest}")
         digests.add(digest)
-        output_identity = (harness.get("case_id"), model, harness.get("variant"), harness.get("run_number"))
+        output_identity = (case_id, model, variant, run_number)
         if output_identity in output_identities:
             raise ValueError("duplicate Jetty selected output identity")
         output_identities.add(output_identity)
         destination = harness.get("run_dir")
         if not isinstance(destination, str) or not destination.strip():
             raise ValueError("Jetty payload requires a nonblank run_dir")
+        if re.search(r"[\x00-\x1f\x7f]", destination):
+            raise ValueError("Jetty payload run_dir must not contain control characters")
         relative = PurePosixPath(destination)
         normalized_destination = relative.as_posix()
         if relative.is_absolute() or ".." in relative.parts or normalized_destination in destinations:
