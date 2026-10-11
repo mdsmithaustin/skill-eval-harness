@@ -4,6 +4,12 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Extract shared trigger inputs, process lifetime, trace interpretation, and provider CLI
+  preparation into canonical owners. Matrix and Pi avoid loading answer and report orchestration.
+  Trigger identity schema4 derives the packaged source closure. Regenerate both report arms from
+  schema3 or earlier. Active source changes preserve settled spend and partial observations while
+  refusing normal comparable publication. See [trigger identity](docs/upgrading.md#trigger-harness-identity).
+
 - Add optional `--review-diagnostics` on benchmark, saved report, and error analysis.
   Complete never-passing cohorts, ASCII asterisk literal hypotheses, and accepted
   objective-versus-qualitative disagreement nominate author review. Saved validation

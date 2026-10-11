@@ -2859,7 +2859,7 @@ class PiProtocolRequirementTests(unittest.TestCase):
         payload = {key: value for key, value in identity.items() if key != "identity_sha256"}
         payload["schema_version"] = sb.TRIGGER_HARNESS_IDENTITY_VERSION - 1
         older = {**payload, "identity_sha256": sb.canonical_json_sha256(payload)}
-        with self.assertRaisesRegex(ValueError, "identity v2; this harness reads v3. Regenerate"):
+        with self.assertRaisesRegex(ValueError, "identity v3; this harness reads v4. Regenerate"):
             sb.validate_trigger_harness_identity(older, "baseline")
 
 

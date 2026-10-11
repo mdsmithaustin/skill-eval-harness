@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import skill_benchmark as sb
+import trace_normalization as tn
 
 ACTIVITY_RECORDS = {
     "command": {"type": "command", "command": "pytest -q"},
@@ -83,7 +84,7 @@ class TraceConservationTests(unittest.TestCase):
     def test_an_accounting_hole_is_detected_for_each_activity_kind(self):
         for kind in ACTIVITY_RECORDS:
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as td:
-                with mock.patch.object(sb, "TRAJECTORY_STEP_TYPES", sb.TRAJECTORY_STEP_TYPES - {kind}), \
+                with mock.patch.object(tn, "TRAJECTORY_STEP_TYPES", sb.TRAJECTORY_STEP_TYPES - {kind}), \
                      self.assertRaisesRegex(AssertionError, "0 != 1"):
                     assert_accounted(self, Path(td) / "broken", kind)
                 assert_accounted(self, Path(td) / "restored", kind)

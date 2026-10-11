@@ -24,7 +24,8 @@ MODULES = {
     "run_trigger_matrix.py": ROOT / "run_trigger_matrix.py",
     "run_pi_smoke.py": ROOT / "examples" / "adewale-workspace" / "run_pi_smoke.py",
 }
-MODULE_SEARCH_ORDER = ["skill_benchmark.py", "ablation_model.py", "run_pi_trigger_eval.py", "run_trigger_matrix.py", "run_pi_smoke.py"]
+MODULES.update({name: ROOT / name for name in ("skill_inputs.py", "process_runtime.py", "trace_normalization.py", "agent_clis.py", "trigger_identity.py", "json_contracts.py", "content_digests.py", "cli_contracts.py")})
+MODULE_SEARCH_ORDER = ["skill_benchmark.py", "ablation_model.py", "run_pi_trigger_eval.py", "run_trigger_matrix.py", "run_pi_smoke.py", "skill_inputs.py", "process_runtime.py", "trace_normalization.py", "agent_clis.py", "trigger_identity.py", "json_contracts.py", "content_digests.py", "cli_contracts.py"]
 
 # Scan every prose surface that cites code, not only docs/ — the 2026-07
 # consolidation audit found README/CHANGELOG-class drift precisely because they

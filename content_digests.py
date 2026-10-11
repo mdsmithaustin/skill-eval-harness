@@ -17,8 +17,10 @@ directory entries as well and is persisted in its own format.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 _CHUNK = 1024 * 1024
 
@@ -71,3 +73,13 @@ def directory_tree_sha256(root: Path, *, reject_symlinks: bool = False) -> str:
         if candidate.is_file():
             entries.append((candidate.relative_to(root).as_posix(), candidate))
     return tree_sha256(entries)
+
+
+
+def canonical_json_sha256(value: Any) -> str:
+    """Stable JSON identity used by persisted experiment contracts."""
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()

@@ -133,18 +133,31 @@ to make old artifacts pass the new constructors.
 
 ### Trigger harness identity
 
-Trigger `harness_identity` names a conservative audited module-level inventory instead of every
-packaged module. Standalone report, judge, CLI, and unsupported-provider modules are excluded, but
-`skill_benchmark.py` remains a monolith shared by trigger and non-trigger orchestration. Any edit to
-that file still invalidates trigger identity until those owners are extracted into separate modules.
-The interim inventory also includes `spend_contracts.py` and `spend_runtime.py`, which the monolith imports for native answer admission. Their edits invalidate trigger identity while that import dependency remains.
+Trigger `harness_identity` schema4 derives a package-bounded source inventory from Matrix,
+Pi, and their canonical registry references. It includes ordinary, conditional, function-local,
+relative, and literal dynamic imports, including eager trace callbacks. Mixed shared contracts
+remain included. Standalone answer, grading, judge, and report owners are excluded after the
+extraction. Editing those separated files leaves trigger identity unchanged.
 
-- Version 2 replaced the overbroad version-1 set. Version-1 trigger reports must be regenerated
-  before a new causal comparison; this deliberate incompatibility refuses to guess equivalence.
-- Version 3 adds `completion_contracts.py`, `observation_contracts.py` and `content_digests.py`,
-  which now decide how a trigger run ends and how its skill tree is hashed. `trigger-compare`
-  refuses a version-2 report with a message naming both versions; regenerate the baseline and
-  the ablation report together, since a comparison needs both arms from the same harness.
+Regenerate both baseline and ablation reports when upgrading from schema3 or earlier. Leave
+historical reports unchanged. `trigger-compare` names the unsupported version and requests
+regeneration. Two matching saved schema4 identities remain comparable after an installed
+same-inventory source edit. Validation checks their recorded inventory and digests without
+replacing those digests with current bytes.
+
+An active run checks its packaged source bytes again before publishing a normal report. A source
+change raises an error and saves `incomplete_trigger_measurement`, settled spend, and partial
+observations. That report cannot enter `trigger-compare`. Missing required source bytes, an
+undeclared local dependency, or an unsupported computed dependency refuse before invocation.
+The inventory records reproducibility, not authenticity or environment dependencies.
+
+Shared Python imports now have defining owners. Import input materialization from `skill_inputs`,
+process lifetime and signals from `process_runtime`, trace parsing from `trace_normalization`,
+and provider CLI preparation from `agent_clis`. Existing `skill_benchmark` object and type imports
+remain direct canonical re-exports. Patch the module that performs the lookup, such as
+`process_runtime.recovery_file_bytes` or `trace_normalization.TRAJECTORY_STEP_TYPES`.
+Matrix still looks up its own `write_trace_artifacts` replacement. The answer-owned
+`run_argv_capture` continues to call the shared supervisor.
 
 ### Run metadata and scoring
 
@@ -385,7 +398,7 @@ the harness modules needs the replacement:
 | `skill_benchmark.judge_cost_usd` | `judge_cost_block` |
 | `skill_benchmark.CLAUDE_USAGE_KEYS` | `telemetry.USAGE_ALIASES` |
 | `skill_benchmark.claude_run_metrics` | the `usage` and `cost_usd` fields `claude_cli_invoke` returns |
-| `skill_benchmark.TRIGGER_SEMANTIC_MODULES`, `HARNESS_SEMANTIC_MODULES` | `TRIGGER_IDENTITY_MODULES` |
+| `skill_benchmark.TRIGGER_SEMANTIC_MODULES`, `HARNESS_SEMANTIC_MODULES` | `trigger_identity.trigger_harness_identity()["modules"]` |
 | `skill_benchmark.GEMINI_AUTH_FILES` | `GEMINI_AUTH_FILES_BY_TYPE` |
 | `skill_benchmark.load_trace_jsonl` | `parse_trace_jsonl_text` |
 | `skill_benchmark.persist_answer_design_value` | `persist_answer_design` |

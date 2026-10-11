@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from numbers import Real
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NoReturn
 
 from json_contracts import freeze_json_mapping, thaw_json_value
 from manifest_contracts import ExecutionVariant, ModelId, Split
+from spend_contracts import SpendPolicy
 
 
 class CLICommand(str, Enum):
@@ -240,3 +242,22 @@ class ValidatedLegacyCLIInvocation:
 
 # Compatibility import name for the first CLI migration layer.
 CLIInvocation = ValidatedLegacyCLIInvocation
+
+
+
+def die(msg: str) -> NoReturn:
+    print(f"FAIL: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def native_spend_policy(args: argparse.Namespace) -> SpendPolicy | None:
+    ceiling = getattr(args, "max_cost_usd", None)
+    assumption = getattr(args, "assumed_cost_per_run_usd", None)
+    if ceiling is None:
+        if assumption is not None:
+            die("--assumed-cost-per-run-usd requires --max-cost-usd")
+        return None
+    try:
+        return SpendPolicy.from_raw(ceiling, assumption)
+    except (TypeError, ValueError) as exc:
+        die(f"invalid spend policy: {exc}")

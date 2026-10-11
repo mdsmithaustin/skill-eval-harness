@@ -11,6 +11,7 @@ from unittest import mock
 
 from helpers import run_cli, write_with_skill_task
 
+import process_runtime as pr
 import skill_benchmark as sb
 from invocation_contracts import RecoveryCase
 
@@ -402,7 +403,7 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
                 raise OSError("observer broke")
             return original(workspace, relative)
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
-                sb, "recovery_file_bytes", side_effect=failing_observer):
+                pr, "recovery_file_bytes", side_effect=failing_observer):
             result, base = self.run_case(Path(temporary))
             self.assertEqual(result[0], 1, result[2])
             process = json.loads((base / "recovery/initial/process.json").read_text())
@@ -442,7 +443,7 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
         def deadline_clock():
             return clock() + (100 if expired else 0)
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
-                sb, "recovery_file_bytes", side_effect=checkpoint_at_deadline), mock.patch.object(
+                pr, "recovery_file_bytes", side_effect=checkpoint_at_deadline), mock.patch.object(
                 sb.time, "monotonic", side_effect=deadline_clock):
             result, base = self.run_case(Path(temporary))
             self.assertEqual(result[0], 1, result[2])
@@ -495,7 +496,7 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
                         if path.name == artifact:
                             raise OSError("raw storage failed")
                         return write_bytes(path, content)
-                    with mock.patch.object(sb, "write_json", side_effect=fail_process), \
+                    with mock.patch.object(pr, "write_json", side_effect=fail_process), \
                             mock.patch.object(Path, "write_bytes", autospec=True, side_effect=fail_raw), \
                             mock.patch.object(sb, "invoke_argv_with_timeout", side_effect=observe_outcome):
                         result, base = self.run_case(Path(temporary), mode=mode, timeout=1)
@@ -600,7 +601,7 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
 
     def test_unconfirmed_group_cleanup_blocks_recovery(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
-                sb, "recovery_group_stopped", return_value=(False, "observation_unavailable")):
+                pr, "recovery_group_stopped", return_value=(False, "observation_unavailable")):
             result, base = self.run_case(Path(temporary))
             self.assertEqual(result[0], 1, result[2])
             process = json.loads((base / "recovery/initial/process.json").read_text())
@@ -701,7 +702,7 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
             return communicate(process, *arguments, **keywords)
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
                 sb.subprocess.Popen, "communicate", autospec=True, side_effect=fail_read), \
-                mock.patch.object(sb, "recovery_file_bytes", side_effect=observe_ready):
+                mock.patch.object(pr, "recovery_file_bytes", side_effect=observe_ready):
             result, base = self.run_case(Path(temporary))
             self.assertEqual(result[0], 1, result[2])
             self.assertTrue(injected)
@@ -758,7 +759,7 @@ print(json.dumps({{"role": "assistant", "content": "answer " + phase,
                 raise KeyboardInterrupt("cancelled recovery")
             return read(workspace, relative)
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
-                sb, "recovery_file_bytes", side_effect=cancel_observer):
+                pr, "recovery_file_bytes", side_effect=cancel_observer):
             root = Path(temporary)
             with self.assertRaisesRegex(KeyboardInterrupt, "cancelled recovery"):
                 self.run_case(root)

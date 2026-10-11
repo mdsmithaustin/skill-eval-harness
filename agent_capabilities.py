@@ -610,7 +610,7 @@ BACKENDS: Mapping[str, BackendRegistration] = backend_registry(
             notes="run-claude drives stream-json so answer runs keep the full tool-use stream as trace evidence and capture the Claude CLI cost envelope; trigger matrix detects Skill tool-use plus path evidence.",
         ),
         answer_route="native",
-        trace=ObjectRef("skill_benchmark", "CLAUDE_TRACE_DIALECT"),
+        trace=ObjectRef("trace_normalization", "CLAUDE_TRACE_DIALECT"),
         answer_entrypoints=(_RUN_AGENT, _RUN_CLAUDE),
         answer=_CLAUDE_ANSWER,
         trigger=_CLAUDE_TRIGGER,
@@ -631,7 +631,7 @@ BACKENDS: Mapping[str, BackendRegistration] = backend_registry(
             notes="Codex answer/trigger support uses codex exec JSONL; native judging uses codex exec --output-last-message/--output-schema. Dollar cost remains explicit missing unless the stream reports cost or a wrapper estimates it.",
         ),
         answer_route="native",
-        trace=ObjectRef("skill_benchmark", "CODEX_TRACE_DIALECT"),
+        trace=ObjectRef("trace_normalization", "CODEX_TRACE_DIALECT"),
         answer_entrypoints=(_RUN_AGENT, _RUN_CODEX),
         answer=_CODEX_ANSWER,
         trigger=_CODEX_TRIGGER,
@@ -659,7 +659,7 @@ BACKENDS: Mapping[str, BackendRegistration] = backend_registry(
             ),
         ),
         answer_route="native",
-        trace=ObjectRef("skill_benchmark", "GEMINI_TRACE_DIALECT"),
+        trace=ObjectRef("trace_normalization", "GEMINI_TRACE_DIALECT"),
         answer_entrypoints=(_RUN_AGENT,),
         answer=_GEMINI_ANSWER,
         judge=_GEMINI_JUDGE,
@@ -680,7 +680,7 @@ BACKENDS: Mapping[str, BackendRegistration] = backend_registry(
             notes="Pi trigger support is shared by skill-pi-trigger-eval and skill-trigger-matrix; cost is parsed when the JSON stream reports it.",
         ),
         answer_route="none",
-        trace=ObjectRef("skill_benchmark", "PI_TRACE_DIALECT"),
+        trace=ObjectRef("trace_normalization", "PI_TRACE_DIALECT"),
         trigger=SurfaceBinding(ObjectRef("run_trigger_matrix", "PiAdapter")),
         smoke=SmokeTarget("pi", "SMOKE_PI_MODEL", "openai-codex/gpt-5.4-mini", "trigger"),
     ),
@@ -696,7 +696,7 @@ BACKENDS: Mapping[str, BackendRegistration] = backend_registry(
             notes="Jetty supports answer-path export/run/import; autonomous trigger and judge export/import remain separate Jetty TODOs.",
         ),
         answer_route="export_import",
-        trace=ObjectRef("skill_benchmark", "JETTY_TRACE_DIALECT"),
+        trace=ObjectRef("trace_normalization", "JETTY_TRACE_DIALECT"),
         answer_entrypoints=(_EXPORT_JETTY, _RUN_JETTY, _IMPORT_JETTY),
         workspace_builder=ObjectRef("skill_benchmark", "jetty_upload_workspace"),
         smoke=DedicatedSmokeTarget(
@@ -716,7 +716,7 @@ BACKENDS: Mapping[str, BackendRegistration] = backend_registry(
             notes="Mistral Vibe support uses isolated VIBE_HOME, programmatic JSON/streaming output, Agent Skills discovery from .agents/skills, and VIBE_ACTIVE_MODEL for model selection. Current Vibe JSON/streaming output does not export usage/cost telemetry, so both are explicit missing unless a future CLI adds fields.",
         ),
         answer_route="native",
-        trace=ObjectRef("skill_benchmark", "VIBE_TRACE_DIALECT"),
+        trace=ObjectRef("trace_normalization", "VIBE_TRACE_DIALECT"),
         answer_entrypoints=(_RUN_AGENT,),
         answer=_VIBE_ANSWER,
         trigger=_VIBE_TRIGGER,
@@ -736,7 +736,7 @@ BACKENDS: Mapping[str, BackendRegistration] = backend_registry(
             notes="Generic in-process/shell seam for answer runs and tool replay; not an autonomous discovery adapter.",
         ),
         answer_route="subagent",
-        trace=ObjectRef("skill_benchmark", "GENERIC_TRACE_DIALECT"),
+        trace=ObjectRef("trace_normalization", "GENERIC_TRACE_DIALECT"),
         answer_entrypoints=(_RUN_SUBAGENT,),
         workspace_builder=ObjectRef("skill_benchmark", "build_skill_workspace"),
         failure_marker="[CLAUDE FAILURE",
@@ -753,10 +753,22 @@ BACKENDS: Mapping[str, BackendRegistration] = backend_registry(
             notes="Offline deterministic demo/CI adapter; never spends model tokens.",
         ),
         answer_route="none",
-        trace=ObjectRef("skill_benchmark", "GENERIC_TRACE_DIALECT"),
+        trace=ObjectRef("trace_normalization", "GENERIC_TRACE_DIALECT"),
         trigger=SurfaceBinding(ObjectRef("run_trigger_matrix", "StubAdapter")),
     ),
 )
+
+
+def binding_references(category: str) -> tuple[ObjectRef, ...]:
+    """Project source references without materializing implementations."""
+    if category not in {"answer", "trigger", "judge", "trace", "workspace_builder"}:
+        raise ValueError(f"unknown backend reference category {category!r}")
+    references = []
+    for registration in BACKENDS.values():
+        binding = getattr(registration, category)
+        if binding is not None:
+            references.append(binding.implementation if isinstance(binding, SurfaceBinding) else binding)
+    return tuple(references)
 
 
 def binding_for(name: str, surface: BackendSurface) -> SurfaceBinding:

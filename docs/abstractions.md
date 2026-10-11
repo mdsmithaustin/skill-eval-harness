@@ -238,10 +238,10 @@ hashed paths are the paths an agent lists. The judge's explore-surface digest fr
 ## Runner / adapter
 
 An **answer runner** consumes prepared task rows and produces the run-output contract for ordinary rows. The repo
-ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:12474`), Claude (`run_claude:12763`, capturing real
+ships Pi answer smoke (`examples/adewale-workspace/run_pi_smoke.py`), Codex (`run_codex:8226`), Claude (`run_claude:8495`, capturing real
 per-run cost), Gemini CLI and Mistral Vibe (`run-agent --agent gemini|vibe`, using isolated provider homes outside the workdir), the in-process
-subagent runner (`run_subagent:16336`, which hosts record/replay tool I/O via `ToolReplayStore`),
-Jetty (`JettyClient:4345` and the export/run/import commands), and any runner that writes the
+subagent runner (`run_subagent:11924`, which hosts record/replay tool I/O via `ToolReplayStore`),
+Jetty (`JettyClient:3265` and the export/run/import commands), and any runner that writes the
 contract directly. Each answer runner registers a workspace builder so one cross-runner invariant
 proves its `without_skill` arm is skill-free (CF.2). Autonomous trigger runners are separate: they
 read trigger cases from the manifest directly, never consume answer task rows, and emit trigger
@@ -565,7 +565,7 @@ by domain, difficulty, trigger type, and success goal. Case flags mark saturated
 flaky, and with-skill-failed cases, and `effect_estimates.ceiling_or_floor` separates the two
 ways a case stops discriminating: both arms always pass (ceiling) or both always fail (floor, which
 `suggest-cases` never offers for hardening). These flags, the leakage lint
-(`prompt_assertion_leakage_findings:997`), and the split discipline are the part of the tool
+(`prompt_assertion_leakage_findings:1024`), and the split discipline are the part of the tool
 no surveyed eval framework copies.
 
 `report_contracts.report_cohort` classifies each attempted reporting population as
@@ -625,3 +625,21 @@ observation to the existing artifact writer. Saved readers reconstruct the separ
 member against the answer design and journal before deriving telemetry or assertion results.
 Output closure and delivered-error availability are independent. Provider traces remain
 separate diagnostics. The process supervisor and spend admission retain their existing owners.
+
+## Shared trigger owners
+
+`skill_inputs.py` owns manifest loading, dataset expansion, skill roots, materialization,
+mounted tree hashes, and treatment provenance. `process_runtime.py` owns one supervisor and
+one stop state for answer, Matrix, and Pi callers. Its bridge session receives the answer
+validator and a structural journal interface. Spend admission and persistence remain in
+`spend_runtime.py`.
+
+`trace_normalization.py` owns dialect instances and their complete callback closure.
+`agent_clis.py` imports trace interpretation for provider preparation. The dependency points
+one way. `trigger_identity.py` reads a sorted source inventory from the owning installation
+without loading provider implementations. The packaging catalog and executable inventory
+answer different questions. Saved identity validation preserves recorded digests.
+
+`json_contracts.py` owns generic JSON stream iteration and writing. `content_digests.py` owns
+canonical JSON hashes. `cli_contracts.py` owns the spend-policy flag reader and its CLI error
+boundary. Supported monolith imports refer directly to these canonical objects.
