@@ -220,6 +220,17 @@ class BridgeProcessTests(unittest.TestCase):
             facts = json.loads(next(runs.glob(".tool-observations/*/turn-1/process.json")).read_text())
             self.assertEqual((facts["timed_out"], facts["group_stopped"], facts["reaped"]), (True, True, True))
 
+    def test_over_frame_output_stops_before_delivery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tasks, rows, runs = self.prepare(Path(directory), output="x" * 100000)
+            result = self.execute(tasks, runs)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            base = runs / rows[0]["run_dir"]
+            self.assertIn("outbound frame exceeds configured bound", (base / "output.md").read_text())
+            self.assertEqual(sb.read_tool_observation_base(base).canonical_rows(), [])
+            facts = json.loads(next(runs.glob(".tool-observations/*/turn-1/process.json")).read_text())
+            self.assertEqual((facts["group_stopped"], facts["reaped"]), (True, True))
+
     def test_offer_and_acked_prefix_timeout_remain_distinct(self):
         import skill_benchmark as sb
         import tool_fault_contracts as domain

@@ -4,10 +4,16 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add `run-subagent --tool-bridge` for bounded offline replay and challenge delivery.
+  Exact ACKs conserve typed responses through the existing journal. Legacy error data remains
+  unavailable. The existing process owner records cleanup before publication, and paid turns
+  retain reported dollars across later failure or interruption. Unsupported platforms refuse
+  before spawn. See [the local child walkthrough](docs/offline-tool-dialogue.md).
+
 - Add ordered `tool_faults` declarations for direct callable output challenges. Preparation
   commits present declarations across experimental coordinates. Output-only observations
   preserve unavailable delivered errors, conservative prefix claims, replay-v1 compatibility,
-  and returned price evidence through later journal failure. Built-in CLI, native, and Jetty
+  and returned price evidence through later journal failure. Ordinary CLI, native, and Jetty
   routes refuse unsupported selected execution. `run-subagent` adds explicit fault-case filters.
 
 

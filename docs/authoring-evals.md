@@ -489,8 +489,9 @@ case and task fingerprint. Cases without the field keep their existing rows and 
 
 Execution uses the direct `run_subagent_tasks` Python seam with enabled `replay_mode`.
 The existing callback receives `tool_executor(tool, input)` and its arbitrary output.
-The shell and Claude CLI backends ignore that executor, so `run-subagent` refuses selected
-fault cases before output creation or launch. Native runners and Jetty export also refuse them.
+The ordinary shell and Claude CLI backends ignore that executor, so they refuse selected
+fault cases before output creation or launch. `run-subagent --tool-bridge` supports strict offline
+JSONL delivery through the existing process owner. Native runners and Jetty export refuse declarations.
 `--skip-fault-cases` selects ordinary cases and `--only-fault-cases` selects challenge cases.
 Both validate the complete prepared design before selection. Altering a committed declaration
 requires preparing the tasks again.
@@ -524,3 +525,10 @@ local filesystem. Failed writes leave uncertain evidence. SIGKILL, stalled files
 same-user edits are outside that guarantee. This contract does not claim immediate physical
 return evidence or model consumption. A normally returned safe `usage.cost_usd` remains
 eligible for the existing admission settlement even when subsequent journal confirmation fails.
+
+The [offline dialogue walkthrough](offline-tool-dialogue.md) runs a deterministic child with
+typed output and explicit delivered-error availability. Exact ACKs confirm protocol acceptance.
+Closed output counts and known delivered errors support their respective assertions.
+Legacy replay errors stay unavailable. Generic responses cannot establish file-read, command-exit,
+or skill-open success. Natural process completion and observed cleanup are also required for closure.
+Bridge execution records its expected route separately from absent-declaration preparation hashes.

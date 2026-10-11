@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skill_name": "demo",
+  "skill_paths": ["skills/demo/SKILL.md"],
+  "cases": [
+    {
+      "id": "offline-search",
+      "split": "tune",
+      "prompt": "Return the search output and its delivered error availability.",
+      "tool_faults": [{"tool": "search", "output": "alpha", "is_error": true}],
+      "assertions": [
+        {"name": "answer", "type": "contains", "value": "alpha"},
+        {"name": "delivered-error", "type": "tool_call", "tool": "search", "is_error": true}
+      ]
+    }
+  ]
+}
