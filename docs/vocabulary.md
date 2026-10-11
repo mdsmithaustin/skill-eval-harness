@@ -160,6 +160,32 @@ The normalized shapes are an adapter boundary: Pi, Codex, Gemini, and Jetty emit
 
 **Jetty lifecycle** — one closed imported/executing state: queued, running, succeeded, failed, timed out, or protocol-invalid. Unknown aliases and conflicting stored discriminators are protocol-invalid. “Succeeded” is not semantic success until `output.md` exists; timeout remains distinct from provider failure. A Jetty dry run is planning, not an execution lifecycle.
 
+## Verifier diagnostics
+
+**Verifier review** is the optional `verifier_review` projection produced by
+`benchmark --review-diagnostics`. Its closed complete, unavailable, and not-applicable states
+carry authoring leads when applicable, immutable planned run identities, and original assertion
+definitions. Legacy absence is not applicable to saved consumers. Every new
+block and queue is explicitly diagnostic. This projection changes no grade,
+rate, or gate.
+
+**Never passes** is a diagnostic lead over at least two complete deterministic
+failures in one whole planned cohort. A pass defeats the lead, and missing or
+ineligible attempts cannot reduce its denominator.
+
+**Format near miss** is a failed positive literal that would pass after
+`ascii-asterisk-removal-v1` deletes U+002A from the consumed candidate and every
+operand. Case and comparison policy remain unchanged. The original verdict fails.
+
+**Oracle disagreement** is a failed objective assertion with gate or critical severity beside a
+passing qualitative judgment accepted by the grader for the exact same run and
+turn. It nominates author review without establishing correctness.
+
+**Diagnostic review queue** is the opt-in `error-analysis` queue beside the ordinary
+first-failure queue and taxonomy. It deduplicates by canonical run identity.
+Partial source keeps row-local leads under diagnostic `observed` and has no
+headline queue. See [failure analysis](why-did-this-run-fail.md#review-optional-verifier-diagnostics).
+
 ## Report signals
 
 These are flags a `benchmark` report raises so you read pass rates correctly.

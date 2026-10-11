@@ -302,3 +302,54 @@ miscalibrated judge looks, in the queue, exactly like a true one. That is
 [`can-i-trust-my-judge.md`](can-i-trust-my-judge.md) — until you have run its calibration
 loop, treat a judge-sourced first-failure as a lead to open the `output.md` on, not a
 verdict.
+
+## Review optional verifier diagnostics
+
+Use these authoring leads when an assertion may be too narrow. Create a benchmark
+with `--review-diagnostics`, then run `error-analysis --review-diagnostics` on that
+saved report. The separate `diagnostic_review` queue leaves your ordinary first
+failures, taxonomy, and feedback notes intact.
+
+1. Read a queue row's `lead_indices` in its `verifier_review` block.
+2. Resolve the lead's assertion identity in `assertions`. It includes the original
+   declaration ordinal, turn, full definition digest, and resolved grading policy.
+3. Resolve its run identities in `population.planned` and read each `run_base`'s
+   answer beside the original assertion.
+4. Decide whether the answer or the assertion needs a change. Rerun the eval after
+   an authored change. A lead never changes the original verdict automatically.
+
+`never_passes` requires at least two distinct complete failures across the whole
+planned cohort for one design, case, requested model, arm, prepared skill
+treatment, and assertion definition. Any passing repetition defeats the lead.
+Missing, extra, duplicate, skipped, unavailable, failed, timed-out, and refused
+work cannot count as failures. Recorded provider or effort request differences
+block the cohort. Missing effort and backend defaults remain unverified
+observational evidence. A complete cohort is an authoring clue, not proof that
+its verifier is wrong or that execution settings were held fixed.
+
+`format_near_miss` retains a failed positive `contains`, `contains_any`, or
+`contains_all` result that passes under `ascii-asterisk-removal-v1`. This hypothesis
+deletes only U+002A from both the exact consumed candidate and every operand.
+It preserves the assertion's case policy and comparison profile. For example,
+`Severity: **Blocking**` can nominate review for `Severity: Blocking`. An operand
+that becomes empty makes the diagnostic unavailable. Spaces, tabs, backticks,
+underscores, and tildes receive no additional relaxation. Negative literals,
+regexes, scripts, tools, similarity, and judge assertions do not qualify. An
+asterisk can carry meaning, so read the answer before changing the assertion.
+
+Only single-shot formatting has the consumed text available in this projection.
+Formatting review for failed turn-local and case-level multi-turn literals is
+`source_text_unavailable`. Other truthful observations can remain under diagnostic
+`observed`. The report does not recover text from a transcript or reread an output
+path for this hypothesis.
+
+`oracle_disagreement` pairs a failed objective assertion with gate or critical severity with a
+passing qualitative judgment that the grader accepted for the same task, run,
+fingerprint, and turn. A raw judge boolean or a pending or rejected judgment
+cannot nominate review. A judge pass is evidence to inspect, not answer correctness.
+
+Incomplete source has an empty diagnostic headline queue. Eligible row-local leads
+can appear under diagnostic `observed`, and saved validation defects affect only
+diagnostic availability. Existing grades and CI gates retain their original
+meaning. See [the command reference](commands.md#optional-verifier-diagnostics)
+for opt-ins, availability states, and reason codes.
