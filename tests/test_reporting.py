@@ -1073,8 +1073,8 @@ class TrajectoryDiffTests(unittest.TestCase):
 
 
 class VerifierReviewTests(unittest.TestCase):
-    def fixture(self, root, *, turns=False, assertion=None):
-        declarations = [assertion or {"name": "severity", "type": "contains", "value": "Severity: Blocking"},
+    def fixture(self, root, *, turns=False, assertion=None, assertions=None):
+        declarations = assertions or [assertion or {"name": "severity", "type": "contains", "value": "Severity: Blocking"},
                         {"name": "quality", "type": "judge", "prompt": "Is this acceptable?"}]
         case = {"id": "c", "split": "tune", "prompt": "Review this change.", "assertions": declarations}
         if turns:
@@ -1188,6 +1188,37 @@ class VerifierReviewTests(unittest.TestCase):
             report = self.report(path, runs, judged)
             self.assertIn("empty_transformed_operand", report["verifier_review"]["reasons"])
             self.assertEqual(sb._read_verifier_review(report)["availability"], "unavailable")
+
+    def test_recorded_backend_default_and_high_block_whole_cohorts(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td))
+            for file in runs.glob("c/*/run-*/metadata.json"):
+                metadata = json.loads(file.read_text())
+                metadata["effort"] = ({"requested": None, "applied_by": "backend_default"}
+                                      if file.parent.name == "run-1" else {"requested": "high", "applied_by": "fixture"})
+                file.write_text(json.dumps(metadata))
+            report = self.report(path, runs, judged)
+            self.assertEqual(report["availability"], "complete")
+            self.assertIn("cohort_settings_mismatch", sb._read_verifier_review(report)["reasons"])
+            self.assertFalse(any(lead["signal"] == "never_passes" for lead in self.leads(report)))
+            self.assertEqual(sum(lead["signal"] == "format_near_miss" for lead in self.leads(report)), 4)
+
+    def test_failed_critical_qualitative_assertion_cannot_nominate_disagreement(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path, runs, judged = self.fixture(root, assertions=[
+                {"name": "quality", "type": "judge", "prompt": "Is this acceptable?"},
+                {"name": "critical-judge", "type": "judge", "severity": "critical", "prompt": "reject-this-judge"}])
+            script = root / "selective-judge.py"
+            script.write_text('import sys, json\ntext = sys.stdin.read()\nprint(json.dumps({"passed": "reject-this-judge" not in text, "evidence": "offline"}))\n')
+            code, _, stderr = run_cli("judge", path, "--runs", runs, "--judge-cmd", f"{sys.executable} {script}", "--out", judged)
+            self.assertEqual((code, stderr), (0, ""))
+            report = self.report(path, runs, judged)
+            self.assertTrue(all(row["qualitative_assertions"][1]["passed"] is False for row in report["results"]))
+            disagreement = [lead for lead in self.leads(report) if lead["signal"] == "oracle_disagreement"]
+            self.assertEqual(report["availability"], "complete")
+            self.assertEqual(disagreement, [])
+            self.assertTrue(all(row["qualitative_assertions"][0]["passed"] is True for row in report["results"]))
 
     def test_saved_reader_rejects_stale_basis_and_incompatible_leads_without_affecting_gates(self):
         with tempfile.TemporaryDirectory() as td:

@@ -20582,6 +20582,12 @@ class _ReviewAssertion:
 
 
 @_dataclass(frozen=True)
+class _ReviewSource:
+    grading_coordinate: RunCoordinate
+    text: str | None
+
+
+@_dataclass(frozen=True)
 class _ReviewRun:
     coordinate: RunCoordinate
     run_dir: str
@@ -20589,6 +20595,7 @@ class _ReviewRun:
     treatment: str | None
     task_sha256: str
     source_sha256: str | None
+    grading_coordinate: RunCoordinate | None
 
     @property
     def identity(self) -> str:
@@ -20600,7 +20607,8 @@ class _ReviewRun:
                 "variant": str(self.coordinate.variant), "run_number": int(self.coordinate.run_number),
                 "run_dir": self.run_dir, "run_base": self.run_base,
                 "treatment": self.treatment, "task_sha256": self.task_sha256,
-                "source_sha256": self.source_sha256}
+                "source_sha256": self.source_sha256,
+                "grading_coordinate": None if self.grading_coordinate is None else self.grading_coordinate.as_dict()}
 
 
 @_dataclass(frozen=True)
@@ -20737,17 +20745,22 @@ def _review_state_row(state: _ReviewState) -> dict[str, Any]:
 
 def _verifier_review(report: dict[str, Any], cases: list[dict[str, Any]],
                      plan: tuple[str, ...], runs: Path,
-                     sources: Mapping[RunCoordinate, str | None], strict: bool) -> dict[str, Any]:
+                     sources: Mapping[RunCoordinate, _ReviewSource], strict: bool) -> dict[str, Any]:
     results = report["results"]
     by_identity: dict[str, list[dict[str, Any]]] = {}
     for result in results:
         by_identity.setdefault(_report_attempt_identity(result), []).append(result)
-    planned = tuple(sorted((
-        _ReviewRun(RunCoordinate.from_row(row), row["run_dir"], str(runs / row["run_dir"]),
-                   row["planned_skill_tree_hash"], row["task_sha256"],
-                   None if sources.get(RunCoordinate.from_row(row)) is None else
-                   "sha256:" + hashlib.sha256(str(sources[RunCoordinate.from_row(row)]).encode("utf-8")).hexdigest())
-        for row in (json.loads(value) for value in plan)), key=lambda run: run.coordinate.key))
+    planned_rows = []
+    for value in plan:
+        row = json.loads(value)
+        coordinate = RunCoordinate.from_row(row)
+        source = sources.get(coordinate)
+        source_hash = (None if source is None or source.text is None else
+                       "sha256:" + hashlib.sha256(source.text.encode("utf-8")).hexdigest())
+        planned_rows.append(_ReviewRun(
+            coordinate, row["run_dir"], str(runs / row["run_dir"]), row["planned_skill_tree_hash"],
+            row["task_sha256"], source_hash, None if source is None else source.grading_coordinate))
+    planned = tuple(sorted(planned_rows, key=lambda run: run.coordinate.key))
     expected = {run.identity: run for run in planned}
     coverage = report["answer_design"]
     errors = coverage.get("attestation_errors", [])
@@ -20789,8 +20802,8 @@ def _verifier_review(report: dict[str, Any], cases: list[dict[str, Any]],
             if not isinstance(observation, FailedAssertion):
                 continue
             if ref.assertion_type in {"contains", "contains_any", "contains_all"}:
-                source = sources.get(run.coordinate)
-                if case.get("turns") or source is None:
+                source = sources[run.coordinate].text
+                if source is None:
                     reasons.append("source_text_unavailable")
                 else:
                     literal = LiteralTextAssertion.from_wire(json.loads(ref.definition_json)["declared"])
@@ -20799,15 +20812,14 @@ def _verifier_review(report: dict[str, Any], cases: list[dict[str, Any]],
                         reasons.append(hypothesis.reason)
                     elif hypothesis is not None:
                         leads.append(_FormatNearMiss(ref, run, hypothesis))
-            if ((ref.assertion_type not in QUALITATIVE_ASSERTIONS and ref.severity == "gate")
-                    or ref.severity == "critical"):
+            if ref.assertion_type not in QUALITATIVE_ASSERTIONS and ref.severity in {"gate", "critical"}:
                 for judge in refs:
                     if judge.assertion_type not in QUALITATIVE_ASSERTIONS or judge.turn != ref.turn:
                         continue
                     judged = _review_matching_row(judge, result)
                     if (join_counts[(judge.name, judge.assertion_type, judge.turn)] == 1
                             and judged is not None and isinstance(assertion_observation_from_row(judged), SatisfiedAssertion)
-                            and judged.get("judge_task_id") == run.coordinate.judge_task_id(judge.name)):
+                            and judged.get("judge_task_id") == (run.grading_coordinate.judge_task_id(judge.name) if run.grading_coordinate is not None else None)):
                         leads.append(_OracleDisagreement(ref, run, judge, judged["judge_task_id"]))
     for key, cohort in cohorts.items():
         ref = definitions[key[-1]]
@@ -20818,7 +20830,7 @@ def _verifier_review(report: dict[str, Any], cases: list[dict[str, Any]],
         rows = [by_identity[run.identity][0] for run in cohort]
         providers = {row.get("metadata", {}).get("provider") for row in rows}
         efforts = {effort_identity(row) for row in rows}
-        if len(providers) != 1 or len(efforts - {None, "backend_default"}) > 1:
+        if len(providers) != 1 or len(efforts - {None}) > 1:
             reasons.append("cohort_settings_mismatch")
             continue
         observations = [_review_matching_row(ref, row) for row in rows]
@@ -20890,7 +20902,7 @@ def _read_verifier_review(report: dict[str, Any]) -> dict[str, Any]:
         planned: dict[str, _ReviewRun] = {}
         for value in population["planned"]:
             if (not isinstance(value, dict) or set(value) != {"case_id", "model", "variant", "run_number",
-                    "run_dir", "run_base", "treatment", "task_sha256", "source_sha256"}
+                    "run_dir", "run_base", "treatment", "task_sha256", "source_sha256", "grading_coordinate"}
                     or not isinstance(value["run_dir"], str) or not value["run_dir"]
                     or PurePosixPath(value["run_dir"]).is_absolute() or ".." in PurePosixPath(value["run_dir"]).parts
                     or not isinstance(value["run_base"], str) or not value["run_base"]
@@ -20898,7 +20910,14 @@ def _read_verifier_review(report: dict[str, Any]) -> dict[str, Any]:
                     or value["source_sha256"] is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", value["source_sha256"]) is None):
                 raise ValueError("invalid planned run")
             run = _ReviewRun(RunCoordinate.from_row(value), value["run_dir"], value["run_base"],
-                             value["treatment"], value["task_sha256"], value["source_sha256"])
+                             value["treatment"], value["task_sha256"], value["source_sha256"],
+                             None if value["grading_coordinate"] is None else RunCoordinate.from_row(value["grading_coordinate"]))
+            grading = run.grading_coordinate
+            if (value != run.to_row() or grading is not None and (
+                    grading.case_id != run.coordinate.case_id or grading.variant != run.coordinate.variant
+                    or grading.run_number != run.coordinate.run_number
+                    or grading.model is not None and grading.model != run.coordinate.model)):
+                raise ValueError("diagnostic grading coordinate mismatch")
             if run.identity in planned or any(run.run_dir == other.run_dir for other in planned.values()):
                 raise ValueError("duplicate planned run")
             planned[run.identity] = run
@@ -20924,7 +20943,7 @@ def _read_verifier_review(report: dict[str, Any]) -> dict[str, Any]:
         for identity in admitted:
             run = planned[identity]
             metadata = by_identity[identity][0].get("metadata", {})
-            if (metadata.get("answer_design_sha256") != raw["design_sha256"]
+            if (run.grading_coordinate is None or metadata.get("answer_design_sha256") != raw["design_sha256"]
                     or metadata.get("answer_task_sha256") != run.task_sha256
                     or metadata.get("skill_tree_hash") != run.treatment):
                 raise ValueError("diagnostic planned identity mismatch")
@@ -20982,7 +21001,7 @@ def _read_verifier_review(report: dict[str, Any]) -> dict[str, Any]:
                 if (availability != "complete" or ref.assertion_type in QUALITATIVE_ASSERTIONS
                         or lead["runs"] != cohort or len(cohort) < 2 or lead["observational"] is not True
                         or len({row.get("metadata", {}).get("provider") for row in rows}) != 1
-                        or len(efforts - {None, "backend_default"}) > 1 or type(lead["effort_verified"]) is not bool
+                        or len(efforts - {None}) > 1 or type(lead["effort_verified"]) is not bool
                         or lead["effort_verified"] != (len(efforts) == 1 and not bool(efforts & {None, "backend_default"}))):
                     raise ValueError("never-passes cohort is not complete")
             elif len(lead_runs) != 1:
@@ -21007,10 +21026,11 @@ def _read_verifier_review(report: dict[str, Any]) -> dict[str, Any]:
                 if judge is None:
                     raise ValueError("unknown qualitative assertion")
                 judged = _review_matching_row(judge, rows[0])
-                if (not ((ref.assertion_type not in QUALITATIVE_ASSERTIONS and ref.severity == "gate") or ref.severity == "critical")
+                if (ref.assertion_type in QUALITATIVE_ASSERTIONS or ref.severity not in {"gate", "critical"}
                         or judge.assertion_type not in QUALITATIVE_ASSERTIONS or judge.case_id != ref.case_id or judge.turn != ref.turn
                         or judged is None or not isinstance(assertion_observation_from_row(judged), SatisfiedAssertion)
-                        or lead["judge_task_id"] != lead_runs[0].coordinate.judge_task_id(judge.name)
+                        or lead["judge_task_id"] != (lead_runs[0].grading_coordinate.judge_task_id(judge.name)
+                            if lead_runs[0].grading_coordinate is not None else None)
                         or judged.get("judge_task_id") != lead["judge_task_id"]):
                     raise ValueError("accepted judgment identity mismatch")
         return raw
@@ -21021,7 +21041,7 @@ def _read_verifier_review(report: dict[str, Any]) -> dict[str, Any]:
 def _diagnostic_review_queue(report: dict[str, Any], limit: int) -> dict[str, Any]:
     review = _read_verifier_review(report)
     leads = review.get("leads", review.get("observed", {}).get("leads", []))
-    results = sorted(report.get("results", []), key=lambda row: RunCoordinate.from_row(row).key)
+    results = sorted(report.get("results", []), key=lambda row: RunCoordinate.from_row(row).key) if leads else []
     queue = []
     seen: set[str] = set()
     for result in results:
@@ -21060,7 +21080,7 @@ def build_benchmark_report(
     results = []
     deferred_judge_tasks: list[dict[str, Any]] = []
     skipped_trigger_cases = []
-    review_sources: dict[RunCoordinate, str | None] = {}
+    review_sources: dict[RunCoordinate, _ReviewSource] = {}
     selected_cases = list(iter_cases(manifest, split))
     for case in selected_cases:
         # Trigger/discovery cases belong to the autonomous-trigger adapter, whose
@@ -21078,7 +21098,9 @@ def build_benchmark_report(
             results.append(result)
             if review_diagnostics:
                 coordinate = RunCoordinate.from_row(result)
-                review_sources[coordinate] = text if coordinate not in review_sources and not case.get("turns") else None
+                review_sources[coordinate] = _ReviewSource(
+                    RunCoordinate.of(case["id"], variant, run_number, model_name),
+                    text if coordinate not in review_sources and not case.get("turns") else None)
             deferred_judge_tasks.extend(pending)
 
     by_variant: dict[str, list[dict[str, Any]]] = {v: [] for v in variants}
