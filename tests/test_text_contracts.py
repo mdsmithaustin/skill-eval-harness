@@ -668,5 +668,36 @@ class HumanTextAuditTests(unittest.TestCase):
             self.assertFalse(any(item["kind"] == "held-out-rubric-leak" for item in report["findings"]))
 
 
+class LiteralPresentationHypothesisTests(unittest.TestCase):
+    def test_positive_literals_remove_only_ascii_asterisks(self):
+        for wire in (
+            {"type": "contains", "value": "Severity: Blocking"},
+            {"type": "contains_any", "values": ["Severity: Blocking", "other"]},
+            {"type": "contains_all", "values": ["Severity: Blocking", "*review*"]},
+        ):
+            with self.subTest(wire=wire):
+                literal = LiteralTextAssertion.from_wire(wire)
+                hypothesis = literal.presentation_hypothesis("Severity: **Blocking** review")
+                self.assertFalse(literal.evaluate("Severity: **Blocking** review").passed)
+                self.assertEqual(hypothesis.transform, "ascii-asterisk-removal-v1")
+                self.assertEqual(hypothesis.hypothetical_operands, tuple(v.replace("*", "") for v in literal.values))
+                self.assertEqual(hypothesis.candidate_after_sha256, "sha256:" + hashlib.sha256(b"Severity: Blocking review").hexdigest())
+
+    def test_probe_preserves_case_profile_and_rejects_empty_or_negative_operands(self):
+        for wire, text in (
+            ({"type": "contains", "value": "Blocking", "ci": False}, "**blocking**"),
+            ({"type": "contains", "value": "*", "comparison": "exact"}, "none"),
+            ({"type": "excludes_any", "values": ["Blocking"]}, "Blocking"),
+            ({"type": "contains", "value": "Severity: Blocking"}, "Severity:\t Blocking"),
+            ({"type": "contains", "value": "Blocking"}, "Blocking"),
+        ):
+            with self.subTest(wire=wire, text=text):
+                self.assertIsNone(LiteralTextAssertion.from_wire(wire).presentation_hypothesis(text))
+        exact = LiteralTextAssertion.from_wire({"type": "contains", "value": "AB", "comparison": "exact"})
+        self.assertIsNone(exact.presentation_hypothesis("A*\u200bB"))
+        rendered = LiteralTextAssertion.from_wire({"type": "contains", "value": "AB"})
+        self.assertEqual(rendered.presentation_hypothesis("A*\u200bB").comparison, ComparisonProfile.RENDERED_V1)
+
+
 if __name__ == "__main__":
     unittest.main()

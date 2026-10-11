@@ -8,6 +8,7 @@ states fail before grading can derive a verdict from them.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import math
 import platform
 import re
@@ -17,7 +18,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias
 
 import regex as timeout_regex
 
@@ -275,6 +276,19 @@ def _non_empty_string(value: Any, label: str) -> str:
 
 
 @dataclass(frozen=True)
+class LiteralPresentationHypothesis:
+    candidate_before_sha256: str
+    candidate_after_sha256: str
+    original_operands: tuple[str, ...]
+    hypothetical_operands: tuple[str, ...]
+    case_insensitive: bool
+    comparison: ComparisonProfile
+    transform: Literal["ascii-asterisk-removal-v1"] = field(default="ascii-asterisk-removal-v1", init=False)
+    original_passed: Literal[False] = field(default=False, init=False)
+    hypothetical_passed: Literal[True] = field(default=True, init=False)
+
+
+@dataclass(frozen=True)
 class LiteralTextAssertion:
     kind: LiteralKind
     values: tuple[str, ...]
@@ -357,6 +371,21 @@ class LiteralTextAssertion:
         else:
             evidence = "none present" if passed else f"found banned {hit!r}"
         return MatchObservation(matched, raw_matched, negated, evidence, candidate, operands)
+
+    def presentation_hypothesis(self, text: str) -> LiteralPresentationHypothesis | None:
+        if self.kind is LiteralKind.EXCLUDES_ANY or self.evaluate(text).passed:
+            return None
+        values = tuple(value.replace("*", "") for value in self.values)
+        if any(not ComparisonText.from_text(value, self.profile).value for value in values):
+            return None
+        candidate = text.replace("*", "")
+        transformed = LiteralTextAssertion(self.kind, values, self.case_insensitive, self.profile)
+        if not transformed.evaluate(candidate).passed:
+            return None
+        return LiteralPresentationHypothesis(
+            "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "sha256:" + hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
+            self.values, values, self.case_insensitive, self.profile)
 
 
 @dataclass(frozen=True)
