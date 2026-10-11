@@ -20841,9 +20841,14 @@ def _verifier_review(report: dict[str, Any], cases: list[dict[str, Any]],
                 and all(isinstance(assertion_observation_from_row(row), FailedAssertion) for row in observations if row is not None)
                 and not any(reason == "assertion_identity_unavailable" for reason in reasons)):
             leads.append(_NeverPasses(ref, tuple(cohort), len(efforts) == 1 and not bool(efforts & {None, "backend_default"})))
-    state: _ReviewState = (_ReviewUnavailable(tuple(sorted(set(reasons))),
-                             tuple(lead for lead in leads if not isinstance(lead, _NeverPasses))) if reasons
-                          else _ReviewComplete(tuple(leads)))
+    state: _ReviewState
+    if planned and not any(ref.assertion_type not in QUALITATIVE_ASSERTIONS for ref in definitions.values()):
+        state = _ReviewNotApplicable("no_supported_assertions")
+    elif reasons:
+        state = _ReviewUnavailable(tuple(sorted(set(reasons))),
+                                   tuple(lead for lead in leads if not isinstance(lead, _NeverPasses)))
+    else:
+        state = _ReviewComplete(tuple(leads))
     return {**_review_state_row(state), "schema_version": 1, "basis_sha256": _review_basis(report),
             "design_sha256": coverage.get("design_sha256"),
             "assertions": {key: ref.to_row() for key, ref in sorted(definitions.items())},
@@ -20858,11 +20863,12 @@ def _read_verifier_review(report: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw, dict):
             raise TypeError("diagnostics must be an object")
         availability = raw.get("availability")
-        state_fields = {"leads"} if availability == "complete" else {"reasons", "observed"}
+        state_fields = ({"leads"} if availability == "complete" else
+                        {"reason"} if availability == "not_applicable" else {"reasons", "observed"})
         if (set(raw) != {"evidence_class", "availability", "schema_version", "basis_sha256",
                          "design_sha256", "assertions", "population"} | state_fields
                 or raw["evidence_class"] != "diagnostic" or type(raw["schema_version"]) is not int
-                or raw["schema_version"] != 1 or availability not in {"complete", "unavailable"}
+                or raw["schema_version"] != 1 or availability not in {"complete", "unavailable", "not_applicable"}
                 or raw["basis_sha256"] != _review_basis(report)
                 or raw["design_sha256"] != report.get("answer_design", {}).get("design_sha256")):
             raise ValueError("invalid diagnostic envelope or stale source basis")
@@ -20947,8 +20953,15 @@ def _read_verifier_review(report: dict[str, Any]) -> dict[str, Any]:
                     or metadata.get("answer_task_sha256") != run.task_sha256
                     or metadata.get("skill_tree_hash") != run.treatment):
                 raise ValueError("diagnostic planned identity mismatch")
-        if availability == "complete":
-            if (report.get("availability") != "complete" or not coverage.get("complete")
+        if availability == "not_applicable":
+            if (raw["reason"] != "no_supported_assertions" or not planned
+                    or any(ref.assertion_type not in QUALITATIVE_ASSERTIONS for ref in refs.values())
+                    or any(row.get("assertions") for row in report["results"])):
+                raise ValueError("diagnostic population supports review")
+            lead_rows = []
+        elif availability == "complete":
+            if (not any(ref.assertion_type not in QUALITATIVE_ASSERTIONS for ref in refs.values())
+                    or report.get("availability") != "complete" or not coverage.get("complete")
                     or len(admitted) != len(planned) or population["extra"] or population["duplicates"]):
                 raise ValueError("complete diagnostics lack population closure")
             lead_rows = raw["leads"]

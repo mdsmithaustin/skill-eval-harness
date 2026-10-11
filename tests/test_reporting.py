@@ -1132,6 +1132,12 @@ class VerifierReviewTests(unittest.TestCase):
             planned = report["verifier_review"]["population"]["planned"]
             identities = {sb._report_attempt_identity(row): row["variant"] for row in planned}
             self.assertEqual([identities[run] for run in never[0]["runs"]], ["without_skill", "without_skill"])
+            for output in runs.glob("c/*/run-*/output.md"):
+                output.write_text("Severity: Blocking", encoding="utf-8")
+            judge_with_stub(path, runs, judged, passes_on="Blocking")
+            supported = self.report(path, runs, judged)
+            self.assertEqual(sb._read_verifier_review(supported)["availability"], "complete")
+            self.assertEqual(self.leads(supported), [])
 
     def test_missing_and_mismatched_cohorts_keep_only_observed_local_leads(self):
         for change in ("missing", "provider", "effort", "refused"):
@@ -1219,6 +1225,11 @@ class VerifierReviewTests(unittest.TestCase):
             self.assertEqual(report["availability"], "complete")
             self.assertEqual(disagreement, [])
             self.assertTrue(all(row["qualitative_assertions"][0]["passed"] is True for row in report["results"]))
+            review = sb._read_verifier_review(report)
+            self.assertEqual((review["availability"], review["reason"]), ("not_applicable", "no_supported_assertions"))
+            diagnostic = sb.error_analysis_report(report, review_diagnostics=True)["diagnostic_review"]
+            self.assertEqual((diagnostic["availability"], diagnostic["review_queue"]), ("not_applicable", []))
+            self.assertIn("Diagnostic availability is `not_applicable`", sb.github_summary_from_report(report, review_diagnostics=True))
 
     def test_saved_reader_rejects_stale_basis_and_incompatible_leads_without_affecting_gates(self):
         with tempfile.TemporaryDirectory() as td:
