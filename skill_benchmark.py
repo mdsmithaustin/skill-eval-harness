@@ -7235,6 +7235,28 @@ def _bridge_supported() -> bool:
 
 
 def _bridge_frame_bytes(frame: Mapping[str, Any], limit: int) -> bytes:
+    remaining = limit - 1
+    pending: list[Iterator[Any]] = [iter((frame,))]
+    while pending:
+        try:
+            value = next(pending[-1])
+        except StopIteration:
+            pending.pop()
+            continue
+        if isinstance(value, str):
+            remaining -= len(value) + 2
+        elif isinstance(value, dict):
+            remaining -= 2 + len(value) + max(0, len(value) - 1)
+            pending.append(part for pair in value.items() for part in pair)
+        elif isinstance(value, (list, tuple)):
+            remaining -= 2 + max(0, len(value) - 1)
+            pending.append(iter(value))
+        elif isinstance(value, int) and not isinstance(value, bool):
+            remaining -= max(1, value.bit_length() // 4) + (value < 0)
+        else:
+            remaining -= 1
+        if remaining < 0:
+            raise ValueError("tool bridge outbound frame exceeds configured bound")
     encoded = bytearray()
     for text in json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":")).iterencode(frame):
         for index in range(0, len(text), 4096):

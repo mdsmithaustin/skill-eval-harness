@@ -1,5 +1,4 @@
 import json
-import os
 import shlex
 import signal
 import subprocess
@@ -10,6 +9,8 @@ import unittest
 from pathlib import Path
 
 from helpers import make_eval_repo, run_cli
+
+import skill_benchmark as sb
 
 
 class BridgeCliBoundaryTests(unittest.TestCase):
@@ -83,8 +84,7 @@ class BridgeObservationTests(unittest.TestCase):
                          mediated_tools=observation).triggered, False)
 
 
-@unittest.skipUnless(hasattr(os, "waitid") and hasattr(os, "WNOWAIT"),
-                     "bridge requires nonreaping waitid")
+@unittest.skipUnless(sb._bridge_supported(), "bridge requires nonreaping waitid and Linux procfs")
 class BridgeProcessTests(unittest.TestCase):
     def prepare(self, root, *, legacy=False, declared_error=True, output="alpha"):
         import skill_benchmark as sb

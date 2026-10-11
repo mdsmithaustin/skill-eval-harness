@@ -43,6 +43,7 @@ from unittest import mock
 import yaml
 from helpers import load_example_module
 
+import skill_benchmark as sb
 from agent_capabilities import AGENT_CAPABILITIES
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -469,7 +470,7 @@ LIVE_SMOKES = {
 
 # Skip reasons allowed only where the platform lacks the capability.
 PLATFORM_SKIPS = {
-    "bridge requires nonreaping waitid": lambda: not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"),
+    "bridge requires nonreaping waitid and Linux procfs": lambda: not sb._bridge_supported(),
     "process-group cleanup requires POSIX": lambda: not hasattr(os, "killpg"),
     "tomllib is stdlib from Python 3.11": lambda: sys.version_info < (3, 11),
 }
