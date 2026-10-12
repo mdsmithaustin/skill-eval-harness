@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import shlex
@@ -277,6 +279,50 @@ sys.exit({exit_code})
                     self.assertTrue(pipe.closed)
                 with self.assertRaises(ProcessLookupError):
                     os.killpg(child.pid, 0)
+
+    def test_native_cleanup_failure_reports_to_caller(self):
+        popen = subprocess.Popen
+        wait = subprocess.Popen.wait
+        for failure in ("timeout", "interruption"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as td:
+                fixture = self.fixture(Path(td), "native")
+                stub = Path(fixture[-1][-1])
+                stub.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(7)\n")
+                children = []
+                stderr = io.StringIO()
+
+                def record(*args, stub=stub, children=children, failure=failure, **kwargs):
+                    child = popen(*args, **kwargs)
+                    if args[0][0] == str(stub):
+                        children.append(child)
+                        error = (subprocess.TimeoutExpired(child.args, 1) if failure == "timeout"
+                                 else KeyboardInterrupt("native reap interrupted"))
+                        child.wait = mock.Mock(side_effect=error)
+                    return child
+
+                try:
+                    with contextlib.redirect_stderr(stderr), mock.patch(
+                            "subprocess.Popen", side_effect=record):
+                        with self.assertRaisesRegex(AssertionError, "exited before readiness: 7"):
+                            self.invoke(fixture)
+                    self.assertEqual(len(children), 1)
+                    child = children[0]
+                    child.wait.assert_called_once_with(timeout=1)
+                    self.assertIn(f"native price fixture could not reap child {child.pid}: ",
+                                  stderr.getvalue())
+                    self.assertIn("timed out after 1 seconds" if failure == "timeout"
+                                  else "native reap interrupted", stderr.getvalue())
+                    for pipe in (child.stdin, child.stdout, child.stderr):
+                        self.assertTrue(pipe.closed)
+                finally:
+                    for child in children:
+                        child.kill()
+                        wait(child, timeout=5)
+                        for pipe in (child.stdin, child.stdout, child.stderr):
+                            if pipe is not None:
+                                pipe.close()
+                        with self.assertRaises(ProcessLookupError):
+                            os.killpg(child.pid, 0)
 
     def test_timeout_retains_floor_refuses_later_call_and_never_publishes_full_cost(self):
         for route in ("shell", "claude", "native"):
