@@ -5,7 +5,8 @@ import json
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Generic, Literal, TypedDict, TypeVar, overload
 
 import regex
@@ -249,6 +250,8 @@ class ToolObservation:
     _rows: tuple[Mapping[str, Any], ...]
     turn: int | None = None
     reason: str | None = None
+    _folded: tuple[Mapping[int, _ExchangeState], frozenset[int], bool, str | None] = field(
+        init=False, compare=False, repr=False, hash=False)
 
     def __post_init__(self) -> None:
         identity = freeze_json_mapping(self._identity, "tool run identity")
@@ -272,9 +275,9 @@ class ToolObservation:
             _positive(self.turn)
         object.__setattr__(self, "_identity", identity)
         object.__setattr__(self, "_rows", tuple(freeze_json_mapping(row, "tool journal row") for row in self._rows))
-        self._fold()
+        object.__setattr__(self, "_folded", self._fold())
 
-    def _fold(self) -> tuple[dict[int, _ExchangeState], set[int], bool, str | None]:
+    def _fold(self) -> tuple[Mapping[int, _ExchangeState], frozenset[int], bool, str | None]:
         exchanges: dict[int, _ExchangeState] = {}
         completed: set[int] = set()
         active: int | None = None
@@ -372,20 +375,20 @@ class ToolObservation:
                 closed = True
             else:
                 raise ValueError("unknown tool journal transition")
-        return exchanges, completed, closed, gap or self.reason
+        return MappingProxyType(exchanges), frozenset(completed), closed, gap or self.reason
 
     @property
     def coverage(self) -> Literal["missing", "invalid", "open", "closed"]:
         if not self._rows:
             return "invalid" if self.reason and self.reason.startswith("invalid_tool_observation") else "missing"
-        _, completed, closed, gap = self._fold()
+        _, completed, closed, gap = self._folded
         return "closed" if gap is None and (closed if self.turn is None else self.turn in completed) else "open"
 
     def for_turn(self, turn: int) -> ToolObservation:
         return ToolObservation(self._identity, self._rows, turn, self.reason)
 
     def canonical_rows(self) -> list[dict[str, Any]]:
-        exchanges, _, _, _ = self._fold()
+        exchanges, _, _, _ = self._folded
         return [{"identity": thaw_json_value(self._identity), "turn": e.prepared["turn"],
                  "exchange": number, "tool": e.prepared["tool"],
                  "input": thaw_json_value(e.prepared["input"]),

@@ -517,6 +517,10 @@ class ToolObservationSnapshotTests(unittest.TestCase):
             f"{name}={getattr(first, name)!r}" for name in public_fields) + ")"
         self.assertEqual(repr(first), expected_repr)
         self.assertEqual(tuple(field.name for field in dataclasses.fields(first) if field.compare), public_fields)
+        self.assertEqual(tuple(field.name for field in dataclasses.fields(first) if field.hash is not False),
+                         public_fields)
+        with self.assertRaises(TypeError):
+            hash(first)
         with self.assertRaisesRegex(ValueError, "positive integers"):
             observation.for_turn(True)
 

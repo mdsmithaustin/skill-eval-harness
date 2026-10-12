@@ -616,8 +616,9 @@ site. Touch these carefully and most other features fall into place around them.
 
 `tool_fault_contracts.py` owns immutable ordered declarations, strict exchange identities,
 separate resolution and delivery commitments, and callable output and bridge response payload meanings.
-Its exchange-keyed journal fold provides finite `Count`, `ToolClaim`, `ExactOutput`,
-and `SuccessfulOperations` assessments. Consumers receive
+Construction validates the journal and retains its exchange-keyed fold as private immutable state.
+Coverage and canonical rows read that state. Each canonical row projection returns detached nested JSON.
+The fold provides finite `Count`, `ToolClaim`, `ExactOutput`, and `SuccessfulOperations` assessments. Consumers receive
 `ToolObservation` or assessed values. They do not read private resolution annotations.
 `ToolReplayStore` owns precedence and budgets. One run-local `_ToolReceiptJournal` writes
 transitions and binds synchronous callback progress. `OutcomeContext` carries the typed
