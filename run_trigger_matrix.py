@@ -123,7 +123,7 @@ from skill_inputs import (
     is_trigger_case,
     iter_cases,
     load_manifest_source,
-    materialize_trigger_ablation,
+    materialize_trigger_arm,
     mount_skill_tree,
     mounted_skills_by_id,
     repo_root_for_manifest,
@@ -1208,11 +1208,12 @@ def trigger_tree_for_manifest(repo_root: Path, manifest: dict[str, Any], work_di
         return tree_dir, tree_hash, {"mode": "baseline", "skill_tree_hash": tree_hash}
 
     try:
-        provenance = materialize_trigger_ablation(repo_root, manifest, ablation, work_dir / "materialized" / str(ablation))
+        materialized = materialize_trigger_arm(repo_root, manifest, ablation, work_dir / "materialized" / str(ablation))
     except AblationError as exc:
         raise SystemExit(str(exc)) from exc
-    prov = Provenance.from_dict(provenance)
-    return Path(provenance["dir"]), prov.identity.edited, prov.as_dict()
+    prov = materialized.arm.provenance
+    assert prov is not None
+    return Path(materialized.dir), prov.identity.edited, prov.as_dict()
 
 
 def matrix_failure_observation(

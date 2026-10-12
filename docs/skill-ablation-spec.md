@@ -39,7 +39,7 @@ Internal — the current contracts this builds on:
 
 - `validate_manifest` and `validate_ablation_specs` validate ablation shape, population, mechanisms, expected regressions, and dry-run materialization gates.
 - `prepared_task_rows` routes answer-population ablations to answer cases and requires `--ablation-dir` for declared removals; discovery-population ablations stay out of forced-load answer runners.
-- `materialize_declared_ablations` / `materialize_trigger_ablation` are the only writers of altered skill trees; they record provenance and tree hashes used by the benchmark confirmation gate.
+- `materialize_declared_ablations` and `materialize_trigger_arm` produce altered skill trees with typed provenance and tree hashes used by the benchmark confirmation gate. The trigger matrix consumes `MaterializedArm` directly. The public `materialize_trigger_ablation` facade returns the historical dictionary projection.
 - `build_skill_workspace`, `copy_skill_to_config`, `run_pi_trigger_eval.py`, and `export-jetty` consume canonical or materialized trees rather than reconstructing ad-hoc file subsets.
 - `ablation_regression_summary` confirms only named expected regressions whose provenance, scorable coverage, and per-case significance gate verify the comparison.
 

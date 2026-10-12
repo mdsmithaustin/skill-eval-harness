@@ -29,6 +29,7 @@ from helpers import (
 import ablation_model as am
 import run_trigger_matrix as tm
 import skill_benchmark as sb
+import skill_inputs as si
 from manifest_contracts import CasePopulation
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -560,6 +561,72 @@ class AblationRunnerIntegrationTests(unittest.TestCase):
                 text = Path(copied[0]).read_text(encoding="utf-8")
                 self.assertNotIn("when_to_use", text)
                 self.assertIn("name: good-pr", text)
+
+    def test_trigger_materialization_legacy_contract(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = self.repo(root, [self.DISCO_ABL])
+            manifest = sb.validate_manifest(path)
+            repo_root = sb.repo_root_for_manifest(path)
+            legacy = si.materialize_trigger_ablation(repo_root, manifest, "no-wtu", root / "legacy")
+            expected_provenance = {
+                "id": "no-wtu", "mode": "materialized", "population": "trigger",
+                "skill_hash": "b622aa64ed5306e3f266c2901f9c07230633dfd7fb3d5febf64a321bffd8b8fa",
+                "parent_skill_hash": "34e97af852a576ae64b602638e71c65b59faf6b5090c8f13c8f153a548d81962",
+                "components": [{"class": "discovery", "mechanism": "frontmatter_field",
+                                "skill_root": "skills/good-pr/SKILL.md",
+                                "target": {"field": "when_to_use"}, "removed_bytes": 56}],
+            }
+            expected = dict(expected_provenance)
+            expected.update({
+                "dir": str(root / "legacy" / "no-wtu"),
+                "skill_files": {"skills/good-pr/SKILL.md": str(root / "legacy" / "no-wtu" / "good-pr" / "SKILL.md")},
+                "isolation_warnings": [],
+            })
+            self.assertEqual(legacy, expected)
+            typed = si.materialize_trigger_arm(repo_root, manifest, "no-wtu", root / "typed")
+            self.assertIsInstance(typed, am.MaterializedArm)
+            self.assertEqual(typed.arm.provenance.as_dict(), expected_provenance)
+            typed_projection = typed.as_legacy_dict()
+            self.assertEqual(typed_projection["dir"], str(root / "typed" / "no-wtu"))
+            self.assertEqual(typed_projection["skill_files"], {
+                "skills/good-pr/SKILL.md": str(root / "typed" / "no-wtu" / "good-pr" / "SKILL.md"),
+            })
+            self.assertEqual(typed_projection["isolation_warnings"], [])
+            self.assertEqual(_tree_files(Path(typed.dir)), _tree_files(Path(legacy["dir"])))
+            tree, tree_hash, provenance = tm.trigger_tree_for_manifest(repo_root, manifest, root / "matrix", "no-wtu")
+            self.assertEqual(tree, root / "matrix" / "materialized" / "no-wtu" / "no-wtu")
+            self.assertEqual(tree_hash, expected_provenance["skill_hash"])
+            self.assertEqual(provenance, expected_provenance)
+            self.assertEqual(_tree_files(tree), _tree_files(Path(typed.dir)))
+            self.assertIs(sb.materialize_trigger_ablation, si.materialize_trigger_ablation)
+            self.assertEqual(
+                (Path(legacy["dir"]) / "good-pr" / "SKILL.md").read_text(encoding="utf-8"),
+                SKILL_FIXTURE.replace("when_to_use: When asked to review a PR, diff, or patch.\n", ""),
+            )
+
+    def test_trigger_materialization_rejection_messages_and_order(self):
+        cases = [
+            ("missing", "unknown ablation: missing"),
+            ("sim", "ablation sim is instruction-simulated; trigger ablations must declare a materialized removal"),
+            ("no-rp", "ablation no-rp is an answer-population ablation; trigger ablations must target discovery/trigger behavior"),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = self.repo(root, [self.SIM_ABL, self.SECTION_ABL])
+            manifest = sb.validate_manifest(path)
+            for ablation_id, message in cases:
+                with self.subTest(ablation=ablation_id):
+                    for materializer in (si.materialize_trigger_ablation, si.materialize_trigger_arm):
+                        with self.subTest(materializer=materializer.__name__):
+                            with self.assertRaises(si.AblationError) as rejected:
+                                materializer(root / "missing-source", manifest, ablation_id, root / "out")
+                            self.assertEqual(str(rejected.exception), message)
+                    with self.assertRaises(SystemExit) as rejected_matrix:
+                        tm.trigger_tree_for_manifest(root / "missing-source", manifest, root / "work", ablation_id)
+                    self.assertEqual(str(rejected_matrix.exception), message)
+            self.assertFalse((root / "out").exists())
+            self.assertFalse((root / "work").exists())
 
     def test_trigger_matrix_ablation_hash_comes_from_provenance(self):
         with tempfile.TemporaryDirectory() as td:
