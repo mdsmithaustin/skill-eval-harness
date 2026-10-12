@@ -892,7 +892,7 @@ def materialize_ablation(repo_root: Path, manifest: dict[str, Any], ablation: di
     return materialize(ValidatedAblation.validate(repo_root, manifest, ablation), out_root).as_legacy_dict()
 
 
-def materialize_trigger_ablation(repo_root: Path, manifest: dict[str, Any], ablation_id: str, out_root: Path) -> dict[str, Any]:
+def materialize_trigger_arm(repo_root: Path, manifest: dict[str, Any], ablation_id: str, out_root: Path) -> MaterializedArm:
     """Materialize a discovery/trigger-population ablation for autonomous trigger
     runners. This is the shared gate for Pi trigger and the trigger matrix, so
     they cannot diverge on which ablations are valid to mount."""
@@ -904,7 +904,12 @@ def materialize_trigger_ablation(repo_root: Path, manifest: dict[str, Any], abla
         raise AblationError(f"ablation {ablation_id} is instruction-simulated; trigger ablations must declare a materialized removal")
     if derived_population(components) != "trigger":
         raise AblationError(f"ablation {ablation_id} is an answer-population ablation; trigger ablations must target discovery/trigger behavior")
-    return materialize_ablation(repo_root, manifest, ablation, out_root)
+    return materialize(ValidatedAblation.validate(repo_root, manifest, ablation), out_root)
+
+
+def materialize_trigger_ablation(repo_root: Path, manifest: dict[str, Any], ablation_id: str, out_root: Path) -> dict[str, Any]:
+    """Return the historical trigger materialization dictionary."""
+    return materialize_trigger_arm(repo_root, manifest, ablation_id, out_root).as_legacy_dict()
 
 
 def canonical_trigger_query(query: str) -> str:

@@ -584,6 +584,21 @@ class AblationRunnerIntegrationTests(unittest.TestCase):
                 "isolation_warnings": [],
             })
             self.assertEqual(legacy, expected)
+            typed = si.materialize_trigger_arm(repo_root, manifest, "no-wtu", root / "typed")
+            self.assertIsInstance(typed, am.MaterializedArm)
+            self.assertEqual(typed.arm.provenance.as_dict(), expected_provenance)
+            typed_projection = typed.as_legacy_dict()
+            self.assertEqual(typed_projection["dir"], str(root / "typed" / "no-wtu"))
+            self.assertEqual(typed_projection["skill_files"], {
+                "skills/good-pr/SKILL.md": str(root / "typed" / "no-wtu" / "good-pr" / "SKILL.md"),
+            })
+            self.assertEqual(typed_projection["isolation_warnings"], [])
+            self.assertEqual(_tree_files(Path(typed.dir)), _tree_files(Path(legacy["dir"])))
+            tree, tree_hash, provenance = tm.trigger_tree_for_manifest(repo_root, manifest, root / "matrix", "no-wtu")
+            self.assertEqual(tree, root / "matrix" / "materialized" / "no-wtu" / "no-wtu")
+            self.assertEqual(tree_hash, expected_provenance["skill_hash"])
+            self.assertEqual(provenance, expected_provenance)
+            self.assertEqual(_tree_files(tree), _tree_files(Path(typed.dir)))
             self.assertIs(sb.materialize_trigger_ablation, si.materialize_trigger_ablation)
             self.assertEqual(
                 (Path(legacy["dir"]) / "good-pr" / "SKILL.md").read_text(encoding="utf-8"),
@@ -602,9 +617,11 @@ class AblationRunnerIntegrationTests(unittest.TestCase):
             manifest = sb.validate_manifest(path)
             for ablation_id, message in cases:
                 with self.subTest(ablation=ablation_id):
-                    with self.assertRaises(si.AblationError) as rejected:
-                        si.materialize_trigger_ablation(root / "missing-source", manifest, ablation_id, root / "out")
-                    self.assertEqual(str(rejected.exception), message)
+                    for materializer in (si.materialize_trigger_ablation, si.materialize_trigger_arm):
+                        with self.subTest(materializer=materializer.__name__):
+                            with self.assertRaises(si.AblationError) as rejected:
+                                materializer(root / "missing-source", manifest, ablation_id, root / "out")
+                            self.assertEqual(str(rejected.exception), message)
                     with self.assertRaises(SystemExit) as rejected_matrix:
                         tm.trigger_tree_for_manifest(root / "missing-source", manifest, root / "work", ablation_id)
                     self.assertEqual(str(rejected_matrix.exception), message)
