@@ -16292,6 +16292,24 @@ def _review_eligible(result: Mapping[str, Any]) -> bool:
     return _report_row_eligibility(result)[0] is True and result.get("stop_class") != StopClass.REFUSED.value
 
 
+def _review_population(
+    planned: tuple[_ReviewRun, ...],
+    by_identity: Mapping[str, Sequence[Mapping[str, Any]]],
+    attestation_errors: Sequence[Mapping[str, Any]],
+) -> _ReviewPopulation:
+    expected = {run.identity for run in planned}
+    design_blocked = any("run_dir" not in error for error in attestation_errors)
+    bad_paths = {error.get("run_dir") for error in attestation_errors}
+    admitted = tuple(run.identity for run in planned
+                     if not design_blocked and run.run_dir not in bad_paths
+                     and len(by_identity.get(run.identity, [])) == 1
+                     and by_identity[run.identity][0].get("run_base") == run.run_base
+                     and _review_eligible(by_identity[run.identity][0]))
+    return _ReviewPopulation(planned, admitted,
+        tuple(sorted(expected - set(by_identity))), tuple(sorted(set(by_identity) - expected)),
+        tuple(sorted(key for key, rows in by_identity.items() if len(rows) != 1)))
+
+
 def _review_lead_row(lead: _ReviewLead) -> dict[str, Any]:
     row: dict[str, Any] = {"evidence_class": "diagnostic", "assertion": lead.assertion.identity}
     if isinstance(lead, _NeverPasses):
@@ -16340,19 +16358,9 @@ def _verifier_review(report: dict[str, Any], cases: list[dict[str, Any]],
             coordinate, row["run_dir"], str(runs / row["run_dir"]), row["planned_skill_tree_hash"],
             row["task_sha256"], source_hash, None if source is None else source.grading_coordinate))
     planned = tuple(sorted(planned_rows, key=lambda run: run.coordinate.key))
-    expected = {run.identity: run for run in planned}
     coverage = report["answer_design"]
-    errors = coverage.get("attestation_errors", [])
-    design_blocked = any("run_dir" not in error for error in errors)
-    bad_paths = {error.get("run_dir") for error in errors}
-    admitted = tuple(run.identity for run in planned
-                     if not design_blocked and run.run_dir not in bad_paths
-                     and len(by_identity.get(run.identity, [])) == 1
-                     and by_identity[run.identity][0].get("run_base") == run.run_base
-                     and _review_eligible(by_identity[run.identity][0]))
-    population = _ReviewPopulation(planned, admitted,
-        tuple(sorted(set(expected) - set(by_identity))), tuple(sorted(set(by_identity) - set(expected))),
-        tuple(sorted(key for key, rows in by_identity.items() if len(rows) != 1)))
+    population = _review_population(planned, by_identity, coverage.get("attestation_errors", []))
+    admitted = population.admitted
     reasons = [] if report["availability"] == "complete" else ["source_report_incomplete"]
     if not plan:
         reasons.append("answer_design_unverified")
@@ -16510,19 +16518,12 @@ def _read_verifier_review(report: dict[str, Any]) -> dict[str, Any]:
         for result in report["results"]:
             by_identity.setdefault(_report_attempt_identity(result), []).append(result)
         coverage = report["answer_design"]
-        errors = coverage.get("attestation_errors", [])
-        design_blocked = any("run_dir" not in error for error in errors)
-        bad_paths = {error.get("run_dir") for error in errors}
-        admitted = [run.identity for run in planned.values()
-                    if not design_blocked and run.run_dir not in bad_paths
-                    and len(by_identity.get(run.identity, [])) == 1
-                    and by_identity[run.identity][0].get("run_base") == run.run_base
-                    and _review_eligible(by_identity[run.identity][0])]
-        for key, expected in (("admitted", admitted), ("missing", sorted(set(planned) - set(by_identity))),
-                              ("extra", sorted(set(by_identity) - set(planned))),
-                              ("duplicates", sorted(key for key, rows in by_identity.items() if len(rows) != 1))):
+        computed = _review_population(tuple(planned.values()), by_identity, coverage.get("attestation_errors", []))
+        for key, expected in (("admitted", list(computed.admitted)), ("missing", list(computed.missing)),
+                              ("extra", list(computed.extra)), ("duplicates", list(computed.duplicates))):
             if population[key] != expected:
                 raise ValueError(f"diagnostic {key} population mismatch")
+        admitted = computed.admitted
         if len(planned) != coverage.get("expected_runs", 0):
             raise ValueError("diagnostic denominator differs from answer design")
         for identity in admitted:
