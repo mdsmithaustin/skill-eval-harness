@@ -241,6 +241,33 @@ sys.exit({exit_code})
                 metadata = json.loads((runs / run_dir / "metadata.json").read_text())
                 self.assertIsNone(metadata["cost_normalized"].get("total_cost"))
 
+    def test_native_startup_preserves_timeout_floor_and_later_child_start(self):
+        for delayed_launch in (1, 2):
+            with self.subTest(delayed_launch=delayed_launch), tempfile.TemporaryDirectory() as td:
+                fixture = self.fixture(Path(td), "native")
+                _, runs, run_dir, marker, _, flags = fixture
+                stub = Path(flags[-1])
+                delay = (f"startup_counter = Path({str(Path(td) / 'startups')!r})\n"
+                         "starts = len(startup_counter.read_text().splitlines()) if startup_counter.exists() else 0\n"
+                         "with startup_counter.open('a') as handle:\n    handle.write('launched\\n')\n"
+                         f"if starts == {delayed_launch - 1}:\n    time.sleep(1.25)\n")
+                stub.write_text(stub.read_text().replace("from pathlib import Path\n",
+                                                       "from pathlib import Path\n" + delay, 1))
+                code, _, stderr = self.invoke(fixture, "--assumed-cost-per-run-usd", "0.01")
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(marker.read_text(), "started\nstarted\n")
+                ledger = self.ledger(runs)
+                self.assertEqual([row["state"] for row in ledger["calls"]], ["settled", "settled"])
+                self.assertEqual(ledger["calls"][0]["charge"],
+                                 {"basis": "assumed", "amount_usd": "0.06",
+                                  "reason": "runner_cost_incomplete_after_timeout",
+                                  "observed_subtotal_usd": "0.06"})
+                metadata = json.loads((runs / run_dir / "metadata.json").read_text())
+                self.assertEqual(metadata["returncode"], 124)
+                self.assertTrue(metadata["timed_out"])
+                self.assertFalse(metadata["provider_response_complete"])
+                self.assertIsNone(metadata["cost_normalized"].get("total_cost"))
+
     def test_exited_claude_invalid_usage_keeps_observed_dollars_and_raw_rejection(self):
         for route in ("claude", "native"):
             for process_code in (0, 7):
