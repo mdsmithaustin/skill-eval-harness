@@ -192,6 +192,7 @@ sys.exit({exit_code})
 
     def invoke(self, fixture, *flags):
         tasks, runs, _, marker, command, backend = fixture
+        caller_stderr = sys.stderr
         popen = subprocess.Popen
 
         def start(*args, **kwargs):
@@ -222,7 +223,7 @@ sys.exit({exit_code})
                         if pipe is not None:
                             pipe.close()
                 if cleanup_error is not None:
-                    print(f"native price fixture could not reap child {child.pid}: {cleanup_error}", file=sys.stderr)
+                    print(f"native price fixture could not reap child {child.pid}: {cleanup_error}", file=caller_stderr)
                 if not isinstance(error, Exception):
                     raise
                 raise AssertionError(f"native price fixture bootstrap failed: {error}") from error
