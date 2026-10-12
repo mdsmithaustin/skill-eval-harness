@@ -579,6 +579,14 @@ outside `[0, 1]` before `statistics` can aggregate them. Attempted, observed, an
 derived from the same deeply frozen attempt dispositions, preventing consumers from assembling
 inconsistent coverage or relying on Python object identity.
 
+Verifier diagnostics use `skill_benchmark._review_population` to calculate admission and
+missing, extra, and duplicate attempts in one place. Its frozen `_ReviewPopulation` preserves the
+planned order supplied by each caller. Fresh generation supplies coordinate-sorted runs and owns
+assertion declarations, strict severity, and consumed source text. The saved reader supplies
+validated runs in persisted order and separately checks the envelope, denominator, task and
+treatment bindings, assertion applicability, cohort membership, hypotheses, and judge identity.
+The shared calculation retains no result index and changes no grade, rate, or gate.
+
 The pairing key carries `CaseId`, `ModelId | None`, `RunNumber`, and the closed
 `ExperimentalPopulation` enum. The pair also carries a contrast whose canonical factor coordinates
 separate activation, skill set, and content revision; those differing treatment coordinates do not
