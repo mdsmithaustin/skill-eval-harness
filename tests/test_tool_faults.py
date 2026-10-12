@@ -429,3 +429,111 @@ class DirectCallableFaultTests(unittest.TestCase):
             self.assertIsNone(case["mean_deltas"]["commands"])
             self.assertEqual(case["metric_pairing"]["commands"]["expected_pairs"], 1)
             self.assertEqual(case["metric_pairing"]["commands"]["observed_pairs"], 0)
+
+
+class ToolObservationSnapshotTests(unittest.TestCase):
+    def journal(self, *, close_run=True):
+        import tool_fault_contracts as domain
+
+        identity = {"task_sha256": "sha256:" + "a" * 64,
+                    "case_input_sha256": "sha256:" + "b" * 64,
+                    "run": {"case_id": "c", "variant": "with_skill", "run_number": 1,
+                            "model": None, "population": "answer"},
+                    "faults": [{"tool": "search", "output": {"items": [{"text": "denied"}]},
+                                "is_error": True}], "expected_turns": 2}
+        rows = []
+        def append(transition):
+            rows.append(domain.journal_record(rows, transition))
+        append({"type": "opened", "identity": identity})
+        for turn in (1, 2):
+            append({"type": "turn_opened", "turn": turn})
+            resolution = domain._Resolution("fault", domain.fault_identity(identity["case_input_sha256"], 1),
+                {"items": [{"text": "denied"}]}, {"availability": "known", "value": True})
+            append(domain.callable_preparation(identity, turn, turn, "search",
+                                               {"queries": [{"text": f"query-{turn}"}]}, resolution))
+            append({"type": "confirmed", "turn": turn, "exchange": turn,
+                    "prepared_sha256": rows[-1]["record_sha256"]})
+            append({"type": "turn_closed", "turn": turn})
+        if close_run:
+            append({"type": "closed"})
+        return identity, rows
+
+    def test_nested_constructor_input_mutation_cannot_change_assessments(self):
+        import tool_fault_contracts as domain
+
+        identity, rows = self.journal()
+        observation = domain.ToolObservation(identity, tuple(rows))
+        identity["run"]["variant"] = "without_skill"
+        identity["faults"][0]["output"]["items"][0]["text"] = "changed declaration"
+        rows[2]["input"]["queries"][0]["text"] = "changed input"
+        rows[2]["payload"]["output"]["items"][0]["text"] = "changed output"
+        rows.clear()
+        self.assertEqual(observation.coverage, "closed")
+        self.assertEqual(observation.assess(domain.Count("tool_calls")), domain.Observed(2))
+        self.assertEqual(observation.assess(domain.ExactOutput(1)),
+                         domain.Observed({"items": ({"text": "denied"},)}))
+        first = observation.canonical_rows()[0]
+        self.assertEqual(first["identity"]["run"]["variant"], "with_skill")
+        self.assertEqual(first["input"], {"queries": [{"text": "query-1"}]})
+
+    def test_canonical_rows_are_detached_on_every_projection(self):
+        import tool_fault_contracts as domain
+
+        identity, rows = self.journal()
+        observation = domain.ToolObservation(identity, tuple(rows))
+        projected = observation.canonical_rows()
+        projected[0]["identity"]["faults"][0]["output"]["items"][0]["text"] = "changed fault"
+        projected[0]["input"]["queries"].append({"text": "changed input"})
+        projected[0]["payload"]["output"]["items"][0]["text"] = "changed output"
+        projected[0]["payload"]["delivered_error"]["reason"] = "changed reason"
+        projected.clear()
+        fresh = observation.canonical_rows()
+        self.assertEqual([row["exchange"] for row in fresh], [1, 2])
+        self.assertEqual(fresh[0]["identity"]["faults"][0]["output"], {"items": [{"text": "denied"}]})
+        self.assertEqual(fresh[0]["input"], {"queries": [{"text": "query-1"}]})
+        self.assertEqual(fresh[0]["payload"]["output"], {"items": [{"text": "denied"}]})
+        self.assertEqual(observation.assess(domain.Count("errors")), domain.Unavailable("output_only_api"))
+
+    def test_turn_selection_and_value_semantics_preserve_source_fields(self):
+        import dataclasses
+        import inspect
+
+        import tool_fault_contracts as domain
+
+        identity, rows = self.journal(close_run=False)
+        observation = domain.ToolObservation(identity, tuple(rows))
+        first = observation.for_turn(1)
+        second = observation.for_turn(2)
+        self.assertEqual(observation.coverage, "open")
+        self.assertEqual(first.coverage, "closed")
+        self.assertEqual(second.coverage, "closed")
+        self.assertEqual(first.assess(domain.Count("tool_calls")), domain.Observed(1))
+        self.assertEqual(second.canonical_rows()[0]["input"], {"queries": [{"text": "query-2"}]})
+        self.assertEqual(first, domain.ToolObservation(identity, tuple(rows), 1))
+        self.assertNotEqual(first, second)
+        public_fields = ("_identity", "_rows", "turn", "reason")
+        self.assertEqual(tuple(inspect.signature(domain.ToolObservation).parameters), public_fields)
+        expected_repr = "ToolObservation(" + ", ".join(
+            f"{name}={getattr(first, name)!r}" for name in public_fields) + ")"
+        self.assertEqual(repr(first), expected_repr)
+        self.assertEqual(tuple(field.name for field in dataclasses.fields(first) if field.compare), public_fields)
+        self.assertEqual(tuple(field.name for field in dataclasses.fields(first) if field.hash is not False),
+                         public_fields)
+        with self.assertRaises(TypeError):
+            hash(first)
+        with self.assertRaisesRegex(ValueError, "positive integers"):
+            observation.for_turn(True)
+
+    def test_gap_reason_and_constructor_rejection_survive_turn_projection(self):
+        import tool_fault_contracts as domain
+
+        identity, rows = self.journal(close_run=False)
+        observation = domain.ToolObservation(identity, tuple(rows), reason="invalid_tool_observation_tail")
+        self.assertEqual(observation.for_turn(1).coverage, "open")
+        self.assertEqual(observation.for_turn(1).assess(domain.Count("tool_calls")),
+                         domain.Unavailable("invalid_tool_observation_tail"))
+        self.assertEqual(observation.for_turn(1).assess(domain.ExactOutput(1)),
+                         domain.Observed({"items": ({"text": "denied"},)}))
+        rows[2]["payload"]["output"]["items"][0]["text"] = "forged output"
+        with self.assertRaisesRegex(ValueError, "invalid tool journal chain"):
+            domain.ToolObservation(identity, tuple(rows))
