@@ -1231,6 +1231,97 @@ class VerifierReviewTests(unittest.TestCase):
             self.assertEqual((diagnostic["availability"], diagnostic["review_queue"]), ("not_applicable", []))
             self.assertIn("Diagnostic availability is `not_applicable`", sb.github_summary_from_report(report, review_diagnostics=True))
 
+    def assert_saved_diagnostics_rejected(self, report):
+        report["verifier_review"]["basis_sha256"] = sb._review_basis(report)
+        self.assertEqual(sb._read_verifier_review(json.loads(json.dumps(report))),
+                         {"evidence_class": "diagnostic", "availability": "unavailable",
+                          "reasons": ["invalid_saved_diagnostics"],
+                          "observed": {"evidence_class": "diagnostic", "leads": []}})
+
+    def replace_saved_assertion(self, review, identity, value):
+        value["definition_sha256"] = sb.canonical_json_sha256(value["definition"])
+        replacement = sb.canonical_json_sha256(value)
+        del review["assertions"][identity]
+        review["assertions"][replacement] = value
+        for lead in review["leads"]:
+            for field in ("assertion", "judge_assertion"):
+                if lead.get(field) == identity:
+                    lead[field] = replacement
+
+    def test_population_order_and_saved_roundtrip_preserve_admission_order(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td))
+            report = self.report(path, runs, judged)
+            review = report["verifier_review"]
+            population = review["population"]
+            self.assertEqual([(row["variant"], row["run_number"]) for row in population["planned"]],
+                             [("with_skill", 1), ("with_skill", 2), ("without_skill", 1), ("without_skill", 2)])
+            self.assertEqual({key: population[key] for key in ("missing", "extra", "duplicates")},
+                             {"missing": [], "extra": [], "duplicates": []})
+            self.assertEqual(sb._read_verifier_review(json.loads(json.dumps(report))), review)
+            population["planned"].reverse()
+            population["admitted"].reverse()
+            for lead in review["leads"]:
+                if lead["signal"] == "never_passes":
+                    lead["runs"].reverse()
+            self.assertEqual(sb._read_verifier_review(json.loads(json.dumps(report))), review)
+
+    def test_saved_planned_task_treatment_and_grading_bindings_reject_tampering(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td))
+            original = self.report(path, runs, judged)
+            for change in ("task", "treatment", "grading"):
+                with self.subTest(change=change):
+                    report = copy.deepcopy(original)
+                    planned = report["verifier_review"]["population"]["planned"][0]
+                    if change == "task":
+                        planned["task_sha256"] = "sha256:" + "0" * 64
+                    elif change == "treatment":
+                        planned["treatment"] = "sha256:" + "0" * 64
+                    else:
+                        planned["grading_coordinate"]["run_number"] = 2
+                    self.assert_saved_diagnostics_rejected(report)
+
+    def test_saved_duplicate_attempt_and_recomputed_assertion_references_reject_tampering(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td))
+            original = self.report(path, runs, judged)
+            for change in ("attempt", "label", "applicability"):
+                with self.subTest(change=change):
+                    report = copy.deepcopy(original)
+                    review = report["verifier_review"]
+                    if change == "attempt":
+                        report["results"].append(copy.deepcopy(report["results"][0]))
+                    else:
+                        identity = next(key for key, ref in review["assertions"].items() if ref["type"] == "contains")
+                        value = copy.deepcopy(review["assertions"][identity])
+                        if change == "label":
+                            value["ordinal"] += 10
+                            review["assertions"][sb.canonical_json_sha256(value)] = value
+                        else:
+                            value["definition"]["declared"]["only_variants"] = ["without_skill"]
+                            value["definition"]["expanded"] = copy.deepcopy(value["definition"]["declared"])
+                            self.replace_saved_assertion(review, identity, value)
+                    self.assert_saved_diagnostics_rejected(report)
+
+    def test_saved_cohort_membership_and_judge_coordinate_reject_tampering(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, runs, judged = self.fixture(Path(td))
+            original = self.report(path, runs, judged)
+            for change in ("cohort", "judge"):
+                with self.subTest(change=change):
+                    report = copy.deepcopy(original)
+                    review = report["verifier_review"]
+                    if change == "cohort":
+                        lead = next(lead for lead in review["leads"] if lead["signal"] == "never_passes")
+                        lead["runs"].pop()
+                    else:
+                        lead = next(lead for lead in review["leads"] if lead["signal"] == "oracle_disagreement")
+                        lead["judge_task_id"] = "c:without_skill:run-99:quality"
+                        result = next(row for row in report["results"] if sb._report_attempt_identity(row) == lead["runs"][0])
+                        result["qualitative_assertions"][0]["judge_task_id"] = lead["judge_task_id"]
+                    self.assert_saved_diagnostics_rejected(report)
+
     def test_saved_reader_rejects_stale_basis_and_incompatible_leads_without_affecting_gates(self):
         with tempfile.TemporaryDirectory() as td:
             path, runs, judged = self.fixture(Path(td))
