@@ -1,7 +1,13 @@
+import io
 import json
+import os
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -492,23 +498,203 @@ Path('notes.txt').write_text('provider mutation')
             self.assertFalse((setup[1] / 'spend').exists())
             self.assertFalse(setup[3].exists())
 
+    @contextmanager
+    def timeout_fixture(self, root, *, startup_delay=0):
+        setup = self.batch(root)
+        ready = root / 'priced-ready'
+        payload = {'type': 'result', 'result': json.dumps({'passed': True}),
+                   'usage': {'input_tokens': 3, 'output_tokens': 4}, 'total_cost_usd': 0.6}
+        setup[2].write_text(f'''#!{sys.executable}
+import json, os, sys
+from pathlib import Path
+import time
+time.sleep({startup_delay})
+print({json.dumps(payload)!r} if '--output-format' in sys.argv else '{{"passed": true}}')
+sys.stdout.flush()
+with Path({str(ready)!r}).open('a') as handle:
+    handle.write(str(os.getpid()) + '\\n')
+prompt = sys.stdin.read()
+with Path({str(setup[3])!r}).open('a') as handle:
+    handle.write('started\\n')
+with Path({str(root / 'prompts.jsonl')!r}).open('a') as handle:
+    handle.write(json.dumps(prompt) + '\\n')
+print('deterministic judge stderr', file=sys.stderr)
+time.sleep(30)
+''')
+        caller_stderr = sys.stderr
+        popen = subprocess.Popen
+        real_invoke = sb.claude_cli_invoke
+        children = []
+
+        def reclaim(child):
+            failures = []
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except BaseException as error:
+                failures.append(f'group kill: {error}')
+                try:
+                    child.kill()
+                except ProcessLookupError:
+                    pass
+                except BaseException as failure:
+                    failures.append(f'leader kill: {failure}')
+            try:
+                child.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    child.kill()
+                    child.wait(timeout=1)
+                except BaseException as error:
+                    failures.append(f'reap: {error}')
+            except BaseException as error:
+                failures.append(f'reap: {error}')
+            finally:
+                for pipe in (child.stdin, child.stdout, child.stderr):
+                    if pipe is not None:
+                        try:
+                            pipe.close()
+                        except BaseException as error:
+                            failures.append(f'pipe close: {error}')
+            for failure in failures:
+                print(f'judge timeout fixture cleanup failed for {child.pid}: {failure}', file=caller_stderr)
+
+        def start(*args, **kwargs):
+            if args[0][0] != str(setup[2]):
+                return popen(*args, **kwargs)
+            previous = ready.read_text() if ready.exists() else ''
+            child = popen(*args, **kwargs)
+            children.append(child)
+            try:
+                expected = previous + f'{child.pid}\n'
+                deadline = time.monotonic() + 10
+                while True:
+                    if child.poll() is not None:
+                        raise AssertionError(f'exited before readiness: {child.returncode}')
+                    if ready.exists() and ready.read_text() == expected and child.poll() is None:
+                        return child
+                    if time.monotonic() >= deadline:
+                        raise AssertionError('did not publish priced readiness')
+                    time.sleep(0.01)
+            except BaseException as error:
+                reclaim(child)
+                message = f'judge timeout fixture bootstrap failed for {child.pid}: {error}'
+                print(message, file=caller_stderr)
+                if not isinstance(error, Exception):
+                    raise
+                raise AssertionError(message) from error
+
+        def timed_invoke(prompt, **options):
+            return real_invoke(prompt, timeout=1, **options)
+
+        with mock.patch('process_runtime.subprocess.Popen', side_effect=start), mock.patch.object(
+                sb, 'claude_cli_invoke', side_effect=timed_invoke):
+            try:
+                yield setup
+            finally:
+                unfinished = [child for child in children if child.returncode is None or
+                              any(pipe is not None and not pipe.closed
+                                  for pipe in (child.stdin, child.stdout, child.stderr))]
+                if unfinished:
+                    message = 'judge timeout fixture native owner left a child or pipe unreclaimed'
+                    print(message, file=caller_stderr)
+                    for child in unfinished:
+                        reclaim(child)
+                    if sys.exc_info()[0] is None:
+                        raise AssertionError(message)
+
+    def test_timeout_fixture_bootstrap_failures_reclaim_and_report_to_caller(self):
+        popen = subprocess.Popen
+        exists = Path.exists
+        read_text = Path.read_text
+        for failure in ('premature_exit', 'missing_readiness', 'read_error', 'interruption', 'cleanup_error'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                ready = root / 'priced-ready'
+                children = []
+                interruption = KeyboardInterrupt('judge bootstrap interrupted')
+                caller_stderr = io.StringIO()
+
+                def record(*args, children=children, **kwargs):
+                    child = popen(*args, **kwargs)
+                    children.append(child)
+                    return child
+
+                def check_ready(path, ready=ready, children=children, failure=failure, interruption=interruption):
+                    if path == ready and children:
+                        if failure == 'interruption':
+                            raise interruption
+                        if failure == 'read_error':
+                            return True
+                    return exists(path)
+
+                def read_ready(path, *args, ready=ready, children=children, failure=failure, **kwargs):
+                    if path == ready and children and failure == 'read_error':
+                        raise OSError('readiness read failed')
+                    return read_text(path, *args, **kwargs)
+
+                with mock.patch('subprocess.Popen', side_effect=record), mock.patch.object(
+                        sys, 'stderr', caller_stderr), self.timeout_fixture(root) as setup:
+                    script = ('import sys\nsys.exit(7)\n' if failure == 'premature_exit' else
+                              'import time\ntime.sleep(30)\n')
+                    setup[2].write_text(f'#!{sys.executable}\n{script}')
+                    with mock.patch.object(Path, 'exists', check_ready), mock.patch.object(
+                            Path, 'read_text', read_ready):
+                        kill = os.killpg
+                        with mock.patch('os.killpg', side_effect=(
+                                OSError('group kill failed') if failure == 'cleanup_error' else kill)):
+                            if failure == 'interruption':
+                                with self.assertRaises(KeyboardInterrupt) as raised:
+                                    self.execute(root, setup)
+                                self.assertIs(raised.exception, interruption)
+                            else:
+                                message = ('exited before readiness: 7' if failure == 'premature_exit' else
+                                           'readiness read failed' if failure == 'read_error' else
+                                           'did not publish priced readiness')
+                                with self.assertRaisesRegex(AssertionError, message):
+                                    self.execute(root, setup)
+                self.assertEqual(len(children), 1)
+                self.assertIsNotNone(children[0].returncode)
+                self.assertTrue(all(pipe.closed for pipe in
+                                    (children[0].stdin, children[0].stdout, children[0].stderr)))
+                self.assertIn('judge timeout fixture bootstrap failed', caller_stderr.getvalue())
+                if failure == 'cleanup_error':
+                    self.assertIn('cleanup failed', caller_stderr.getvalue())
+                    self.assertIn('group kill failed', caller_stderr.getvalue())
+
+    def test_timeout_fixture_resource_audit_fails_before_reclaim(self):
+        for interrupted in (False, True):
+            with self.subTest(interrupted=interrupted), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                caller_stderr = io.StringIO()
+                interruption = KeyboardInterrupt('judge caller interrupted')
+                error_type = KeyboardInterrupt if interrupted else AssertionError
+                with mock.patch.object(sys, 'stderr', caller_stderr), self.assertRaises(error_type) as raised:
+                    with self.timeout_fixture(root) as setup:
+                        child = subprocess.Popen([str(setup[2])], stdin=subprocess.PIPE,
+                                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                 start_new_session=True)
+                        self.assertIsNone(child.returncode)
+                        if interrupted:
+                            raise interruption
+                if interrupted:
+                    self.assertIs(raised.exception, interruption)
+                else:
+                    self.assertIn('native owner left a child or pipe unreclaimed', str(raised.exception))
+                self.assertIn('native owner left a child or pipe unreclaimed', caller_stderr.getvalue())
+                self.assertIsNotNone(child.returncode)
+                self.assertTrue(all(pipe.closed for pipe in (child.stdin, child.stdout, child.stderr)))
+
     def test_actual_timeout_floor_settles_before_later_refusal(self):
         for startup_delay, assumption, basis in ((0, None, 'unpriced'), (0, '0.1', 'assumed'),
                                                   (1.25, None, 'unpriced'), (1.25, '0.1', 'assumed')):
             with self.subTest(startup_delay=startup_delay, assumption=assumption), tempfile.TemporaryDirectory() as td:
                 root = Path(td)
-                setup = self.batch(root)
-                source = setup[2].read_text().replace('from pathlib import Path\n',
-                                                    f'from pathlib import Path\nimport time\ntime.sleep({startup_delay})\n')
-                setup[2].write_text(source)
-                setup[2].write_text(setup[2].read_text() + '\nimport time\nsys.stdout.flush()\ntime.sleep(30)\n')
-                real_invoke = sb.claude_cli_invoke
-                def timed_invoke(prompt, real_invoke=real_invoke, **options):
-                    return real_invoke(prompt, timeout=1, **options)
                 flags = ('--max-cost-usd', '0.5', '--judge-runs', '2')
                 if assumption:
                     flags += ('--assumed-cost-per-run-usd', assumption)
-                with mock.patch.object(sb, 'claude_cli_invoke', side_effect=timed_invoke):
+                with self.timeout_fixture(root, startup_delay=startup_delay) as setup:
                     code, rows, _, stderr = self.execute(root, setup, flags=flags)
                 self.assertEqual(code, 2, stderr)
                 self.assertEqual(setup[3].read_text(), 'started\n')
