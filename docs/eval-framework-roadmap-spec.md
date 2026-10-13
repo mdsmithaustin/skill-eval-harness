@@ -335,7 +335,7 @@ assumed.
 - **Goal:** deterministic re-runs that pay nothing for external dependencies, by recording tool
   inputs and outputs.
 - **Abstractions used or changed:** this lives in the runner, not core grading. Recording sits
-  beside `write_trace_artifacts` (`:1638`): a `tool-replay.json` keyed per tool, with
+  beside `write_trace_artifacts` (`:1643`): a `tool-replay.json` keyed per tool, with
   `sanitize` and `version`. Modes (`auto`, `record`, `off`, `strict`) come from an environment
   variable that `run_codex` and the Pi and subagent runners read.
 - **Design:** orthogonal to the disk re-grade the harness already does. Replay makes the agent
@@ -346,8 +346,8 @@ assumed.
 
 ### 2.4 OpenTelemetry GenAI normalization target
 - **Goal:** make the trace adapter boundary a standard rather than a bespoke schema.
-- **Abstractions used or changed:** `normalize_trace_record` (`:501`) and
-  `normalize_trace_records` (`:1339`) keep their inputs but emit OTel GenAI semantic-key
+- **Abstractions used or changed:** `normalize_trace_record` (`:506`) and
+  `normalize_trace_records` (`:1344`) keep their inputs but emit OTel GenAI semantic-key
   attributes; the `events.json` schema version bumps. Process and efficiency assertions read the
   new keys with backward-compatible fallbacks.
 - **Design:** additive schema. An old `events.json` still grades.
