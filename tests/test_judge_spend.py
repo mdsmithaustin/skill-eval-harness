@@ -493,10 +493,14 @@ Path('notes.txt').write_text('provider mutation')
             self.assertFalse(setup[3].exists())
 
     def test_actual_timeout_floor_settles_before_later_refusal(self):
-        for assumption, basis in ((None, 'unpriced'), ('0.1', 'assumed')):
-            with self.subTest(assumption=assumption), tempfile.TemporaryDirectory() as td:
+        for startup_delay, assumption, basis in ((0, None, 'unpriced'), (0, '0.1', 'assumed'),
+                                                  (1.25, None, 'unpriced'), (1.25, '0.1', 'assumed')):
+            with self.subTest(startup_delay=startup_delay, assumption=assumption), tempfile.TemporaryDirectory() as td:
                 root = Path(td)
                 setup = self.batch(root)
+                source = setup[2].read_text().replace('from pathlib import Path\n',
+                                                    f'from pathlib import Path\nimport time\ntime.sleep({startup_delay})\n')
+                setup[2].write_text(source)
                 setup[2].write_text(setup[2].read_text() + '\nimport time\nsys.stdout.flush()\ntime.sleep(30)\n')
                 real_invoke = sb.claude_cli_invoke
                 def timed_invoke(prompt, real_invoke=real_invoke, **options):
