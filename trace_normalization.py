@@ -181,11 +181,16 @@ def detect_trigger_records(records: Iterable[dict[str, Any]], copied_paths: list
             return TriggerDetection.absent()
         return TriggerDetection.from_texts(TriggerEvidenceKind.MOUNTED_PATH, assessed.value)
 
-    evidence: list[str] = []
     materialized = list(records)
     event_doc, _ = normalize_trace_records(
         materialized, source=source, pi_stream=pi_stream)
-    for event in event_doc["events"]:
+    return detect_trigger_events(event_doc["events"], copied_paths)
+
+
+def detect_trigger_events(events: Iterable[dict[str, Any]], copied_paths: list[Path]) -> TriggerDetection:
+    """Derive mounted-path evidence from normalized completed operations."""
+    evidence: list[str] = []
+    for event in events:
         if not event_is_completed(event) or event.get("is_error") is True:
             continue
         exit_code = event.get("exit_code")

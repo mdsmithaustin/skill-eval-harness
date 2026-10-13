@@ -38,6 +38,7 @@ from unittest import mock
 from helpers import (
     CLAUDE_POST_RESULT_RECORDS,
     assert_dies,
+    claude_stream_records,
     claude_streams_ending_after_result,
     run_cli,
     signal_mid_run,
@@ -46,9 +47,11 @@ from helpers import (
     write_sleeping_agents,
 )
 
+import json_contracts as jc
 import run_pi_trigger_eval as tr
 import run_trigger_matrix as tm
 import skill_benchmark as sb
+import trace_normalization as tn
 from trigger_contracts import (
     InvocationOutcome,
     InvocationState,
@@ -928,6 +931,19 @@ class ClaudeDetectionTests(unittest.TestCase):
     def _adapter(self):
         return tm.ClaudeAdapter()
 
+    def test_successful_invocation_decodes_each_protocol_record_once(self):
+        stdout = "\n".join(map(json.dumps, claude_stream_records())) + "\n"
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(tm.ClaudeAdapter, "_run_argv", return_value=completed_invocation(stdout)), \
+             mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True), \
+             mock.patch.object(jc, "parse_stream_json", wraps=jc.parse_stream_json) as decode, \
+             mock.patch.object(tn, "parse_stream_json", wraps=tn.parse_stream_json) as protocol_decode:
+            result = self._adapter().invoke("q", None, Path(td) / "run", 1)
+        self.assertIs(result.state, InvocationState.COMPLETE)
+        self.assertIsNone(result.provider_error)
+        self.assertEqual(result.stdout, stdout)
+        self.assertEqual(decode.call_count + protocol_decode.call_count, 8)
+
     def test_completed_skill_tool_use_by_name_is_trigger_evidence(self):
         call = {"type": "assistant", "message": {"content": [
             {"type": "tool_use", "id": "load-1", "name": "Skill",
@@ -964,8 +980,17 @@ class ClaudeDetectionTests(unittest.TestCase):
                 {"type": "tool_result", "tool_use_id": "read-1", "content": "ok"}]}}),
             json.dumps({"type": "result", "subtype": "success", "result": "done"}),
         ])
-        detection = self._adapter().detect(completed_invocation(stream), ["demo-reviewer"], [mounted])
-        self.assertTrue(detection.triggered)
+        with mock.patch.object(tn, "normalize_trace_records", wraps=tn.normalize_trace_records) as normalize, \
+             mock.patch.object(tm, "normalize_trace_records", wraps=tm.normalize_trace_records) as prepare:
+            detection = self._adapter().detect(completed_invocation(stream), ["demo-reviewer"], [mounted])
+        self.assertEqual(detection.legacy_evidence, [str(mounted)])
+        self.assertEqual(prepare.call_count + normalize.call_count, 1)
+
+    def test_custom_claude_name_keeps_the_declared_fallback_dialect(self):
+        adapter = self._adapter()
+        adapter.name = "unknown-dialect"
+        with self.assertRaisesRegex(ValueError, "unsupported trace source 'unknown-dialect'"):
+            adapter.detect(completed_invocation('{"type":"result"}\n'), ["demo"], [])
 
     def test_max_turns_is_a_completed_observation_window(self):
         # Hitting --max-turns exits 1, but the model had its whole window to
@@ -982,12 +1007,14 @@ class ClaudeDetectionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(tm.ClaudeAdapter, "_run_argv", staticmethod(fake_run)), \
-             mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True):
+             mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True), \
+             mock.patch.object(tm, "parse_trace_jsonl_text", wraps=tm.parse_trace_jsonl_text) as protocol:
             result = tm.ClaudeAdapter().invoke("q", "haiku", Path(td) / "run", 1)
         self.assertIs(result.state, InvocationState.COMPLETE)
         self.assertTrue(result.observation_complete)
         self.assertIsNone(result.provider_error)
         self.assertEqual(result.returncode, 1)
+        self.assertEqual(protocol.call_count, 1)
 
     def test_max_turns_subtype_does_not_reclassify_timeout_or_spawn_failure(self):
         stdout = json.dumps({"type": "result", "subtype": "error_max_turns"})
@@ -1099,10 +1126,12 @@ class ClaudeDetectionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(tm.ClaudeAdapter, "_run_argv", staticmethod(fake_run)), \
-             mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True):
+             mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True), \
+             mock.patch.object(tm, "parse_trace_jsonl_text", wraps=tm.parse_trace_jsonl_text) as protocol:
             result = tm.ClaudeAdapter().invoke("q", None, Path(td) / "run", 1)
         self.assertIs(result.state, InvocationState.COMPLETE)
         self.assertIsNone(result.provider_error)
+        self.assertEqual(protocol.call_count, 1)
         detection = self._adapter().detect(result, ["probe-plugin:tidy-commit"], [])
         self.assertEqual(detection.legacy_evidence, ["Skill tool invoked: probe-plugin:tidy-commit"])
         # Every recording that continues after `result` is a complete
@@ -3271,6 +3300,48 @@ class CatalogAttributionTests(unittest.TestCase):
     def run_rows(self, manifest, rows, **kwargs):
         return tm.run_matrix(manifest, rows, agents=["stub"], models=[None],
                              runs_per_query=2, timeout=2, workers=1, **kwargs)
+
+    def test_claude_selected_skills_use_public_detection_dispatch(self):
+        from trigger_contracts import TriggerDetection, parse_skill_constraints
+
+        class CustomClaude(tm.ClaudeAdapter):
+            def detect(self, invocation, names, paths):
+                return TriggerDetection.from_texts(TriggerEvidenceKind.SKILL_TOOL, [names[0]])
+
+        constraints = parse_skill_constraints({"should_trigger": True,
+                                               "expected_skills": [self.REVIEW],
+                                               "forbidden_skills": [self.RELEASE]})
+        records = [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "load", "name": "Skill",
+                 "input": {"skill": "z-reviewer"}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "load", "content": "loaded"}]}},
+        ]
+        invocation = completed_invocation("\n".join(map(json.dumps, records)))
+        with tempfile.TemporaryDirectory() as td:
+            manifest = self.catalog(td)
+            tree = Path(sb.build_canonical_skill_tree(
+                manifest.parent.parent, tm.load_manifest(manifest), Path(td) / "tree"))
+            root_keys = {self.REVIEW: "z-reviewer", self.RELEASE: "a-release", self.OTHER: "m-extra"}
+            for mode in ("default", "instance", "subclass"):
+                adapter = CustomClaude() if mode == "subclass" else tm.ClaudeAdapter()
+                if mode == "instance":
+                    adapter.detect = CustomClaude().detect
+                with self.subTest(mode=mode), \
+                     mock.patch.object(adapter, "invoke", return_value=invocation):
+                    row = tm.observe_cell_query(
+                        adapter, tree, "review change", True, None, 1,
+                        metadata={"skill_tree_hash": tm.skill_tree_hash(tree)},
+                        constraints=constraints, root_keys=root_keys).as_row()
+                if mode == "default":
+                    self.assertEqual(row["evidence"], ["Skill tool invoked: z-reviewer"])
+                    self.assertEqual(row["activated_skills"], [self.REVIEW])
+                    self.assertTrue(row["pass"])
+                else:
+                    self.assertEqual(row["evidence"], ["a-release", "z-reviewer"])
+                    self.assertEqual(row["activated_skills"], [self.RELEASE, self.REVIEW])
+                    self.assertFalse(row["pass"])
 
     def test_catalog_verdicts_keep_full_mount_and_hash_with_reversed_declarations(self):
         specs = [

@@ -153,6 +153,7 @@ from trace_normalization import (
     PiStream,
     claude_terminal_result_index,
     detect_trigger_detection,
+    detect_trigger_events,
     detect_trigger_records,
     normalize_trace_records,
     parse_trace_jsonl_text,
@@ -413,6 +414,12 @@ def validate_invoke_result(agent: str, result: InvocationOutcome | dict[str, Any
 def json_stream_protocol_error(stdout: str, agent: str) -> str | None:
     """Reject malformed/empty event streams as incomplete observations."""
     records, errors = parse_trace_jsonl_text(stdout, strict=False)
+    return _json_stream_protocol_error(records, errors, agent)
+
+
+def _json_stream_protocol_error(
+    records: list[dict[str, Any]], errors: list[str], agent: str,
+) -> str | None:
     if errors:
         return f"{agent} JSON stream is malformed: {errors[0]}"
     if not records:
@@ -768,17 +775,22 @@ class ClaudeAdapter(AgentAdapter):
         result = result.with_metadata(metadata)
         # Hitting --max-turns exits nonzero, but the model HAD its window to
         # load the skill. The only legal non-zero completion uses this explicit transition.
-        if (result.state is InvocationState.PROCESS_FAILED
-                and self._terminal_stop(result.stdout).stop_class is StopClass.TURN_LIMIT):
-            result = result.as_agent_window_complete()
+        protocol: tuple[list[dict[str, Any]], list[str]] | None = None
+        if result.state is InvocationState.PROCESS_FAILED:
+            protocol = parse_trace_jsonl_text(result.stdout, strict=False)
+            terminal = self._terminal_record_from_records(protocol[0])
+            if claude_result_stop(terminal).stop_class is StopClass.TURN_LIMIT:
+                result = result.as_agent_window_complete()
         if result.observation_complete:
-            error = json_stream_protocol_error(result.stdout, self.name)
-            terminal = self._terminal_record(result.stdout)
+            if protocol is None:
+                protocol = parse_trace_jsonl_text(result.stdout, strict=False)
+            records, errors = protocol
+            error = _json_stream_protocol_error(records, errors, self.name)
+            terminal = self._terminal_record_from_records(records)
             if error is None and terminal is None:
                 error = ("Claude JSON stream must contain exactly one terminal result event, "
                          "with no session content after it")
             if error is None:
-                records, _ = parse_trace_jsonl_text(result.stdout, strict=False)
                 _, metrics = normalize_trace_records(records, source="claude")
                 protocol_errors = metrics.get("trace_protocol_errors")
                 if isinstance(protocol_errors, list) and protocol_errors:
@@ -795,6 +807,10 @@ class ClaudeAdapter(AgentAdapter):
         # claude_terminal_result_index owns which record ends a Claude stream,
         # for the answer parser, the trace dialect and this adapter alike.
         records, _ = parse_trace_jsonl_text(stdout, strict=False)
+        return ClaudeAdapter._terminal_record_from_records(records)
+
+    @staticmethod
+    def _terminal_record_from_records(records: list[dict[str, Any]]) -> dict[str, Any] | None:
         index = claude_terminal_result_index(records)
         return records[index] if index is not None else None
 
@@ -817,7 +833,9 @@ class ClaudeAdapter(AgentAdapter):
                     and event.get("input_summary") in skill_names]
         if evidence:
             return TriggerDetection.from_texts(TriggerEvidenceKind.SKILL_TOOL, evidence[:5])
-        return super().detect(invocation, skill_names, copied)
+        if self.name != "claude" or isinstance(invocation.provider_payload, PiStream):
+            return super().detect(invocation, skill_names, copied)
+        return detect_trigger_events(event_doc["events"], copied)
 
 
 class CodexAdapter(AgentAdapter):
