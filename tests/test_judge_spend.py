@@ -572,10 +572,11 @@ time.sleep(30)
                 while True:
                     if child.poll() is not None:
                         raise AssertionError(f'exited before readiness: {child.returncode}')
-                    if ready.exists() and ready.read_text() == expected and child.poll() is None:
-                        return child
+                    priced_ready = ready.exists() and ready.read_text() == expected and child.poll() is None
                     if time.monotonic() >= deadline:
                         raise AssertionError('did not publish priced readiness')
+                    if priced_ready:
+                        return child
                     time.sleep(0.01)
             except BaseException as error:
                 reclaim(child)
