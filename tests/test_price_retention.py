@@ -1,8 +1,13 @@
+import contextlib
+import io
 import json
+import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -165,18 +170,18 @@ class PriceRetentionCliTests(unittest.TestCase):
                                "output_tokens": 1}})
         wire = raw if raw is not None else json.dumps(response).encode()
         stub = root / ("agent.py" if route == "shell" else "claude")
+        cost_output = f"sys.stdout.buffer.write({wire!r})\nsys.stdout.buffer.flush()"
         stub.write_text(f'''#!{sys.executable}
 import sys, time
 from pathlib import Path
-sys.stdin.read()
+{cost_output if route == "native" else "sys.stdin.read()"}
 marker = Path({str(marker)!r})
 n = len(marker.read_text().splitlines()) if marker.exists() else 0
 with marker.open("a") as handle:
     handle.write("started\\n")
-sys.stdout.buffer.write({wire!r})
-sys.stdout.buffer.flush()
+{"sys.stdin.read()" if route == "native" else cost_output}
 if {mode!r} == "timeout" and n == 0:
-    time.sleep(3)
+    {"while True: time.sleep(1)" if route == "native" else "time.sleep(3)"}
 sys.exit({exit_code})
 ''')
         stub.chmod(0o755)
@@ -186,14 +191,139 @@ sys.exit({exit_code})
         return tasks, root / "runs", run_dir, marker, command, flags
 
     def invoke(self, fixture, *flags):
-        tasks, runs, _, _, command, backend = fixture
-        return run_cli(command, "--tasks", tasks, "--runs", runs, *backend,
-                       "--timeout", "1", "--max-cost-usd", "0.1", *flags)
+        tasks, runs, _, marker, command, backend = fixture
+        caller_stderr = sys.stderr
+        popen = subprocess.Popen
+
+        def start(*args, **kwargs):
+            if command != "run-claude" or args[0][0] != backend[-1]:
+                return popen(*args, **kwargs)
+            expected = (marker.read_text() if marker.exists() else "") + "started\n"
+            child = popen(*args, **kwargs)
+            try:
+                deadline = time.monotonic() + 10
+                while not marker.exists() or marker.read_text() != expected:
+                    if child.poll() is not None:
+                        raise AssertionError(f"native price fixture exited before readiness: {child.returncode}")
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("native price fixture did not write its startup marker")
+                    time.sleep(0.01)
+            except BaseException as error:
+                cleanup_error = None
+                try:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except OSError:
+                        child.kill()
+                    child.wait(timeout=1)
+                except BaseException as failure:
+                    cleanup_error = failure
+                finally:
+                    for pipe in (child.stdin, child.stdout, child.stderr):
+                        if pipe is not None:
+                            pipe.close()
+                if cleanup_error is not None:
+                    print(f"native price fixture could not reap child {child.pid}: {cleanup_error}", file=caller_stderr)
+                if not isinstance(error, Exception):
+                    raise
+                raise AssertionError(f"native price fixture bootstrap failed: {error}") from error
+            return child
+
+        with mock.patch("process_runtime.subprocess.Popen", side_effect=start):
+            return run_cli(command, "--tasks", tasks, "--runs", runs, *backend,
+                           "--timeout", "1", "--max-cost-usd", "0.1", *flags)
 
     def ledger(self, runs):
         paths = list((runs / "spend").glob("*/spend-ceiling.json"))
         self.assertEqual(len(paths), 1)
         return json.loads(paths[0].read_text())
+
+    def test_native_bootstrap_failure_reaps_child_and_closes_pipes(self):
+        popen = subprocess.Popen
+        exists = Path.exists
+        for failure in ("absent_marker", "premature_exit", "interruption"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as td:
+                fixture = self.fixture(Path(td), "native")
+                marker = fixture[3]
+                stub = Path(fixture[-1][-1])
+                script = "import sys\nsys.exit(7)\n" if failure == "premature_exit" else "import time\nwhile True: time.sleep(1)\n"
+                stub.write_text(f"#!{sys.executable}\n{script}")
+                children = []
+                interruption = KeyboardInterrupt("native bootstrap interrupted")
+
+                def record(*args, stub=stub, children=children, **kwargs):
+                    child = popen(*args, **kwargs)
+                    if args[0][0] == str(stub):
+                        children.append(child)
+                    return child
+
+                def check_marker(path, failure=failure, marker=marker,
+                                 children=children, interruption=interruption):
+                    if failure == "interruption" and path == marker and children:
+                        raise interruption
+                    return exists(path)
+
+                with mock.patch("subprocess.Popen", side_effect=record), mock.patch.object(
+                        Path, "exists", check_marker):
+                    if failure == "interruption":
+                        with self.assertRaises(KeyboardInterrupt) as raised:
+                            self.invoke(fixture)
+                        self.assertIs(raised.exception, interruption)
+                    else:
+                        message = "startup marker" if failure == "absent_marker" else "exited before readiness: 7"
+                        with self.assertRaisesRegex(AssertionError, message):
+                            self.invoke(fixture)
+                self.assertEqual(len(children), 1)
+                child = children[0]
+                self.assertIsNotNone(child.returncode)
+                for pipe in (child.stdin, child.stdout, child.stderr):
+                    self.assertTrue(pipe.closed)
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(child.pid, 0)
+
+    def test_native_cleanup_failure_reports_to_caller(self):
+        popen = subprocess.Popen
+        wait = subprocess.Popen.wait
+        for failure in ("timeout", "interruption"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as td:
+                fixture = self.fixture(Path(td), "native")
+                stub = Path(fixture[-1][-1])
+                stub.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(7)\n")
+                children = []
+                stderr = io.StringIO()
+
+                def record(*args, stub=stub, children=children, failure=failure, **kwargs):
+                    child = popen(*args, **kwargs)
+                    if args[0][0] == str(stub):
+                        children.append(child)
+                        error = (subprocess.TimeoutExpired(child.args, 1) if failure == "timeout"
+                                 else KeyboardInterrupt("native reap interrupted"))
+                        child.wait = mock.Mock(side_effect=error)
+                    return child
+
+                try:
+                    with contextlib.redirect_stderr(stderr), mock.patch(
+                            "subprocess.Popen", side_effect=record):
+                        with self.assertRaisesRegex(AssertionError, "exited before readiness: 7"):
+                            self.invoke(fixture)
+                    self.assertEqual(len(children), 1)
+                    child = children[0]
+                    child.wait.assert_called_once_with(timeout=1)
+                    self.assertIn(f"native price fixture could not reap child {child.pid}: ",
+                                  stderr.getvalue())
+                    self.assertIn("timed out after 1 seconds" if failure == "timeout"
+                                  else "native reap interrupted", stderr.getvalue())
+                    for pipe in (child.stdin, child.stdout, child.stderr):
+                        self.assertTrue(pipe.closed)
+                finally:
+                    for child in children:
+                        child.kill()
+                        wait(child, timeout=5)
+                        for pipe in (child.stdin, child.stdout, child.stderr):
+                            if pipe is not None:
+                                pipe.close()
+                        with self.assertRaises(ProcessLookupError):
+                            os.killpg(child.pid, 0)
 
     def test_timeout_retains_floor_refuses_later_call_and_never_publishes_full_cost(self):
         for route in ("shell", "claude", "native"):
@@ -234,11 +364,43 @@ sys.exit({exit_code})
                 code, _, stderr = self.invoke(fixture, "--assumed-cost-per-run-usd", "0.01")
                 self.assertEqual(code, 0, stderr)
                 self.assertEqual(marker.read_text(), "started\nstarted\n")
-                charge = self.ledger(runs)["calls"][0]["charge"]
+                ledger = self.ledger(runs)
+                self.assertEqual([row["state"] for row in ledger["calls"]], ["settled", "settled"])
+                charge = ledger["calls"][0]["charge"]
                 self.assertEqual(charge["basis"], "assumed")
                 self.assertEqual(charge["amount_usd"], "0.06")
                 self.assertEqual(charge["observed_subtotal_usd"], "0.06")
                 metadata = json.loads((runs / run_dir / "metadata.json").read_text())
+                self.assertIsNone(metadata["cost_normalized"].get("total_cost"))
+                self.assertEqual(metadata["returncode"], 124)
+                self.assertTrue(metadata["timed_out"])
+                self.assertFalse(metadata["provider_response_complete"])
+
+    def test_native_startup_preserves_timeout_floor_and_later_child_start(self):
+        for delayed_launch in (1, 2):
+            with self.subTest(delayed_launch=delayed_launch), tempfile.TemporaryDirectory() as td:
+                fixture = self.fixture(Path(td), "native")
+                _, runs, run_dir, marker, _, flags = fixture
+                stub = Path(flags[-1])
+                delay = (f"startup_counter = Path({str(Path(td) / 'startups')!r})\n"
+                         "starts = len(startup_counter.read_text().splitlines()) if startup_counter.exists() else 0\n"
+                         "with startup_counter.open('a') as handle:\n    handle.write('launched\\n')\n"
+                         f"if starts == {delayed_launch - 1}:\n    time.sleep(1.25)\n")
+                stub.write_text(stub.read_text().replace("from pathlib import Path\n",
+                                                       "from pathlib import Path\n" + delay, 1))
+                code, _, stderr = self.invoke(fixture, "--assumed-cost-per-run-usd", "0.01")
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(marker.read_text(), "started\nstarted\n")
+                ledger = self.ledger(runs)
+                self.assertEqual([row["state"] for row in ledger["calls"]], ["settled", "settled"])
+                self.assertEqual(ledger["calls"][0]["charge"],
+                                 {"basis": "assumed", "amount_usd": "0.06",
+                                  "reason": "runner_cost_incomplete_after_timeout",
+                                  "observed_subtotal_usd": "0.06"})
+                metadata = json.loads((runs / run_dir / "metadata.json").read_text())
+                self.assertEqual(metadata["returncode"], 124)
+                self.assertTrue(metadata["timed_out"])
+                self.assertFalse(metadata["provider_response_complete"])
                 self.assertIsNone(metadata["cost_normalized"].get("total_cost"))
 
     def test_exited_claude_invalid_usage_keeps_observed_dollars_and_raw_rejection(self):
