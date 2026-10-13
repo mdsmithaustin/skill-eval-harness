@@ -604,6 +604,58 @@ time.sleep(30)
                     if sys.exc_info()[0] is None:
                         raise AssertionError(message)
 
+    def test_timeout_fixture_rejects_readiness_after_bootstrap_deadline(self):
+        popen = subprocess.Popen
+        read_text = Path.read_text
+        real_time = time
+        for crossing in ('poll', 'readiness_read'):
+            with self.subTest(crossing=crossing), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                ready = root / 'priced-ready'
+                children = []
+                clock = mock.Mock(wraps=real_time)
+                clock.monotonic.return_value = 0
+
+                def record(*args, children=children, ready=ready, crossing=crossing, clock=clock, **kwargs):
+                    child = popen(*args, **kwargs)
+                    children.append(child)
+                    poll = child.poll
+
+                    def observe_poll():
+                        deadline = real_time.monotonic() + 5
+                        while not ready.exists() or read_text(ready) != f'{child.pid}\n':
+                            if real_time.monotonic() >= deadline:
+                                raise AssertionError('actual child did not publish readiness')
+                            real_time.sleep(0.01)
+                        self.assertEqual(read_text(ready), f'{child.pid}\n')
+                        if crossing == 'poll':
+                            clock.monotonic.return_value = 10.25
+                        return poll()
+
+                    child.poll = observe_poll
+                    return child
+
+                def observe_read(path, *args, ready=ready, children=children, crossing=crossing, clock=clock, **kwargs):
+                    content = read_text(path, *args, **kwargs)
+                    if path == ready and children and crossing == 'readiness_read':
+                        self.assertEqual(content, f'{children[0].pid}\n')
+                        clock.monotonic.return_value = 10.25
+                    return content
+
+                with mock.patch('subprocess.Popen', side_effect=record), mock.patch.object(
+                        sys.modules[__name__], 'time', clock), mock.patch.object(
+                        Path, 'read_text', observe_read), self.timeout_fixture(root) as setup:
+                    with self.assertRaisesRegex(AssertionError, 'did not publish priced readiness'):
+                        subprocess.Popen([str(setup[2])], stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         start_new_session=True)
+                    self.assertEqual(len(children), 1)
+                    child = children[0]
+                    self.assertEqual(read_text(ready), f'{child.pid}\n')
+                    self.assertEqual(clock.monotonic.return_value, 10.25)
+                    self.assertEqual(child.returncode, -signal.SIGKILL)
+                    self.assertTrue(all(pipe.closed for pipe in (child.stdin, child.stdout, child.stderr)))
+
     def test_timeout_fixture_bootstrap_failures_reclaim_and_report_to_caller(self):
         popen = subprocess.Popen
         exists = Path.exists
