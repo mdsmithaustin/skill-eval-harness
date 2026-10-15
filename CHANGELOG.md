@@ -4,6 +4,10 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Deliver complete UTF-8 prompts to native subprocesses even when startup exceeds the
+  supervisor's polling interval. Ordinary and recovery invocations inherit a temporary
+  stdin file, so delayed readers receive every byte and EOF without stalling.
+
 - Extract shared trigger inputs, process lifetime, trace interpretation, and provider CLI
   preparation into canonical owners. Matrix and Pi avoid loading answer and report orchestration.
   Trigger identity schema4 derives the packaged source closure. Regenerate both report arms from

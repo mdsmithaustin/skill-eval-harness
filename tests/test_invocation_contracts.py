@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -12,6 +13,8 @@ from invocation_contracts import (
     InvocationResult,
     InvocationState,
     ProcessInvocationPlan,
+    RawProcessCapture,
+    RecoveryCapture,
     TimeoutSeconds,
 )
 from manifest_contracts import ModelId
@@ -149,6 +152,72 @@ class ReachedExitTests(unittest.TestCase):
 
 
 class ProcessCaptureTests(unittest.TestCase):
+    def test_delayed_reader_receives_complete_utf8_prompt_and_eof(self):
+        prompt = "Καλημέρα 🌱 café\n" * 32768
+        for recovery, exec_wrapper in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(recovery=recovery, exec_wrapper=exec_wrapper), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                evidence = root / "evidence"
+                evidence.mkdir()
+                argv = [sys.executable, "-c",
+                     ("import hashlib, json, sys, time; time.sleep(0.2); "
+                     "data = sys.stdin.buffer.read(); "
+                     "print(json.dumps([len(data), hashlib.sha256(data).hexdigest()]))")]
+                if exec_wrapper:
+                    argv = [sys.executable, "-c",
+                            ("import os, sys, time; time.sleep(0.2); "
+                             "os.execv(sys.executable, sys.argv[1:])"), *argv]
+                outcome = pr.invoke_argv_with_timeout(ProcessInvocationPlan.from_values(argv,
+                    input_text=prompt, cwd=root, timeout_s=2,
+                    recovery_capture=RecoveryCapture(evidence) if recovery else None))
+                self.assertEqual(outcome.returncode, 0, outcome.stderr)
+                self.assertFalse(outcome.timed_out)
+                self.assertEqual(json.loads(outcome.stdout), [
+                    917504, "38a798d25dc73830fc5fbbc7acec36e9380be47b6fdfcdb4e5e6861e0deda748"])
+
+    def test_empty_stdin_reaches_eof(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            outcome = pr.invoke_argv_with_timeout(ProcessInvocationPlan.from_values(
+                [sys.executable, "-c", "import sys; print(repr(sys.stdin.buffer.read()))"],
+                input_text="", cwd=temporary, timeout_s=2))
+        self.assertEqual((outcome.returncode, outcome.stdout, outcome.stderr), (0, "b''\n", ""))
+
+    def test_delayed_input_does_not_block_large_output_capture(self):
+        capture = RawProcessCapture()
+        with tempfile.TemporaryDirectory() as temporary:
+            outcome = pr.invoke_argv_with_timeout(ProcessInvocationPlan.from_values(
+                [sys.executable, "-c",
+                 ("import sys, time; sys.stdout.buffer.write(b'x' * 262144); sys.stdout.flush(); "
+                 "sys.stderr.buffer.write(b'y' * 262144); sys.stderr.flush(); time.sleep(0.2); "
+                 "data = sys.stdin.buffer.read(); print(len(data))")],
+                input_text="z" * 917504, cwd=temporary, timeout_s=2, raw_capture=capture))
+        self.assertEqual(outcome.returncode, 0, outcome.stderr)
+        self.assertEqual(outcome.stdout, "x" * 262144 + "917504\n")
+        self.assertEqual(outcome.stderr, "y" * 4000)
+        self.assertEqual(capture.facts.stderr, b"y" * 262144)
+        self.assertTrue(capture.facts.communication_complete)
+
+    def test_nonreading_child_times_out_with_partial_output_and_is_reaped(self):
+        capture = RawProcessCapture()
+        with tempfile.TemporaryDirectory() as temporary:
+            outcome = pr.invoke_argv_with_timeout(ProcessInvocationPlan.from_values(
+                [sys.executable, "-c",
+                 ("import os, sys, time; print(os.getpid(), flush=True); "
+                 "print('started', file=sys.stderr, flush=True); time.sleep(30)")],
+                input_text="z" * 917504, cwd=temporary, timeout_s=1, raw_capture=capture))
+        self.assertEqual(outcome.returncode, 124)
+        self.assertTrue(outcome.timed_out)
+        self.assertEqual(outcome.stderr, "started\n")
+        self.assertEqual(capture.facts.stdout, outcome.stdout.encode())
+        self.assertEqual(capture.facts.stderr, b"started\n")
+        pid = int(outcome.stdout)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        if hasattr(os, "killpg"):
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(pid, 0)
+
     def test_natural_exit_after_poll_timeout_preserves_captured_stderr(self):
         communicate = sb.subprocess.Popen.communicate
         for stderr in ("", "provider stderr\n"):

@@ -666,12 +666,14 @@ time.sleep(30)
                 root = Path(td)
                 ready = root / 'priced-ready'
                 children = []
+                owned_stdin = []
                 interruption = KeyboardInterrupt('judge bootstrap interrupted')
                 caller_stderr = io.StringIO()
 
-                def record(*args, children=children, **kwargs):
+                def record(*args, children=children, owned_stdin=owned_stdin, **kwargs):
                     child = popen(*args, **kwargs)
                     children.append(child)
+                    owned_stdin.append(kwargs['stdin'])
                     return child
 
                 def check_ready(path, ready=ready, children=children, failure=failure, interruption=interruption):
@@ -709,8 +711,9 @@ time.sleep(30)
                                     self.execute(root, setup)
                 self.assertEqual(len(children), 1)
                 self.assertIsNotNone(children[0].returncode)
+                self.assertTrue(owned_stdin[0].closed)
                 self.assertTrue(all(pipe.closed for pipe in
-                                    (children[0].stdin, children[0].stdout, children[0].stderr)))
+                                    (children[0].stdout, children[0].stderr)))
                 self.assertIn('judge timeout fixture bootstrap failed', caller_stderr.getvalue())
                 if failure == 'cleanup_error':
                     self.assertIn('cleanup failed', caller_stderr.getvalue())

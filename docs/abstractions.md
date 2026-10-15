@@ -318,6 +318,12 @@ code. `InvocationRequest.effort` carries a requested effort level; `run_agent_ta
 before any spend when the backend declares no `effort_control` or the level is not among its
 `effort_levels`.
 
+`process_runtime.py` supplies a fixed prompt through a temporary stdin file positioned at byte
+zero. The child inherits the file at spawn, and the parent closes its copy immediately afterward.
+Output polling can then resume after a timeout without abandoning a partially written stdin pipe.
+An absent prompt still inherits stdin. The interactive tool bridge keeps its writable pipe for
+later protocol frames.
+
 `completion_contracts.py` records how each ordinary answer run ended. `StopObservation` normalizes a
 provider's stop reason into the closed `StopClass` (`completed`, `truncated`, `turn_limit`,
 `refused`, `other`, `unavailable`) and keeps the raw value beside it. `ServedModel` applies one rule

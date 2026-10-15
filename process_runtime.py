@@ -11,8 +11,10 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass as _dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -341,13 +343,12 @@ def _invoke_process(plan: ProcessInvocationPlan, dialogue: _BridgeSession | None
         return proc.poll() is not None
 
     def observe_recovery_process(proc: subprocess.Popen[bytes], capture: RecoveryCapture,
-                                 input_bytes: bytes | None, start: float) -> InvocationOutcome:
+                                 start: float) -> InvocationOutcome:
         deadline = time.monotonic() + timeout
         state = RecoveryProcessState.COMPLETE
         error: str | None = None
         observed: bytes | None = None
         out, err = b"", b""
-        started = False
         drained = False
         signal_sent: int | None = None
         checkpoint_live = False
@@ -389,10 +390,8 @@ def _invoke_process(plan: ProcessInvocationPlan, dialogue: _BridgeSession | None
                         break
                 try:
                     out, err = proc.communicate(
-                        input=input_bytes if not started else None,
                         timeout=min(PROCESS_LEADER_POLL_INTERVAL_S, remaining))
                 except subprocess.TimeoutExpired as exc:
-                    started = True
                     out, err = exc.output or b"", exc.stderr or b""
                 except Exception as exc:
                     state = RecoveryProcessState.CAPTURE_FAILED
@@ -843,15 +842,24 @@ def _invoke_process(plan: ProcessInvocationPlan, dialogue: _BridgeSession | None
                 pass
         write_json(capture.directory / "invocation.json", wrapper)
     try:
-        proc = subprocess.Popen(
-            argv,
-            cwd=str(cwd) if cwd is not None else None,
-            env=env,
-            stdin=subprocess.PIPE if input_text is not None else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
+        with ExitStack() as inputs:
+            stdin = None
+            if input_bytes is not None:
+                if dialogue is not None:
+                    stdin = subprocess.PIPE
+                else:
+                    stdin = inputs.enter_context(tempfile.TemporaryFile())
+                    stdin.write(input_bytes)
+                    stdin.seek(0)
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(cwd) if cwd is not None else None,
+                env=env,
+                stdin=stdin,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
     except (OSError, ValueError) as exc:
         if capture is not None:
             capture.state = RecoveryProcessState.SPAWN_FAILED
@@ -873,9 +881,8 @@ def _invoke_process(plan: ProcessInvocationPlan, dialogue: _BridgeSession | None
     if dialogue is not None:
         return observe_tool_dialogue(proc, dialogue)
     if capture is not None:
-        return observe_recovery_process(proc, capture, input_bytes, start)
+        return observe_recovery_process(proc, capture, start)
     deadline = time.monotonic() + timeout
-    communication_started = False
     communication_complete = False
     communication_timeout: subprocess.TimeoutExpired | None = None
     leader_exited = False
@@ -891,13 +898,9 @@ def _invoke_process(plan: ProcessInvocationPlan, dialogue: _BridgeSession | None
                 break
             try:
                 out, err = proc.communicate(
-                    input=(input_bytes
-                           if input_bytes is not None and not communication_started
-                           else None),
                     timeout=min(PROCESS_LEADER_POLL_INTERVAL_S, remaining),
                 )
             except subprocess.TimeoutExpired as exc:
-                communication_started = True
                 communication_timeout = exc
                 # ``communicate`` waits for pipe EOF as well as leader exit. Poll in
                 # short slices so a successful leader is not charged the full task
