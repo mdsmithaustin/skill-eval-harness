@@ -249,12 +249,14 @@ sys.exit({exit_code})
                 script = "import sys\nsys.exit(7)\n" if failure == "premature_exit" else "import time\nwhile True: time.sleep(1)\n"
                 stub.write_text(f"#!{sys.executable}\n{script}")
                 children = []
+                owned_stdin = []
                 interruption = KeyboardInterrupt("native bootstrap interrupted")
 
-                def record(*args, stub=stub, children=children, **kwargs):
+                def record(*args, stub=stub, children=children, owned_stdin=owned_stdin, **kwargs):
                     child = popen(*args, **kwargs)
                     if args[0][0] == str(stub):
                         children.append(child)
+                        owned_stdin.append(kwargs["stdin"])
                     return child
 
                 def check_marker(path, failure=failure, marker=marker,
@@ -276,7 +278,8 @@ sys.exit({exit_code})
                 self.assertEqual(len(children), 1)
                 child = children[0]
                 self.assertIsNotNone(child.returncode)
-                for pipe in (child.stdin, child.stdout, child.stderr):
+                self.assertTrue(owned_stdin[0].closed)
+                for pipe in (child.stdout, child.stderr):
                     self.assertTrue(pipe.closed)
                 with self.assertRaises(ProcessLookupError):
                     os.killpg(child.pid, 0)
@@ -290,12 +293,15 @@ sys.exit({exit_code})
                 stub = Path(fixture[-1][-1])
                 stub.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(7)\n")
                 children = []
+                owned_stdin = []
                 stderr = io.StringIO()
 
-                def record(*args, stub=stub, children=children, failure=failure, **kwargs):
+                def record(*args, stub=stub, children=children, owned_stdin=owned_stdin,
+                           failure=failure, **kwargs):
                     child = popen(*args, **kwargs)
                     if args[0][0] == str(stub):
                         children.append(child)
+                        owned_stdin.append(kwargs["stdin"])
                         error = (subprocess.TimeoutExpired(child.args, 1) if failure == "timeout"
                                  else KeyboardInterrupt("native reap interrupted"))
                         child.wait = mock.Mock(side_effect=error)
@@ -313,7 +319,8 @@ sys.exit({exit_code})
                                   stderr.getvalue())
                     self.assertIn("timed out after 1 seconds" if failure == "timeout"
                                   else "native reap interrupted", stderr.getvalue())
-                    for pipe in (child.stdin, child.stdout, child.stderr):
+                    self.assertTrue(owned_stdin[0].closed)
+                    for pipe in (child.stdout, child.stderr):
                         self.assertTrue(pipe.closed)
                 finally:
                     for child in children:
