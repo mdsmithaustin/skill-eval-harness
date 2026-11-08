@@ -130,7 +130,9 @@ class ReportCohortTests(unittest.TestCase):
         )
 
     def test_zero_denominator_metrics_are_not_applicable_in_production_summary(self):
-        summary = sb.variant_summary_block([self.summary_row()])
+        row = self.summary_row()
+        row.update(outcome_total=0, outcome_pass_rate=None)
+        summary = sb.variant_summary_block([row])
 
         self.assertEqual(summary["availability"], "complete")
         self.assertEqual(summary["metric_availability"], {
@@ -138,9 +140,16 @@ class ReportCohortTests(unittest.TestCase):
             "combined_pass_rate": "complete",
             "process_pass_rate": "not_applicable",
             "efficiency_pass_rate": "not_applicable",
+            "outcome_pass_rate": "not_applicable",
         })
         self.assertIsNone(summary["mean_process_pass_rate"])
         self.assertNotIn("observed_mean_process_pass_rate", summary)
+
+    def test_legacy_row_without_outcome_metric_is_unavailable(self):
+        summary = sb.variant_summary_block([self.summary_row()])
+
+        self.assertEqual(summary["metric_availability"]["outcome_pass_rate"], "partial")
+        self.assertIsNone(summary["mean_outcome_pass_rate"])
 
     def test_grading_incompleteness_does_not_discard_execution_telemetry(self):
         rows = [

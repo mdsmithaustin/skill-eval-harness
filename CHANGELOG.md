@@ -4,6 +4,11 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add `outcome_pass_rate` to run results and variant summaries. It excludes process
+  and efficiency assertion types while preserving existing vetoes and report gates.
+  GitHub reports label the legacy objective difference as including process checks.
+  See [outcome and process reporting](docs/commands.md#outcome-and-process-reporting).
+
 - Deliver complete UTF-8 prompts to native subprocesses even when startup exceeds the
   supervisor's polling interval. Ordinary and recovery invocations inherit a temporary
   stdin file, so delayed readers receive every byte and EOF without stalling.

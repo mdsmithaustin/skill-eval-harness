@@ -117,7 +117,10 @@ class ReportFormatsTests(unittest.TestCase):
         md = sb.github_summary_from_report(self.REPORT)
         self.assertIn("# Skill eval — demo", md)
         self.assertIn("= **0.50**", md)
-        self.assertIn("| with_skill | 1 | 2 | 1.00 | 1.00 | 0 | 0 |", md)
+        self.assertIn("mean outcome", md)
+        self.assertIn("includes process", md)
+        self.assertIn("Outcome rates exclude process and efficiency assertion types", md)
+        self.assertIn("| with_skill | 1 | 2 | — | 1.00 | 1.00 | 0 | 0 |", md)
         self.assertIn("::warning title=skill-eval case case-1::flaky repeated pass rates: without_skill", md)
         self.assertNotIn("::error", md)
 

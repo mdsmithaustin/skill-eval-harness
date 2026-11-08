@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import (
     assert_dies,
@@ -306,6 +307,52 @@ class GradedScoringSeverityTests(unittest.TestCase):
 
     def behavior_case(self, assertions: list[dict], **extra) -> dict:
         return {"id": "case-x", "split": "tune", "kind": "behavior", "prompt": "p", "assertions": assertions, **extra}
+
+    def test_process_critical_failure_does_not_change_outcome_rate_or_remove_veto(self):
+        case = self.behavior_case([
+            {"name": "answer", "type": "contains", "value": "alpha"},
+            {"name": "exposure", "type": "skill_invoked", "expected": True, "severity": "critical"},
+        ])
+        original = sb.assertion_result
+
+        def observed(assertion, *args, **kwargs):
+            if assertion["type"] == "skill_invoked":
+                return {"name": "exposure", "type": "skill_invoked", "passed": False,
+                        "evidence": "complete trace contains no skill load"}
+            return original(assertion, *args, **kwargs)
+
+        with mock.patch.object(sb, "assertion_result", side_effect=observed):
+            result = self.grade(case, "alpha")
+        self.assertEqual((result["outcome_passed"], result["outcome_total"]), (1, 1))
+        self.assertEqual(result["outcome_pass_rate"], 1.0)
+        self.assertEqual(result["objective_pass_rate"], 0.0)
+        self.assertTrue(result["vetoed"])
+        summary = sb.variant_summary_block([result])
+        self.assertEqual(summary["mean_outcome_pass_rate"], 1.0)
+        self.assertEqual(summary["mean_objective_pass_rate"], 0.0)
+
+    def test_outcome_rate_withholds_missing_evidence_and_process_only_cases(self):
+        process = {"name": "exposure", "type": "skill_invoked", "expected": True}
+        for assertions in ([process], [process, {"name": "answer", "type": "contains", "value": "alpha"}]):
+            with self.subTest(assertions=assertions):
+                result = self.grade(self.behavior_case(assertions), "alpha")
+                self.assertIsNone(result["outcome_pass_rate"])
+
+    def test_outcome_critical_failure_still_vetoes_outcome_rate(self):
+        result = self.grade(self.behavior_case([
+            {"name": "answer", "type": "contains", "value": "alpha"},
+            {"name": "facts", "type": "contains", "value": "beta", "severity": "critical"},
+        ]), "alpha")
+        self.assertEqual(result["outcome_total"], 2)
+        self.assertEqual(result["outcome_pass_rate"], 0.0)
+
+    def test_pending_subjective_outcome_withholds_outcome_rate(self):
+        result = self.grade(self.behavior_case([
+            {"name": "answer", "type": "contains", "value": "alpha"},
+            {"name": "quality", "type": "judge", "prompt": "Is the answer useful?", "severity": "gate"},
+        ]), "alpha")
+        self.assertEqual(result["deferred_judge_tasks"], 1)
+        self.assertIsNone(result["outcome_pass_rate"])
 
     def test_default_severities_keep_binary_behavior(self):
         case = self.behavior_case([
