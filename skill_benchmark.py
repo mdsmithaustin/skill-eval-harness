@@ -13339,8 +13339,8 @@ def grade_case_variant(
     # critical results (the default for every objective assertion, so binary
     # manifests grade identically); soft results leave the denominator and fill
     # the graded `scored` bucket instead. A failing critical assertion is the
-    # absorbing barrier: it VETOES the run — every rate collapses to 0.0 and the
-    # graded score is withheld, so no mean can average the catastrophe away.
+    # absorbing barrier: it vetoes the run's legacy rates and graded score.
+    # Outcome rates below distinguish outcome failures from process failures.
     all_observations = objective_observations + qualitative_observations
     blocked_rows = [observation for observation in all_observations
                     if isinstance(observation, UnavailableAssertion)]
@@ -13385,6 +13385,13 @@ def grade_case_variant(
     qualitative_total = len(gate_qualitative)
     combined_passed = objective_passed + qualitative_passed
     combined_total = objective_total + qualitative_total
+    outcome_rows = [observation for observation in gate_objective + gate_qualitative
+                    if observation.assertion_type not in PROCESS_ASSERTIONS | EFFICIENCY_ASSERTIONS]
+    outcome_passed = sum(isinstance(observation, SatisfiedAssertion) for observation in outcome_rows)
+    outcome_vetoed = any(isinstance(observation, FailedAssertion)
+                        and observation.severity.value == "critical" for observation in outcome_rows)
+    outcome_rate = ((0.0 if outcome_vetoed else outcome_passed / len(outcome_rows))
+                    if outcome_rows and not blocked_rows and not judge_tasks else None)
     soft_scores = [observation.score for observation in soft_rows
                    if observation.score is not None]
     graded_score = round(statistics.mean(soft_scores), 4) if soft_scores and not vetoed else None
@@ -13422,6 +13429,9 @@ def grade_case_variant(
         # With no objective check the rate is not applicable, vetoed or not;
         # the veto zeroes the combined rate that carries the judges.
         "objective_pass_rate": (0.0 if vetoed else objective_passed / objective_total) if objective_total else None,
+        "outcome_passed": outcome_passed,
+        "outcome_total": len(outcome_rows),
+        "outcome_pass_rate": outcome_rate,
         "process_passed": process_passed,
         "process_total": len(process_rows),
         "process_pass_rate": (0.0 if vetoed else process_passed / len(process_rows)) if process_rows else None,
@@ -14710,6 +14720,7 @@ def _report_attempt_identity(row: Mapping[str, Any]) -> str:
 
 
 _RATE_TOTAL_FIELDS = {
+    "outcome_pass_rate": "outcome_total",
     "objective_pass_rate": "objective_total",
     "combined_pass_rate": "combined_total",
     "process_pass_rate": "process_total",
@@ -15620,11 +15631,13 @@ def variant_summary_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 row, metric))
         for key in (
             "objective_pass_rate", "combined_pass_rate",
-            "process_pass_rate", "efficiency_pass_rate",
+            "process_pass_rate", "efficiency_pass_rate", "outcome_pass_rate",
         )
     }
     objective_rates = list(report_domain.observed_rates(
         metric_cohorts["objective_pass_rate"], "objective_pass_rate"))
+    outcome_rates = list(report_domain.observed_rates(
+        metric_cohorts["outcome_pass_rate"], "outcome_pass_rate"))
     combined_rates = list(report_domain.observed_rates(
         metric_cohorts["combined_pass_rate"], "combined_pass_rate"))
     process_rates = list(report_domain.observed_rates(
@@ -15647,6 +15660,8 @@ def variant_summary_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
     elapsed = [m.value for m in elapsed_measurements if m.availability == telemetry_domain.AVAILABLE]
     tokens = [m.value for m in token_measurements if m.availability == telemetry_domain.AVAILABLE]
     diagnostic_rate_fields = {
+        "mean_outcome_pass_rate": statistics.mean(outcome_rates) if outcome_rates else None,
+        "outcome_pass_rate": stats(outcome_rates),
         "mean_objective_pass_rate": statistics.mean(objective_rates) if objective_rates else None,
         "mean_combined_pass_rate": statistics.mean(combined_rates) if combined_rates else None,
         "mean_process_pass_rate": statistics.mean(process_rates) if process_rates else None,
@@ -15657,6 +15672,8 @@ def variant_summary_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "efficiency_pass_rate": stats(efficiency_rates),
     }
     field_metric = {
+        "mean_outcome_pass_rate": "outcome_pass_rate",
+        "outcome_pass_rate": "outcome_pass_rate",
         "mean_objective_pass_rate": "objective_pass_rate",
         "objective_pass_rate": "objective_pass_rate",
         "mean_combined_pass_rate": "combined_pass_rate",
@@ -17251,13 +17268,15 @@ def github_summary_from_report(report: dict[str, Any], *, review_diagnostics: bo
         ])
     delta = paired.get("absolute_delta")
     lines.append(
-        f"**Lift (with − without, objective):** {fmt_rate(paired.get('with_skill_objective_pass_rate'))} − "
+        f"**Objective difference (with − without, includes process):** {fmt_rate(paired.get('with_skill_objective_pass_rate'))} − "
         f"{fmt_rate(paired.get('without_skill_objective_pass_rate'))} = **{fmt_rate(delta)}**"
     )
     lines.append("")
+    lines.extend(["Outcome rates exclude process and efficiency assertion types. They describe outcome assertions, not treatment validity or complete task acceptance.", ""])
     lines.extend(md_table(
-        ["variant", "cases", "runs", "mean objective", "mean combined", "missing", "exec errors"],
+        ["variant", "cases", "runs", "mean outcome", "mean objective", "mean combined", "missing", "exec errors"],
         [[variant, block.get("cases", 0), block.get("runs", 0),
+          fmt_rate(block.get("mean_outcome_pass_rate")),
           fmt_rate(block.get("mean_objective_pass_rate")),
           fmt_rate(block.get("mean_combined_pass_rate")),
           block.get("missing_outputs", 0), block.get("execution_errors", 0)]
@@ -17279,7 +17298,7 @@ def github_summary_from_report(report: dict[str, Any], *, review_diagnostics: bo
         for flag in flags
     ]
     if delta is not None and delta < 0:
-        annotations.append(f"::error title=skill-eval {skill}::negative overall lift ({delta:.3f}): the skill measures worse than baseline")
+        annotations.append(f"::error title=skill-eval {skill}::negative objective difference ({delta:.3f}); this metric includes process checks")
     if report.get("availability") != "complete":
         annotations.append(
             f"::error title=skill-eval {skill}::incomplete experiment evidence")

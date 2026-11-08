@@ -1,5 +1,30 @@
 # Command reference
 
+## Outcome and process reporting
+
+Run results include `outcome_passed`, `outcome_total`, and `outcome_pass_rate`.
+These count observed gate and critical assertions excluding process and efficiency
+types. Qualitative assertions count only when their severity is gate or critical.
+Soft qualitative scores remain in `graded_score`. A critical outcome failure sets
+the outcome rate to zero. A critical process failure retains the run's veto without
+changing the outcome rate. A pending judge or unavailable assertion withholds the
+outcome rate. A process-only case has no outcome denominator and a null rate.
+
+Variant summaries publish `mean_outcome_pass_rate`, `outcome_pass_rate` statistics,
+and metric availability under the existing coverage rules. Old reports without
+these fields show an unavailable outcome value. Regrade retained artifacts to
+produce the new fields without regenerating answers.
+
+The outcome rate measures assertions, not the fraction of tasks accepted. Authors
+must ensure their text, script, and qualitative assertions actually grade task
+outcomes. It does not establish clean controls or treatment validity. Existing
+`objective_pass_rate`, `combined_pass_rate`, paired summaries, critical vetoes,
+and report exit gates retain their semantics. The objective rate includes process
+and efficiency checks, so its paired difference alone does not establish improved
+task outcomes. GitHub output labels that distinction and shows the outcome mean
+separately. Do not promote a skill from the outcome column while ignoring a failed
+or unresolved validity check.
+
 Every `skill-benchmark` subcommand, plus the `skill-pi-trigger-eval` and
 `skill-trigger-matrix` entry points. The README carries the [core loop](../README.md#core-loop)
 and a grouped [command index](../README.md#commands); this file is the per-command detail.
