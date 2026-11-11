@@ -195,6 +195,11 @@ class CLIInvocationTests(unittest.TestCase):
                         self.assertEqual(code, 2)
                         self.assertIn("min-lift must be a pass-rate difference in (0, 1]", stderr)
             self.assertFalse((Path(td) / "audit.json").exists())
+            for value in ("10", "0", "-0.1"):
+                with self.subTest(command="benchmark", flag="--max-harm", value=value):
+                    code, _, stderr = run_cli("benchmark", manifest, "--runs", runs, "--max-harm", value)
+                    self.assertEqual(code, 2)
+                    self.assertIn("max-harm must be a pass-rate difference in (0, 1]", stderr)
         accepted = CLIInvocation.from_namespace(self.parse("audit-manifest", "m.json", "--min-lift", "1"))
         self.assertEqual(accepted.arguments["min_lift"], 1.0)
 

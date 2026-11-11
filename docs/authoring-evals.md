@@ -229,7 +229,10 @@ case must name a private file with `reference_answer_ref` instead, because a kno
 answer key. The audit's known-answer check runs the case's gate text checks (`contains`,
 `contains_any`, `contains_all`, `excludes_any`, `regex`, `not_regex`) on the reference answer and on
 the prompt echoed back, and reports `reference-answer-fails` or `null-answer-passes` against
-eval-health mark 2. The reference answer never reaches a runner.
+eval-health mark 2. The reference answer never reaches a runner. The same check grades two
+more answers that show no capability, the skill's own text pasted back and a one-line refusal,
+and reports `degenerate-answer-passes` when either passes every gate check of a case that is not
+a negative one.
 
 For checks the audit cannot run on a string (files, scripts, JSON fields), grade the pair by hand:
 put them in a scratch run layout (`<case_id>/with_skill/run-1/output.md` for the reference,

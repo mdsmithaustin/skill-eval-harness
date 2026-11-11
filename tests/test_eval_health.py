@@ -280,6 +280,56 @@ class KnownAnswerTests(unittest.TestCase):
         self.assertIn("leaked", report["readiness"]["leak_saturated_cases"])
         self.assertNotIn("null-answer-passes", kinds(report))
 
+    def skill_fixture(self, root, cases):
+        fx = Fixture(root, cases)
+        (fx.path.parent.parent / "skill" / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: Demo\n---\nAlways cite the ledger id LEDGER-7.\n",
+            encoding="utf-8")
+        return fx
+
+    def test_the_skill_pasted_back_and_a_refusal_are_degenerate_answers(self):
+        recites = case("recites", value="LEDGER-7")
+        any_text = {"id": "any-text", "split": "tune", "kind": "behavior",
+                    "prompt": "Rewrite this without the word utilize.",
+                    "assertions": [{"name": "no-utilize", "type": "excludes_any", "values": ["utilize"]}]}
+        with tempfile.TemporaryDirectory() as td:
+            report = self.skill_fixture(Path(td), [recites, any_text, case("fine")]).audit()
+        known = report["known_answer_check"]
+        self.assertEqual(known["null_answer_passes"], [])
+        self.assertEqual(known["degenerate_answers_checked"], 3)
+        self.assertEqual(known["degenerate_answer_passes"], [
+            {"case_id": "recites", "answer": "skill-text"},
+            {"case_id": "any-text", "answer": "skill-text"},
+            {"case_id": "any-text", "answer": "refusal"}])
+        self.assertIn("degenerate-answer-passes", kinds(report))
+        self.assertEqual(marks(report)["grader-correct"]["status"], "concern")
+
+    def test_declining_is_the_right_answer_on_a_negative_case(self):
+        negative = {"id": "neg-out-of-scope", "split": "tune", "kind": "negative",
+                    "prompt": "Quote the ledger id LEDGER-7 from memory.",
+                    "assertions": [{"name": "no-ledger", "type": "excludes_any", "values": ["LEDGER-7"]}]}
+        with tempfile.TemporaryDirectory() as td:
+            report = self.skill_fixture(Path(td), [negative, case("fine")]).audit()
+        known = report["known_answer_check"]
+        # The echo fails this case (the prompt names the id), so only the
+        # polarity keeps the refusal from being listed.
+        self.assertEqual(known["null_answer_passes"], [])
+        self.assertEqual((known["degenerate_answers_checked"], known["degenerate_answer_passes"]), (1, []))
+        self.assertNotIn("degenerate-answer-passes", kinds(report))
+        same_case_positive = {**negative, "id": "quote-ledger", "kind": "behavior"}
+        with tempfile.TemporaryDirectory() as td:
+            listed = self.skill_fixture(Path(td), [same_case_positive]).audit()["known_answer_check"]
+        self.assertEqual(listed["degenerate_answer_passes"], [{"case_id": "quote-ledger", "answer": "refusal"}])
+
+    def test_a_case_the_echo_already_passes_is_not_listed_as_degenerate(self):
+        leaky = {"id": "echo", "split": "tune", "kind": "behavior",
+                 "prompt": "Reply with the code ZX-42 and explain.",
+                 "assertions": [{"name": "no-utilize", "type": "excludes_any", "values": ["utilize"]}]}
+        with tempfile.TemporaryDirectory() as td:
+            known = self.skill_fixture(Path(td), [leaky]).audit()["known_answer_check"]
+        self.assertEqual(known["null_answer_passes"], ["echo"])
+        self.assertEqual(known["degenerate_answer_passes"], [])
+
     def test_known_answers_stay_private_on_held_out_cases(self):
         rows = [
             (case("h", split="holdout", reference_answer="alpha"), "keep its known answer private"),

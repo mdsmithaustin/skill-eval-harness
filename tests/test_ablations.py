@@ -1157,6 +1157,22 @@ class AblationRegressionReportTests(unittest.TestCase):
         self.assertTrue(reg["significance"]["by_case"]["c1"]["significant_at_0_05"])
         self.assertFalse(reg["significance"]["by_case"]["c2"]["significant_at_0_05"])
         self.assertTrue(reg["expected_regression_confirmed"])   # any(), not all()
+        # Two cases are two tests. Holm doubles c1's 0.03125, so the any-case
+        # rule's one significant case does not survive the family adjustment;
+        # the block reports that beside the unchanged verdict.
+        family = reg["significance"]["multiplicity"]
+        self.assertEqual((family["family"], family["tests"]), ("by_case", 2))
+        self.assertEqual(family["by_test"]["c1"]["adjusted_p_value"], 0.0625)
+        self.assertEqual(family["significant_after_adjustment"], [])
+        # A cited case that was measured and did not regress still had its
+        # chance, so it stays in the family when only c1 confirms.
+        steady = ([w("c1", True) for _ in range(6)] + [a("c1", False) for _ in range(6)]
+                  + [w("c2", True), a("c2", True)])
+        reg = self.report(manifest, steady)[0]["regressions"][0]
+        self.assertEqual(reg["confirmed_cases"], ["c1"])
+        family = reg["significance"]["multiplicity"]
+        self.assertEqual((family["tests"], sorted(family["by_test"])), (2, ["c1", "c2"]))
+        self.assertEqual(family["by_test"]["c1"]["adjusted_p_value"], 0.0625)
 
     def _wrow(self, passed):
         r = 1.0 if passed else 0.0

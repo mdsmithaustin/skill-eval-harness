@@ -179,6 +179,7 @@ class FindingKind(str, Enum):
     JUDGE_IS_MODEL_UNDER_TEST = "judge-is-model-under-test"
     REFERENCE_ANSWER_FAILS = "reference-answer-fails"
     NULL_ANSWER_PASSES = "null-answer-passes"
+    DEGENERATE_ANSWER_PASSES = "degenerate-answer-passes"
     HIGH_COST_JUDGE_ONLY_CASE = "high-cost-judge-only-case"
     ORDER_FLIP_INCONSISTENT = "order-flip-inconsistent"
     PASSES_EMPTY_CONTROL = "passes-empty-control"
@@ -267,6 +268,7 @@ _SPECS: dict[FindingKind, KindSpec] = {
     FindingKind.JUDGE_IS_MODEL_UNDER_TEST: KindSpec(_G, _REQ, _M.GRADER),
     FindingKind.REFERENCE_ANSWER_FAILS: KindSpec(_G, _REQ, _M.GRADER),
     FindingKind.NULL_ANSWER_PASSES: KindSpec(_G, _REQ, _M.GRADER),
+    FindingKind.DEGENERATE_ANSWER_PASSES: KindSpec(_G, _REC, _M.GRADER),
     FindingKind.HIGH_COST_JUDGE_ONLY_CASE: KindSpec(_G, _REC),
     FindingKind.ORDER_FLIP_INCONSISTENT: KindSpec(_G, _REC, _M.GRADER),
     FindingKind.PASSES_EMPTY_CONTROL: KindSpec(_G, _REQ, _M.GRADER),

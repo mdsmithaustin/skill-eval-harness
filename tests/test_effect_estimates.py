@@ -21,6 +21,7 @@ from helpers import (
     attest_answer_design,
     demo_manifest,
     judge_with_stub,
+    make_eval_repo,
     result_row,
     run_cli,
     write_demo_manifest,
@@ -368,6 +369,322 @@ class NoiseCheckTests(unittest.TestCase):
         self.assertIn("every paired delta is the same", result["reason"])
         self.assertTrue(ee.sign_flip_test([1.0] * 6)["significant_at_0_05"])
 
+class HolmTests(unittest.TestCase):
+    def test_textbook_example(self):
+        # Sorted p 0.01, 0.02, 0.03, 0.04 with m = 4 step down to 0.04, 0.06, 0.06, 0.04:
+        # the last is raised to 0.06 so the adjusted values never decrease.
+        adjusted = ee.holm_adjust([0.04, 0.01, 0.03, 0.02])
+        for got, want in zip(adjusted, [0.06, 0.04, 0.06, 0.06]):
+            self.assertAlmostEqual(got, want)
+
+    def test_adjusted_values_cap_at_one_and_keep_input_order(self):
+        self.assertEqual(ee.holm_adjust([0.5, 0.9, 0.01]), [1.0, 1.0, 0.03])
+        self.assertEqual(ee.holm_adjust([]), [])
+        self.assertEqual(ee.holm_adjust([0.03]), [0.03])
+
+    def test_p_values_outside_the_unit_interval_are_rejected(self):
+        for values in ([1.2], [-0.1, 0.5]):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                ee.holm_adjust(values)
+
+    def test_one_lucky_model_among_four_does_not_survive(self):
+        # p = 0.03125 is six cases all improving. Alone it is significant;
+        # as the best of four models it adjusts to 0.125.
+        blocks = {"a": {"p_value": 0.03125, "p_value_upper_bound": 0.03125},
+                  "b": {"p_value": 0.5, "p_value_upper_bound": 0.5},
+                  "c": {"p_value": 1.0, "p_value_upper_bound": 1.0},
+                  "d": {"p_value": 0.25, "p_value_upper_bound": 0.25}}
+        result = ee.multiplicity(blocks, family="by_model")
+        self.assertEqual(result["tests"], 4)
+        self.assertEqual(result["by_test"]["a"]["adjusted_p_value"], 0.125)
+        self.assertEqual(result["significant_after_adjustment"], [])
+
+    def test_the_sampled_bound_decides_and_untested_blocks_do_not_count(self):
+        blocks = {"sampled": {"p_value": 0.001, "p_value_upper_bound": 0.02},
+                  "withheld": {"method": "unavailable", "p_value": None},
+                  "exact": {"p_value": 0.0002}}
+        result = ee.multiplicity(blocks, family="by_model")
+        self.assertEqual((result["tests"], result["untested"]), (2, ["withheld"]))
+        self.assertEqual(result["by_test"]["sampled"]["p_value"], 0.02)
+        self.assertEqual(result["significant_after_adjustment"], ["exact", "sampled"])
+
+
+PILOT = [((3, 3), (3, 1)), ((3, 2), (3, 2)), ((3, 3), (3, 0)), ((3, 1), (3, 1)),
+         ((3, 2), (3, 0)), ((3, 3), (3, 3)), ((3, 0), (3, 1)), ((3, 2), (3, 1))]
+
+
+class PlanningTests(unittest.TestCase):
+    def test_lattice_p_value_is_the_exact_test_p_value(self):
+        rng = random.Random(7)
+        for _ in range(200):
+            repetitions = rng.choice([1, 2, 3, 5])
+            steps = [rng.randint(-repetitions, repetitions) for _ in range(rng.randint(1, 14))]
+            exact = ee.sign_flip_test([step / repetitions for step in steps])
+            with self.subTest(steps=steps):
+                self.assertAlmostEqual(ee.lattice_sign_flip_p(steps), exact["p_value"], places=12)
+        self.assertEqual(ee.lattice_sign_flip_p([]), 1.0)
+        self.assertEqual(ee.lattice_sign_flip_p([0, 0]), 1.0)
+        self.assertEqual(ee.lattice_sign_flip_p([1] * 6), 0.03125)
+
+    def test_variance_split_separates_repetition_noise_from_case_spread(self):
+        # Every case is a coin flip in both arms, so all the variance of the
+        # deltas is repetition noise: 2 * (0.5 * 0.5) / (2 - 1) per case.
+        noisy = ee.variance_split([((2, 1), (2, 1))] * 6)
+        self.assertEqual(noisy["within_case_variance"], 0.5)
+        self.assertEqual((noisy["between_case_variance"], noisy["within_case_share"]), (0.0, 1.0))
+        # Deterministic arms that disagree by case: no repetition noise at all.
+        spread = ee.variance_split([((3, 3), (3, 0)), ((3, 0), (3, 3))] * 3)
+        self.assertEqual((spread["within_case_variance"], spread["within_case_share"]), (0.0, 0.0))
+        self.assertGreater(spread["between_case_variance"], 1)
+
+    def test_one_run_per_arm_cannot_split_the_variance(self):
+        split = ee.variance_split([((1, 1), (1, 0)), ((1, 0), (1, 0)), ((1, 1), (1, 1))])
+        self.assertIsNotNone(split["observed_delta_variance"])
+        self.assertIsNone(split["within_case_variance"])
+        self.assertIsNone(split["within_case_share"])
+
+    def test_power_grows_with_cases_and_the_cheapest_sufficient_cell_is_recommended(self):
+        plan = ee.plan_power(PILOT, min_lift=0.15, cases_grid=[8, 32, 128],
+                             repetitions_grid=[3], trials=200)
+        powers = [cell["power"] for cell in plan["grid"]]
+        self.assertEqual(powers, sorted(powers))
+        self.assertLess(powers[0], 0.2)
+        self.assertGreater(powers[-1], 0.9)
+        self.assertEqual(plan["verdict"], "plan-found")
+        self.assertEqual(plan["recommendation"]["cases"], 128)
+        self.assertEqual(plan["recommendation"]["runs_per_arm"], 384)
+
+    def test_a_larger_target_lift_is_easier_to_show_and_a_loss_never_counts(self):
+        def power(min_lift):
+            return ee.plan_power(PILOT, min_lift=min_lift, cases_grid=[40], repetitions_grid=[3],
+                                 trials=2000)["grid"][0]["power"]
+        self.assertLess(power(0.1), 0.5)
+        self.assertGreater(power(0.4), 0.99)
+        # With almost no lift, half the significant evals point the wrong way.
+        # Counting them would report about twice this share.
+        self.assertLess(power(0.001), 0.028)
+
+    def test_shrunk_rates_shed_repetition_noise_when_it_can_be_measured(self):
+        # Three observed rates whose spread is no wider than four coin flips
+        # would give: nothing separates the cases, so each gets the arm mean.
+        self.assertEqual(set(ee._shrunk_rates([(4, 2)] * 3 + [(4, 3)] * 3 + [(4, 1)] * 2)), {0.53125})
+        # Deterministic cases keep their rates: there is no noise to remove.
+        self.assertEqual(ee._shrunk_rates([(3, 3), (3, 0), (3, 3)]), [1.0, 0.0, 1.0])
+        # One run per case cannot show noise.
+        self.assertIsNone(ee._shrunk_rates([(1, 1), (1, 0)]))
+        self.assertEqual(ee._smoothed_rates([(1, 1), (1, 0)]), [0.75, 0.25])
+
+    def test_each_cell_carries_two_readings_and_the_observed_one_decides(self):
+        # Every case is the same coin in each arm (0.7 against 0.4), so the
+        # pilot's spread is all repetition noise. Observed rates treat that
+        # noise as case spread and read lower than the noise-free reading.
+        rng = random.Random(11)
+        pilot = [((3, sum(rng.random() < 0.7 for _ in range(3))),
+                  (3, sum(rng.random() < 0.4 for _ in range(3)))) for _ in range(30)]
+        plan = ee.plan_power(pilot, min_lift=0.3, cases_grid=[20, 30], repetitions_grid=[3],
+                             power=0.8, trials=600)
+        small, large = plan["grid"]
+        self.assertLess(small["power"], small["power_shrunk"])
+        self.assertLess(small["power"], 0.8)
+        self.assertGreaterEqual(small["power_shrunk"], 0.8)
+        # The recommendation waits for the conservative reading to clear the target.
+        self.assertEqual(plan["recommendation"]["cases"], 30)
+        self.assertGreaterEqual(large["power"], 0.8)
+
+    def test_a_one_repetition_pilot_has_no_noise_free_reading(self):
+        single = [((1, 1), (1, 0)), ((1, 0), (1, 0)), ((1, 1), (1, 1))] * 4
+        mixed = [((1, 1), (3, 2)), ((1, 0), (3, 1)), ((1, 1), (3, 0))] * 3
+        for pilot in (single, mixed):
+            with self.subTest(pilot=pilot[0]):
+                cell = ee.plan_power(pilot, min_lift=0.2, cases_grid=[8], repetitions_grid=[1],
+                                     trials=5)["grid"][0]
+                self.assertIsNone(cell["power_shrunk"])
+                self.assertIsNotNone(cell["power"])
+
+    def test_five_cases_can_never_reach_alpha_whatever_the_lift(self):
+        # 2 / 2**5 = 0.0625: no simulated eval of five cases is significant.
+        plan = ee.plan_power(PILOT, min_lift=0.5, cases_grid=[5], repetitions_grid=[5], trials=100)
+        self.assertEqual(plan["grid"][0]["power"], 0.0)
+        self.assertEqual((plan["verdict"], plan["recommendation"]), ("grid-too-small", None))
+
+    def test_a_lift_the_baseline_leaves_no_room_for_is_named(self):
+        ceiling = [((3, 3), (3, 3))] * 8
+        plan = ee.plan_power(ceiling, min_lift=0.5, cases_grid=[8], repetitions_grid=[3])
+        self.assertEqual(plan["verdict"], "min-lift-exceeds-headroom")
+        self.assertLess(plan["headroom"], 0.5)
+
+    def test_headroom_reads_the_raw_baseline_and_a_cell_ignores_its_neighbours(self):
+        # 22 of 24 baseline runs pass: one twelfth of headroom, whatever
+        # smoothing would add.
+        ceiling = [((3, 3), (3, 3))] * 6 + [((3, 3), (3, 2))] * 2
+        plan = ee.plan_power(ceiling, min_lift=0.1, cases_grid=[8], repetitions_grid=[3], trials=5)
+        self.assertEqual((plan["verdict"], plan["headroom"]), ("min-lift-exceeds-headroom", 0.083333))
+        # A lift equal to the headroom is reachable, also when 1 - 0.9 is not
+        # exactly 0.1 in floating point.
+        for pilot, lift in (([((10, 10), (10, 9))] * 6, 0.1), ([((5, 5), (5, 4))] * 6, 0.2)):
+            with self.subTest(lift=lift):
+                edge = ee.plan_power(pilot, min_lift=lift, cases_grid=[8], repetitions_grid=[3], trials=5)
+                self.assertNotEqual(edge["verdict"], "min-lift-exceeds-headroom")
+                self.assertEqual(len(edge["grid"]), 1)
+                self.assertIsNotNone(edge["grid"][0]["power_shrunk"])
+        # A refused target names a headroom that is itself accepted.
+        thirds_pilot = [((3, 3), (3, 1))] * 6
+        refused = ee.plan_power(thirds_pilot, min_lift=0.7, cases_grid=[8], repetitions_grid=[3], trials=5)
+        self.assertEqual((refused["verdict"], refused["headroom"]), ("min-lift-exceeds-headroom", 0.666667))
+        retyped = ee.plan_power(thirds_pilot, min_lift=refused["headroom"], cases_grid=[8],
+                                repetitions_grid=[3], trials=5)
+        self.assertEqual(len(retyped["grid"]), 1)
+        # A baseline that never passes leaves all the room there is, though
+        # smoothing would raise it to one eighth.
+        floor = ee.plan_power([((3, 3), (3, 0))] * 8, min_lift=0.9, cases_grid=[8],
+                              repetitions_grid=[3], trials=200)
+        self.assertEqual(floor["verdict"], "plan-found")
+        self.assertGreater(floor["grid"][0]["power"], 0.9)
+        alone = ee.plan_power(PILOT, min_lift=0.15, cases_grid=[32], repetitions_grid=[3], trials=100)
+        beside = ee.plan_power(PILOT, min_lift=0.15, cases_grid=[8, 32], repetitions_grid=[1, 3],
+                               trials=100)
+        self.assertEqual(alone["grid"][0], next(cell for cell in beside["grid"]
+                                                if (cell["cases"], cell["repetitions"]) == (32, 3)))
+
+    def test_the_plan_is_reproducible_and_rejects_bad_targets(self):
+        options = {"min_lift": 0.15, "cases_grid": [16], "repetitions_grid": [3], "trials": 50}
+        self.assertEqual(ee.plan_power(PILOT, **options), ee.plan_power(PILOT, **options))
+        self.assertEqual(ee.plan_power([], **options)["verdict"], "no-pilot-pairs")
+        for bad in ({"min_lift": 0}, {"power": 1.0}, {"trials": 0}, {"cases_grid": [0]}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                ee.plan_power(PILOT, **{**options, **bad})
+
+
+class PlanEvalCommandTests(unittest.TestCase):
+    def pilot(self, root):
+        cases = [{"id": f"c{index}", "split": "tune", "prompt": "Do it.",
+                  "assertions": [{"name": "has-alpha", "type": "contains", "value": "alpha"}]}
+                 for index in range(6)]
+        manifest = make_eval_repo(root, cases=cases)
+        runs = root / "runs"
+        for index in range(6):
+            for run_number in (1, 2):
+                write_run(runs / f"c{index}" / "with_skill" / f"run-{run_number}",
+                          "alpha" if index < 4 or run_number == 1 else "beta")
+                write_run(runs / f"c{index}" / "without_skill" / f"run-{run_number}",
+                          "alpha" if index == 0 else "beta")
+        attest_answer_design(manifest, runs)
+        benchmark = root / "benchmark.json"
+        self.assertEqual(run_cli("benchmark", manifest, "--runs", runs, "--out", benchmark)[0], 0)
+        return benchmark
+
+    def test_plan_reads_a_pilot_benchmark_through_the_cli(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = root / "plan.json"
+            code, _, stderr = run_cli("plan-eval", "--benchmark", self.pilot(root), "--min-lift", "0.3",
+                                      "--cases", "6,24", "--repetitions", "2", "--trials", "100",
+                                      "--out", out)
+            self.assertEqual((code, stderr), (0, ""))
+            plan = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual((plan["pilot"]["cases"], plan["pilot"]["repetitions"], plan["unit"]), (6, 2, "case"))
+        self.assertEqual(plan["pilot"]["limiting_variance"], "within-case")
+        self.assertEqual([(cell["cases"], cell["repetitions"]) for cell in plan["grid"]], [(6, 2), (24, 2)])
+        self.assertLess(plan["grid"][0]["power"], plan["grid"][1]["power"])
+
+    def test_runs_that_pass_part_of_their_checks_are_counted_and_explained(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = json.loads(self.pilot(root).read_text(encoding="utf-8"))
+            whole = root / "whole.json"
+            self.assertEqual(run_cli("plan-eval", "--benchmark", root / "benchmark.json", "--min-lift", "0.3",
+                                     "--cases", "6", "--repetitions", "2", "--trials", "5",
+                                     "--out", whole)[0], 0)
+            report["results"][0]["objective_pass_rate"] = 0.5
+            partial = root / "partial.json"
+            partial.write_text(json.dumps(report), encoding="utf-8")
+            out = root / "plan.json"
+            self.assertEqual(run_cli("plan-eval", "--benchmark", partial, "--min-lift", "0.3",
+                                     "--cases", "6", "--repetitions", "2", "--trials", "5",
+                                     "--out", out)[0], 0)
+            clean = json.loads(whole.read_text(encoding="utf-8"))
+            plan = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual((clean["pilot"]["partially_passing_runs"], clean["notes"]), (0, []))
+        self.assertEqual(plan["pilot"]["partially_passing_runs"], 1)
+        self.assertIn("a lift in fully passing runs", plan["notes"][0])
+
+    def test_bad_grids_and_reports_are_usage_errors(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            benchmark = self.pilot(root)
+            empty = root / "empty.json"
+            empty.write_text("{}", encoding="utf-8")
+            for argv, message in (
+                    (("--benchmark", benchmark, "--min-lift", "0.3", "--cases", "6,x"),
+                     "--cases must be a comma-separated list of whole numbers"),
+                    (("--benchmark", benchmark, "--min-lift", "0.3", "--repetitions", "0"),
+                     "--repetitions must be distinct whole numbers of 1 or more"),
+                    (("--benchmark", benchmark, "--min-lift", "0.3", "--power", "1"),
+                     "--power must lie strictly between 0 and 1"),
+                    (("--benchmark", benchmark, "--min-lift", "2"),
+                     "min-lift must be a pass-rate difference in (0, 1]"),
+                    (("--benchmark", empty, "--min-lift", "0.3"), "has no results rows")):
+                with self.subTest(message=message):
+                    code, _, stderr = run_cli("plan-eval", *argv)
+                    self.assertNotEqual(code, 0)
+                    self.assertIn(message, stderr)
+
+
+class HarmCheckTests(unittest.TestCase):
+    def check(self, deltas, max_harm):
+        return ee.harm_check(ee.sign_flip_interval(deltas), max_harm=max_harm)
+
+    def test_no_lift_is_not_no_harm(self):
+        # Eight cases that swing both ways: the lift is not significant, and
+        # the interval still reaches a third of a run below zero, so a 0.05
+        # margin is not cleared.
+        deltas = thirds([3, -3, 3, -3, 3, -3, 2, -2])
+        self.assertFalse(ee.sign_flip_test(deltas)["significant_at_0_05"])
+        result = self.check(deltas, 0.05)
+        self.assertEqual(result["verdict"], "harm-not-excluded")
+        self.assertLess(result["lower"], -0.05)
+
+    def test_lower_bound_at_or_above_the_margin_clears_it(self):
+        deltas = [0.5] * 11 + [0.25]
+        result = self.check(deltas, 0.05)
+        self.assertEqual(result["verdict"], "within-margin")
+        interval = ee.sign_flip_interval(deltas)
+        self.assertEqual((result["lower"], result["upper"]), (interval["lower"], interval["upper"]))
+
+    def test_the_margin_is_inclusive_at_the_lower_bound(self):
+        deltas = thirds([1, -1, 1, 0, -1, 1, 0, 1, -1, 0])
+        lower = ee.sign_flip_interval(deltas)["lower"]
+        self.assertLess(lower, 0)
+        self.assertEqual(self.check(deltas, -lower)["verdict"], "within-margin")
+        self.assertEqual(self.check(deltas, -lower - 1e-6)["verdict"], "harm-not-excluded")
+
+    def test_a_loss_inside_the_margin_at_its_upper_end_is_not_yet_harm(self):
+        # The interval is [-1/3, -1/9]: a certain loss, but the margin 0.2
+        # lies inside it, so a loss larger than the margin is neither shown
+        # nor ruled out.
+        deltas = thirds([-1, -1, -1, 0, -1, 0, -1, -1, 0, -1])
+        result = self.check(deltas, 0.2)
+        self.assertEqual((result["lower"], result["upper"]), (-0.333333, -0.111111))
+        self.assertEqual(result["verdict"], "harm-not-excluded")
+        self.assertEqual(self.check(deltas, 0.1)["verdict"], "harm-exceeds-margin")
+
+    def test_upper_bound_below_the_margin_is_harm(self):
+        deltas = [-0.5] * 11 + [-0.25]
+        self.assertEqual(self.check(deltas, 0.05)["verdict"], "harm-exceeds-margin")
+
+    def test_an_unbounded_interval_never_clears_a_margin(self):
+        result = self.check(thirds([1, 1, 1, 1, 1]), 1.0)
+        self.assertEqual(result["verdict"], "unbounded")
+        self.assertIsNone(result["lower"])
+        self.assertIn("cannot exclude any lift", result["reason"])
+
+    def test_margin_outside_the_pass_rate_range_is_rejected(self):
+        interval = ee.sign_flip_interval([0.5] * 11 + [0.25])
+        for value in (0, -0.1, 1.5):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ee.harm_check(interval, max_harm=value)
+
+
 class PairedSummaryTests(unittest.TestCase):
     def rows(self, pairs):
         out = []
@@ -383,6 +700,50 @@ class PairedSummaryTests(unittest.TestCase):
         self.assertGreater(summary["interval"]["lower"], 0)
         self.assertEqual(summary["noise_check"]["cases_moved"], 8)
         self.assertEqual(summary["noise_check"]["min_lift"], 0.2)
+
+    def test_summary_carries_harm_check_only_when_a_margin_is_given(self):
+        rows = self.rows([(1.0, 0.0)] * 7 + [(1.0, 0.5)])
+        self.assertNotIn("harm_check", sb.build_paired_summary(rows))
+        harm = sb.build_paired_summary(rows, max_harm=0.05)["harm_check"]
+        self.assertEqual((harm["verdict"], harm["max_harm"], harm["unit"]),
+                         ("within-margin", 0.05, "case"))
+
+    def test_blocked_pairing_moves_harm_check_to_observed(self):
+        rows = self.rows([(1.0, 0.0)] * 7 + [(1.0, 0.5)])
+        rows.append(result_row("orphan", "with_skill", rate=1.0, run_number=1))
+        summary = sb.build_paired_summary(rows, max_harm=0.05)
+        self.assertEqual(summary["harm_check"]["availability"], "unavailable")
+        self.assertEqual(summary["observed_harm_check"]["verdict"], "within-margin")
+
+    def model_rows(self, pairs_by_model):
+        out = []
+        for model, pairs in pairs_by_model.items():
+            for row in self.rows(pairs):
+                out.append({**row, "model": model})
+        return out
+
+    def test_several_models_get_a_holm_family_and_one_model_does_not(self):
+        lucky = [(1.0, 0.0)] * 6
+        flat = [(1.0, 0.0), (0.0, 1.0)] * 3
+        one = sb.build_paired_summary(self.model_rows({"m1": lucky}))
+        self.assertNotIn("by_model_multiplicity", one)
+        summary = sb.build_paired_summary(
+            self.model_rows({"m1": lucky, "m2": flat, "m3": flat, "m4": flat}))
+        self.assertTrue(summary["by_model"]["m1"]["significance"]["significant_at_0_05"])
+        family = summary["by_model_multiplicity"]
+        self.assertEqual((family["method"], family["family"], family["tests"]),
+                         ("holm", "by_model", 4))
+        self.assertEqual(family["by_test"]["m1"]["adjusted_p_value"], 0.125)
+        self.assertEqual(family["significant_after_adjustment"], [])
+
+    def test_a_withheld_report_withdraws_the_family_with_its_tests(self):
+        lucky = [(1.0, 0.0)] * 7
+        summary = sb.build_paired_summary(self.model_rows({"m1": lucky, "m2": lucky}))
+        self.assertEqual(summary["by_model_multiplicity"]["significant_after_adjustment"], ["m1", "m2"])
+        withheld = sb.invalidate_report_pairing(summary, "grading_evidence_incomplete")
+        family = withheld["by_model_multiplicity"]
+        self.assertEqual((family["tests"], family["by_test"], family["untested"]), (0, {}, ["m1", "m2"]))
+        self.assertEqual(family["significant_after_adjustment"], [])
 
     def test_blocked_pairing_moves_both_to_observed(self):
         rows = self.rows([(1.0, 0.0)] * 7 + [(1.0, 0.5)])

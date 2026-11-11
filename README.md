@@ -570,7 +570,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-benchmark contamination` | Output-side perimeter: canary tripwire, output↔answer n-gram overlap, released-at/cutoff gate. |
 | `skill-benchmark error-analysis` | Open-coding review queue + axial failure taxonomy over a `benchmark.json`; `--feedback feedback.json` fills each row's note from the served review. |
 | `skill-benchmark compare-judges` | Flag whether measured lift depends on which judge model graded. |
-| `skill-benchmark judge-alignment` | Score a judge against human labels (`--labels feedback.json`, or a legacy labels file): agreement, Cohen's kappa, precision/recall/F1, and score calibration (Brier, ECE, AUROC, threshold sweep). |
+| `skill-benchmark judge-alignment` | Score a judge against human labels (`--labels feedback.json`, or a legacy labels file): agreement, Cohen's kappa, precision/recall/F1, score calibration (Brier, ECE, AUROC, threshold sweep), and judged pass rates and lift corrected for the judge's error rates. |
 | `skill-benchmark judge-robustness` | Order-flip self-consistency + negative controls a robust judge must reject (opt-in, model-touching). |
 | `skill-benchmark judge` | Run deferred `judge`/`rubric` assertions through `--judge-backend`/`--judge-model` or `--judge-cmd` (model-touching). |
 
@@ -590,6 +590,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-benchmark suite-run` | Allowlisted multi-skill preflight/tier with cost ceilings; writes `RUN_SCOPE.json`. |
 | `skill-benchmark aggregate` | Cross-skill report over many manifests. |
 | `skill-benchmark trend` | Append-only history: series, diffs, prevalence×severity failure ranking, prune candidates. |
+| `skill-benchmark plan-eval` | Plan an eval from a pilot `benchmark.json`: split per-case variance into repetition noise and case spread, then simulate the paired test's power over a grid of case and repetition counts (model-free). |
 | `skill-benchmark suggest-cases` | Turn saturated/no-lift flags into harder-case seeds, never from a floor case (generation opt-in, never edits a manifest). |
 | `skill-benchmark migrate` | Upgrade a v1 manifest to v2: stamp severity/oracle tiers, print the judgment-call checklist. |
 
@@ -608,6 +609,8 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-trigger-matrix` | Autonomous trigger rate per (agent × model), split by should-fire / should-not-fire. |
 | `skill-pi-trigger-eval` | `skill-trigger-matrix --agent pi` under its own name, kept for existing scripts. |
 | `skill-benchmark trigger-compare` | Pair baseline and `--ablation` trigger reports of the same skill revision: declared-cell/repetition completeness, duplicate rejection, agent/model cells collapsed by stable authored-query ID, direction-aware sign-flip significance, and a causal-confirmation evidence class. |
+| `skill-benchmark trigger-distractors` | Build one self-contained catalog per library size, the manifest's skills plus N decoy skills with scoped trigger cases, for `skill-trigger-matrix` to run unchanged. |
+| `skill-benchmark trigger-distractor-report` | Read one matrix report per library size and report the expected-skill load rate, pass rate, decoy activations and degradation boundary per (agent, model). |
 
 ## Compatibility notes
 

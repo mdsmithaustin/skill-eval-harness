@@ -4,6 +4,40 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add `trigger-distractors` and `trigger-distractor-report`. The first builds one catalog
+  per library size, the manifest's skills plus N decoy skills, for `skill-trigger-matrix`
+  to run unchanged. The second reads one matrix report per size and reports the load rate,
+  pass rate, decoy activations and degradation boundary. See
+  [activation as the library grows](docs/tuning-skill-activation.md#measure-activation-as-the-library-grows).
+
+- Add `manifest.old_skill_role` (`previous_revision` or `self_generated`) and
+  `paired_edit_summary.control_role`, so the `old_skill` arm can hold a skill the model wrote
+  for itself and the report says so. See
+  [a model-written control](docs/commands.md#a-skill-the-model-wrote-for-itself-as-the-control).
+
+- Extend the `audit-manifest` known-answer check with two more answers that show no
+  capability: the skill's own text pasted back and a one-line refusal. A case that passes
+  every gate check on either gets a recommended `degenerate-answer-passes` finding. See
+  [audit-manifest](docs/commands.md#audit-manifest-quality).
+
+- Add `bias_correction` to `judge-alignment`. It estimates the judge's sensitivity and
+  specificity from the human labels and corrects judged pass rates, per variant, and the
+  judged lift for them. See [correct a judged pass rate](docs/can-i-trust-my-judge.md#correct-a-judged-pass-rate-for-judge-error).
+
+- Add `plan-eval`. It reads a pilot `benchmark.json`, splits per-case variance into
+  repetition noise and case spread, and simulates the paired test's power over a grid of
+  case and repetition counts. Each row gives a conservative `power` and a `power_shrunk`
+  with the pilot's repetition noise removed. See [plan an eval](docs/commands.md#plan-an-eval-before-spending-on-it).
+
+- Add Holm-adjusted p-values for the test families a report prints together:
+  `paired_summary.by_model_multiplicity` across models and `significance.multiplicity`
+  across an ablation regression's cases. Existing significance fields and verdicts are
+  unchanged. See [several tests in one report](docs/commands.md#several-tests-in-one-report).
+
+- Add `benchmark --max-harm`. Each paired block gains `harm_check`, which reads the lift
+  interval as a non-inferiority test and says whether the eval rules out a loss larger than
+  the margin. See [harm check](docs/commands.md#harm-check).
+
 - Add `outcome_pass_rate` to run results and variant summaries. It excludes process
   and efficiency assertion types while preserving existing vetoes and report gates.
   GitHub reports label the legacy objective difference as including process checks.

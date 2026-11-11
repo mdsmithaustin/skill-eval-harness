@@ -30,7 +30,7 @@ import math
 import random
 import statistics
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from fractions import Fraction
@@ -81,6 +81,15 @@ class NoiseVerdict(str, Enum):
     NOISE_EXCEEDS_HEADROOM = "noise-exceeds-headroom"
     NOISE_EXCEEDS_MIN_LIFT = "noise-exceeds-min-lift"
     RESOLVABLE = "resolvable"
+
+
+class HarmVerdict(str, Enum):
+    """Whether the interval rules out a loss larger than the margin."""
+
+    UNBOUNDED = "unbounded"
+    WITHIN_MARGIN = "within-margin"
+    HARM_NOT_EXCLUDED = "harm-not-excluded"
+    HARM_EXCEEDS_MARGIN = "harm-exceeds-margin"
 
 
 class InferenceUnit(str, Enum):
@@ -628,6 +637,373 @@ def noise_check(deltas: Sequence[float], without_rates: Sequence[float], *,
     return out
 
 
+def holm_adjust(p_values: Sequence[float]) -> list[float]:
+    """Holm step-down adjusted p-values, in the order given.
+
+    The i-th smallest of m p-values is multiplied by ``m - i`` (counting from
+    zero), then made monotone and capped at one. Rejecting where the adjusted
+    value is at or below alpha keeps the chance of any false rejection in the
+    family at or below alpha, with no assumption about how the tests depend
+    on each other.
+    """
+    if any(not 0 <= value <= 1 for value in p_values):
+        raise ValueError("p-values must lie in [0, 1]")
+    m = len(p_values)
+    order = sorted(range(m), key=lambda index: (p_values[index], index))
+    adjusted = [0.0] * m
+    running = 0.0
+    for rank, index in enumerate(order):
+        running = max(running, min(1.0, (m - rank) * p_values[index]))
+        adjusted[index] = running
+    return adjusted
+
+
+def multiplicity(significance_by_name: Mapping[str, Mapping[str, Any]], *, family: str,
+                 alpha: float = DEFAULT_ALPHA) -> dict[str, Any]:
+    """Holm-adjust a family of significance blocks that one report prints together.
+
+    Each block's deciding p-value is its ``p_value_upper_bound`` when it has
+    one (the sampled path decides on the bound), else its ``p_value``. A block
+    with no p-value ran no test, so it is listed under ``untested`` and does
+    not count toward the family size.
+    """
+    tested: dict[str, float] = {}
+    untested: list[str] = []
+    for name, block in significance_by_name.items():
+        p = block.get("p_value_upper_bound")
+        if p is None:
+            p = block.get("p_value")
+        if p is None:
+            untested.append(name)
+        else:
+            tested[name] = float(p)
+    adjusted = dict(zip(tested, holm_adjust(list(tested.values()))))
+    return {
+        "method": "holm",
+        "family": family,
+        "tests": len(tested),
+        "alpha": alpha,
+        "by_test": {name: {"p_value": tested[name], "adjusted_p_value": adjusted[name],
+                           "significant": adjusted[name] <= alpha}
+                    for name in sorted(tested)},
+        "significant_after_adjustment": sorted(name for name, value in adjusted.items()
+                                               if value <= alpha),
+        "untested": sorted(untested),
+    }
+
+
+def lattice_sign_flip_p(steps: Sequence[int]) -> float:
+    """Exact two-sided sign-flip p-value for whole-number deltas.
+
+    The planner simulates thousands of evals whose per-case deltas are whole
+    runs out of the repetitions, so the sum of signed deltas lives on the
+    integers and one convolution counts every sign pattern. It is the same
+    p-value ``sign_flip_test`` reports on its exact path.
+    """
+    moved = [abs(step) for step in steps if step]
+    if not moved:
+        return 1.0
+    reach = sum(moved)
+    counts = [0] * (2 * reach + 1)
+    counts[reach] = 1
+    for size in moved:
+        shifted = [0] * (2 * reach + 1)
+        for index, count in enumerate(counts):
+            if count:
+                shifted[index - size] += count
+                shifted[index + size] += count
+        counts = shifted
+    observed = abs(sum(steps))
+    extreme = sum(count for index, count in enumerate(counts) if abs(index - reach) >= observed)
+    return extreme / (1 << len(moved))
+
+
+def variance_split(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]]) -> dict[str, Any]:
+    """Split the variance of per-case deltas into repetition noise and case spread.
+
+    Each entry is ``((runs, passes), (runs, passes))`` for the skill arm and
+    the baseline arm of one case. ``within_case_variance`` is the mean
+    binomial variance of a case's delta, which more repetitions shrink.
+    ``between_case_variance`` is what is left of the observed variance, which
+    only more cases average away. With one run per arm the within-case share
+    cannot be estimated and both parts are null.
+    """
+    deltas = [with_passes / with_runs - without_passes / without_runs
+              for (with_runs, with_passes), (without_runs, without_passes) in case_counts]
+    out: dict[str, Any] = {
+        "cases": len(deltas),
+        "observed_delta_variance": round(statistics.variance(deltas), _DECIMALS) if len(deltas) > 1 else None,
+        "within_case_variance": None,
+        "between_case_variance": None,
+        "within_case_share": None,
+    }
+    if len(deltas) < 2 or any(runs < 2 for arms in case_counts for runs, _ in arms):
+        return out
+    within = statistics.fmean(
+        sum((passes / runs) * (1 - passes / runs) / (runs - 1) for runs, passes in arms)
+        for arms in case_counts)
+    total = statistics.variance(deltas)
+    between = max(0.0, total - within)
+    out["within_case_variance"] = round(within, _DECIMALS)
+    out["between_case_variance"] = round(between, _DECIMALS)
+    if within + between > 0:
+        out["within_case_share"] = round(within / (within + between), _DECIMALS)
+    return out
+
+
+def _shifted_rates(with_rates: Sequence[float], without_rates: Sequence[float],
+                   min_lift: float) -> list[float] | None:
+    """The pilot's skill-arm rates moved by one shift so the mean lift is ``min_lift``.
+
+    Clipping at 0 and 1 keeps each case's rate a probability, and bisection on
+    the shift recovers the target mean. None when even a skill arm that always
+    passes cannot reach it: the baseline leaves too little headroom.
+    """
+    def lift(shift: float) -> float:
+        return statistics.fmean(min(1.0, max(0.0, rate + shift)) - base
+                                for rate, base in zip(with_rates, without_rates))
+    if lift(1.0) < min_lift - _TOLERANCE:
+        return None
+    low, high = -1.0, 1.0
+    for _ in range(_SEARCH_STEPS):
+        middle = (low + high) / 2
+        if lift(middle) < min_lift:
+            low = middle
+        else:
+            high = middle
+    return [min(1.0, max(0.0, rate + high)) for rate in with_rates]
+
+
+def _smoothed_rates(arm: Sequence[tuple[int, int]]) -> list[float]:
+    """Observed per-case pass rates, moved half a run toward one half so a
+    case seen once is not treated as certain."""
+    return [(passes + 0.5) / (runs + 1) for runs, passes in arm]
+
+
+def _shrunk_rates(arm: Sequence[tuple[int, int]]) -> list[float] | None:
+    """Per-case pass rates with repetition noise removed, or None when one run
+    per case leaves that noise unmeasurable.
+
+    Each rate is pulled toward the arm mean by the share of the observed
+    variance that repetition noise explains. That treats every case as having
+    the same true lift apart from noise, so it erases a lift that differs by
+    case.
+    """
+    rates = [passes / runs for runs, passes in arm]
+    if len(rates) < 2 or any(runs < 2 for runs, _ in arm):
+        return None
+    mean = statistics.fmean(rates)
+    observed = statistics.variance(rates)
+    noise = statistics.fmean(rate * (1 - rate) / (runs - 1) for rate, (runs, _) in zip(rates, arm))
+    kept = max(0.0, observed - noise) / observed if observed > 0 else 0.0
+    return [mean + kept * (rate - mean) for rate in rates]
+
+
+def _simulated_power(with_rates: Sequence[float], without_rates: Sequence[float], *,
+                     cases: int, repetitions: int, trials: int, rng: random.Random,
+                     alpha: float) -> float:
+    wins = 0
+    for _ in range(trials):
+        steps = []
+        for index in rng.choices(range(len(without_rates)), k=cases):
+            gained = sum(rng.random() < with_rates[index] for _ in range(repetitions))
+            kept = sum(rng.random() < without_rates[index] for _ in range(repetitions))
+            steps.append(gained - kept)
+        if sum(steps) > 0 and lattice_sign_flip_p(steps) <= alpha:
+            wins += 1
+    return wins / trials
+
+
+def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *,
+               min_lift: float, cases_grid: Sequence[int], repetitions_grid: Sequence[int],
+               power: float = 0.8, trials: int = 400, seed: int = 0,
+               alpha: float = DEFAULT_ALPHA) -> dict[str, Any]:
+    """How many cases and repetitions would let the paired test show ``min_lift``?
+
+    Each grid cell simulates ``trials`` evals: draw cases from the pilot with
+    replacement, draw each arm's passes, and run the exact sign-flip test.
+    The skill-arm rates are shifted until the mean lift equals ``min_lift``.
+    Power is the share of trials that reach ``alpha`` with a positive lift.
+
+    A small pilot cannot pin down each case's true rates, so each cell carries
+    two readings and neither is a bound. ``power`` simulates from the observed
+    rates. Those carry the pilot's own repetition noise as if it were case
+    spread, so on average ``power`` does not overstate, and it decides the
+    recommendation. ``power_shrunk`` removes that noise. It is closer when the
+    cases are alike in baseline and in gain, and it can read high when the two
+    arms vary independently across cases. Both read low when baselines differ
+    widely. ``power_shrunk`` is null when the pilot cannot measure repetition
+    noise or the shrunk rates leave no room for ``min_lift``. The draws are
+    seeded per cell, so the plan is reproducible.
+    """
+    if not 0 < min_lift <= 1:
+        raise ValueError("min_lift must be a pass-rate difference in (0, 1]")
+    if not 0 < power < 1:
+        raise ValueError("power must lie strictly between 0 and 1")
+    if trials < 1 or any(value < 1 for value in (*cases_grid, *repetitions_grid)):
+        raise ValueError("trials, cases and repetitions must be positive")
+    target: dict[str, Any] = {"min_lift": min_lift, "alpha": alpha, "power": power}
+    base: dict[str, Any] = {"target": target, "pilot": variance_split(case_counts),
+                            "trials": trials, "seed": seed}
+    if not case_counts:
+        return {**base, "verdict": "no-pilot-pairs", "grid": [], "recommendation": None}
+    treatment = [arm for arm, _ in case_counts]
+    control = [arm for _, arm in case_counts]
+    without = _smoothed_rates(control)
+    # Headroom is a fact about the pilot's baseline, so it reads the raw rates:
+    # smoothing would invent room above a baseline that already passes.
+    # Compared as reported, so a target copied from the reported headroom fits.
+    headroom = round(1 - statistics.fmean(passes / runs for runs, passes in control), _DECIMALS)
+    if min_lift > headroom + _TOLERANCE:
+        return {**base, "verdict": "min-lift-exceeds-headroom",
+                "headroom": headroom,
+                "grid": [], "recommendation": None}
+    # Smoothing lifts a low baseline, which can leave the smoothed rates less
+    # room than the pilot showed. The skill arm then always passes: the
+    # largest lift the smoothed rates allow, a little under the target.
+    shifted = (_shifted_rates(_smoothed_rates(treatment), without, min_lift)
+               or [1.0] * len(without))
+    shrunk_with, shrunk_without = _shrunk_rates(treatment), _shrunk_rates(control)
+    shrunk_shifted = (None if shrunk_with is None or shrunk_without is None
+                      else _shifted_rates(shrunk_with, shrunk_without, min_lift))
+    grid: list[dict[str, Any]] = []
+    for cases in sorted(set(cases_grid)):
+        for repetitions in sorted(set(repetitions_grid)):
+            # One stream per reading per cell, so a cell's power does not
+            # depend on which other cells the grid holds.
+            share = _simulated_power(
+                shifted, without, cases=cases, repetitions=repetitions, trials=trials,
+                rng=random.Random(f"{seed}:{cases}:{repetitions}:observed"), alpha=alpha)
+            shrunk_share = None
+            if shrunk_shifted is not None and shrunk_without is not None:
+                shrunk_share = round(_simulated_power(
+                    shrunk_shifted, shrunk_without, cases=cases, repetitions=repetitions,
+                    trials=trials, rng=random.Random(f"{seed}:{cases}:{repetitions}:shrunk"),
+                    alpha=alpha), 4)
+            grid.append({"cases": cases, "repetitions": repetitions,
+                         "runs_per_arm": cases * repetitions, "power": round(share, 4),
+                         "power_standard_error": round(math.sqrt(share * (1 - share) / trials), 4),
+                         "power_shrunk": shrunk_share})
+    enough = [cell for cell in grid if cell["power"] >= power]
+    recommendation = min(enough, key=lambda cell: (cell["runs_per_arm"], cell["cases"]), default=None)
+    return {**base, "verdict": "plan-found" if recommendation else "grid-too-small",
+            "grid": grid, "recommendation": recommendation}
+
+
+# Fewer labels than this in either human class leave the judge's error rate
+# too rough to divide by.
+MIN_CLASS_LABELS = 10
+
+
+def _judge_error_rates(confusion: Mapping[str, int]) -> tuple[float, float, int, int] | str:
+    """Sensitivity, specificity and the label count behind each, or why not."""
+    human_pass = confusion["tp"] + confusion["fn"]
+    human_fail = confusion["tn"] + confusion["fp"]
+    if min(human_pass, human_fail) < MIN_CLASS_LABELS:
+        return (f"needs at least {MIN_CLASS_LABELS} human pass and {MIN_CLASS_LABELS} human fail "
+                f"labels; found {human_pass} pass and {human_fail} fail")
+    sensitivity = confusion["tp"] / human_pass
+    specificity = confusion["tn"] / human_fail
+    if sensitivity + specificity <= 1:
+        return ("the judge agrees with the human labels no better than chance "
+                f"(sensitivity {sensitivity:.3f} + specificity {specificity:.3f} <= 1)")
+    return sensitivity, specificity, human_pass, human_fail
+
+
+def _normal_interval(estimate: float, variance: float, confidence: float,
+                     low: float, high: float) -> dict[str, Any]:
+    reach = statistics.NormalDist().inv_cdf((1 + confidence) / 2) * math.sqrt(variance)
+    return {"confidence": confidence, "method": "normal-approximation",
+            "lower": round(max(low, estimate - reach), 4),
+            "upper": round(min(high, estimate + reach), 4)}
+
+
+def judge_corrected_rate(passes: int, total: int, *, confusion: Mapping[str, int],
+                         confidence: float = DEFAULT_CONFIDENCE) -> dict[str, Any]:
+    """A judge's pass rate corrected for the judge's own error rates.
+
+    A judge that passes some answers a human fails, and fails some a human
+    passes, reports ``p = theta * sens + (1 - theta) * (1 - spec)`` for a true
+    rate ``theta``. Solving for theta is the Rogan-Gladen estimator. Its
+    interval is a delta-method normal approximation that carries three
+    sources of noise: the judged sample and the two labelled samples behind
+    sensitivity and specificity.
+    """
+    if total < 1 or not 0 <= passes <= total:
+        raise ValueError("passes must lie between 0 and a positive total")
+    observed = passes / total
+    out: dict[str, Any] = {"n": total, "observed_pass_rate": round(observed, 4)}
+    rates = _judge_error_rates(confusion)
+    if isinstance(rates, str):
+        return {**out, "corrected_pass_rate": None, "interval": None, "reason": rates}
+    sensitivity, specificity, human_pass, human_fail = rates
+    youden = sensitivity + specificity - 1
+    theta = min(1.0, max(0.0, (observed + specificity - 1) / youden))
+    variance = (observed * (1 - observed) / total
+                + theta ** 2 * sensitivity * (1 - sensitivity) / human_pass
+                + (1 - theta) ** 2 * specificity * (1 - specificity) / human_fail) / youden ** 2
+    return {**out, "corrected_pass_rate": round(theta, 4),
+            "interval": _normal_interval(theta, variance, confidence, 0.0, 1.0)}
+
+
+def judge_corrected_lift(treatment: tuple[int, int], control: tuple[int, int], *,
+                         confusion: Mapping[str, int],
+                         confidence: float = DEFAULT_CONFIDENCE) -> dict[str, Any]:
+    """The difference of two judged pass rates, corrected for judge error.
+
+    With one judge for both arms the false-positive rate cancels and the
+    observed difference is the true one scaled by ``sens + spec - 1``, so an
+    imperfect judge shrinks a real lift toward zero. Each of ``treatment`` and
+    ``control`` is ``(passes, total)``. The interval treats the arms as
+    independent samples, which is wider than a paired interval when the same
+    cases feed both arms.
+    """
+    for passes, total in (treatment, control):
+        if total < 1 or not 0 <= passes <= total:
+            raise ValueError("passes must lie between 0 and a positive total")
+    with_rate = treatment[0] / treatment[1]
+    without_rate = control[0] / control[1]
+    out: dict[str, Any] = {"observed_delta": round(with_rate - without_rate, 4)}
+    rates = _judge_error_rates(confusion)
+    if isinstance(rates, str):
+        return {**out, "corrected_delta": None, "interval": None, "reason": rates}
+    sensitivity, specificity, human_pass, human_fail = rates
+    youden = sensitivity + specificity - 1
+    lift = max(-1.0, min(1.0, (with_rate - without_rate) / youden))
+    variance = ((with_rate * (1 - with_rate) / treatment[1]
+                 + without_rate * (1 - without_rate) / control[1])
+                + lift ** 2 * (sensitivity * (1 - sensitivity) / human_pass
+                               + specificity * (1 - specificity) / human_fail)) / youden ** 2
+    return {**out, "corrected_delta": round(lift, 4),
+            "interval": _normal_interval(lift, variance, confidence, -1.0, 1.0)}
+
+
+def harm_check(interval: dict[str, Any], *, max_harm: float) -> dict[str, Any]:
+    """Does the interval rule out a loss larger than ``max_harm``?
+
+    A lift that is not significant is not evidence of no harm: the interval
+    may still reach far below zero. This is the non-inferiority reading of the
+    same interval. ``within-margin`` needs the lower bound at or above
+    ``-max_harm``; ``harm-exceeds-margin`` needs the upper bound below it; an
+    interval that straddles the margin leaves harm ``harm-not-excluded``. An
+    unbounded interval excludes nothing, so it can never clear the margin.
+    """
+    if not 0 < max_harm <= 1:
+        raise ValueError("max_harm must be a pass-rate difference in (0, 1]")
+    out: dict[str, Any] = {"max_harm": max_harm, "lower": None, "upper": None}
+    if not interval.get("bounded"):
+        return {**out, "verdict": HarmVerdict.UNBOUNDED.value,
+                **({"reason": interval["reason"]} if interval.get("reason") else {})}
+    lower, upper = float(interval["lower"]), float(interval["upper"])
+    if lower >= -max_harm:
+        verdict = HarmVerdict.WITHIN_MARGIN
+    elif upper < -max_harm:
+        verdict = HarmVerdict.HARM_EXCEEDS_MARGIN
+    else:
+        verdict = HarmVerdict.HARM_NOT_EXCLUDED
+    return {**out, "verdict": verdict.value, "lower": lower, "upper": upper}
+
+
 @dataclass(frozen=True)
 class Estimate:
     """One paired effect: the test, its interval and the noise check, from one set of deltas.
@@ -642,11 +1018,13 @@ class Estimate:
     significance: dict[str, Any]
     interval: dict[str, Any]
     noise: dict[str, Any] | None
+    harm: dict[str, Any] | None = None
 
     @classmethod
     def from_deltas(cls, deltas: Sequence[float], *, unit: InferenceUnit,
                     without_rates: Sequence[float] | None = None,
                     min_lift: float | None = None,
+                    max_harm: float | None = None,
                     alpha: float = DEFAULT_ALPHA) -> Estimate:
         values = tuple(float(value) for value in deltas)
         interval = sign_flip_interval(values, confidence=1 - alpha)
@@ -654,20 +1032,24 @@ class Estimate:
         if without_rates is not None:
             noise = noise_check(values, list(without_rates), interval=interval,
                                 alpha=alpha, min_lift=min_lift)
+        harm = None if max_harm is None else harm_check(interval, max_harm=max_harm)
         return cls(InferenceUnit(unit), values, sign_flip_test(values, alpha=alpha),
-                   interval, noise)
+                   interval, noise, harm)
 
     @property
     def significant(self) -> bool:
         return bool(self.significance.get("significant_at_0_05"))
 
     def blocks(self) -> dict[str, Any]:
-        """The report fields: ``significance``, ``interval`` and, when the
-        baseline rates were given, ``noise_check``, each naming its unit."""
+        """The report fields: ``significance``, ``interval``, ``noise_check``
+        when the baseline rates were given and ``harm_check`` when a margin
+        was, each naming its unit."""
         out: dict[str, Any] = {
             "significance": {**self.significance, "unit": self.unit.value},
             "interval": {**self.interval, "unit": self.unit.value},
         }
         if self.noise is not None:
             out["noise_check"] = {**self.noise, "unit": self.unit.value}
+        if self.harm is not None:
+            out["harm_check"] = {**self.harm, "unit": self.unit.value}
         return out

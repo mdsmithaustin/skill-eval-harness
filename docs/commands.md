@@ -305,6 +305,8 @@ skill-benchmark judge-alignment \
 
 It reports `agreement`, **Cohen's `cohen_kappa`** (chance-corrected, so an imbalanced label set can't flatter the judge) with a `kappa_interpretation` band, and `precision`/`recall`/`f1` plus the `confusion` matrix. Below `--min-labels` (default 50) matched labels it warns that the metrics are unstable. Fully model-free — it grades a judge you already ran.
 
+A `bias_correction` block estimates the judge's `sensitivity` and `specificity` from the labelled verdicts and corrects the judged pass rate for them, `overall` and `by_variant`, with a `lift` entry for `with_skill` minus `without_skill`. Each entry carries the observed value, the corrected one and a normal-approximation `interval`. It needs at least 10 human pass and 10 human fail labels and a judge better than chance; otherwise `availability` is `unavailable` with a `reason`. [Can I trust my judge](can-i-trust-my-judge.md#correct-a-judged-pass-rate-for-judge-error) explains the estimator and its limits.
+
 A `calibration` block adds the `brier` score, 10-bin expected calibration error (`ece`) with its `reliability` bins, `auroc`, and a `threshold_sweep` over the observed scores with the `best_f1` threshold. It covers only judges the harness passes on `score >= threshold`: plain scored judges (`threshold` or `atLeast`), `per_step` judges (`min_met_fraction`), and consensus over plain scored members sharing one threshold (`--judge-panel` without `--quorum`, or `--judge-runs` repeats), including even-member ties resolved by the median score. There the score and the pass call share one scale, so `best_f1.threshold` compares directly with the thresholds listed in `decision_rules`. Dynamic-rubric, graded-dimension, quorum-consensus, mixed-member consensus, and boolean judges pass by another rule, so their verdicts are excluded with a reason, and a report with no calibrated verdict gets `availability: "not_applicable"`. Any metric that is undefined for the labels given is `null` with a warning. See [Can I trust my judge?](can-i-trust-my-judge.md) for how to read it.
 
 The end-to-end calibration loop over this command, `compare-judges`, and `judge-robustness` — runnable offline on the demo — is [`can-i-trust-my-judge.md`](can-i-trust-my-judge.md).
@@ -457,9 +459,78 @@ When the noise floor reaches the target (`min_lift`, else `headroom`), `projecte
 
 When pairing is incomplete, both fields move to `observed_interval` / `observed_noise_check` and the headline fields read `{"availability": "unavailable", "reason": "incomplete_pairing"}`, like the other headline fields. When every pair forms but the report is partial because a planned arm has no run or an assertion could not be graded, the same move happens on `paired_summary`, each `by_model` entry and `paired_edit_summary`, with `reason` (and `design_coverage_reason`) reading `answer_design_incomplete` or `grading_evidence_incomplete`; `graded` then moves to `observed_graded` and reads `{"availability": "partial", "delta": null, "reason": ...}`. A `graded` block also reads `partial` with a `null` delta when some pair is blocked, for example by a soft judge whose `score` is outside 0–1 (`blocked_reason_counts` names `invalid_graded_score`): the channel takes normalized scores, so return 0–1, use `graded_dimensions` or `atLeast`, or declare the judge's own scale as `score_scale: [low, high]`, which the harness normalizes ([graded score](vocabulary.md#things-you-assert)).
 
+### Several tests in one report
+
+A report with several models prints one lift test per model, and an ablation that cites several cases prints one test per case. At `alpha` 0.05, one test in twenty is significant by chance, so the best of four models clearing 0.05 is weak evidence. Two blocks give the Holm-adjusted reading of each family:
+
+- `paired_summary.by_model_multiplicity`, when the report has two or more models.
+- `ablation_regressions[].regressions[].significance.multiplicity`, when a confirmed regression cites two or more measured (case, model) cohorts. The family holds every measured cohort the regression cites, including the ones that did not regress, because each had the chance to.
+
+Each is `{method: "holm", family, tests, alpha, by_test: {name: {p_value, adjusted_p_value, significant}}, significant_after_adjustment, untested}`. `p_value` is the value the test decides on: `p_value_upper_bound` on the sampled path, else the exact `p_value`. A block whose headline is withheld ran no test the report claims, so it is listed in `untested` and does not count toward `tests`. When the whole report is withheld, every model is `untested`. The adjustment makes no assumption about how the tests depend on each other.
+
+The per-model and per-case `significant_at_0_05` fields are unchanged, and so is the ablation rule that one significant case confirms a regression. Read `significant_after_adjustment` before acting on one model or one case out of several. The pooled `paired_summary.significance` is one test and needs no adjustment.
+
+### Plan an eval before spending on it
+
+`noise_check` says what limited an eval after it ran. `plan-eval` answers the earlier question: how many cases and repetitions would let the paired test show the lift you care about. It reads a pilot `benchmark.json` and calls no model.
+
+```bash
+skill-benchmark plan-eval --benchmark benchmark.json --min-lift 0.1 --out plan.json
+```
+
+`pilot` splits the variance of the per-case deltas. `within_case_variance` is repetition noise, the mean binomial variance of a case's delta, which more repetitions shrink. `between_case_variance` is the rest, which only more cases average away. `limiting_variance` names the larger part as `within-case` or `between-case`. All three are null when the pilot ran one repetition per arm, because one run cannot show repetition noise.
+
+`grid` holds one row per `(cases, repetitions)` pair: `runs_per_arm`, the simulated `power` with its `power_standard_error`, and `power_shrunk`. Each row simulates `--trials` evals (default 400). A trial draws cases from the pilot with replacement, draws each arm's passes from the case's pass rates, and runs the exact sign-flip test. The skill arm's rates are the pilot's, shifted by one amount so the mean lift equals `--min-lift`.
+
+A small pilot cannot pin down each case's true pass rates, so each grid row carries two readings of power, and neither is a bound. `power` simulates from the pilot's observed rates, moved half a run toward one half so a case seen once is not treated as certain. Observed rates carry the pilot's own repetition noise as if it were a real difference between cases. In simulation `power` did not overstate on average, though one small pilot can land above or below, and it is the reading the recommendation uses. `power_shrunk` first removes that noise, by pulling each rate toward its arm's mean by the share of the observed spread that repetition noise explains. It is closer to the truth when the cases are alike in baseline and in gain. It can read high when the two arms vary independently from case to case, because the shrinking also flattens that real difference. Both readings read low when baselines differ widely across cases. `power_shrunk` is `null` when the pilot cannot measure repetition noise (a case that ran once per arm, or fewer than two cases) and when the shrunk rates leave no room for `--min-lift`. When the smoothing leaves the baseline less room than the pilot showed, `power` simulates a skill arm that always passes. That lift is under `--min-lift`, by up to a quarter with a one-run pilot and less with more runs, so `power` reads lower still. Plan on `power`, and read a `power_shrunk` far from it as a sign that a larger pilot would sharpen the plan. Each row draws from its own seeded stream, so the same inputs give the same plan and a row's power does not depend on the rest of the grid.
+
+`recommendation` is the row with the fewest `runs_per_arm` whose power reaches `--power` (default 0.8). `verdict` is one of:
+
+| Verdict | Meaning |
+|---|---|
+| `plan-found` | A grid row reaches the target power. |
+| `grid-too-small` | No row does. Widen `--cases` or `--repetitions`. |
+| `min-lift-exceeds-headroom` | The baseline already passes too often for `--min-lift` to fit; `headroom` is one minus the pilot's baseline pass rate, the largest mean lift left. A `--min-lift` equal to `headroom` still gets a plan. |
+| `no-pilot-pairs` | The report has no complete `with_skill` and `without_skill` pairs. |
+
+`--cases` and `--repetitions` take comma-separated lists. The defaults are 1, 2, 4 and 8 times the pilot's case count (never below 6, the fewest cases that can reach p ≤ 0.05) and 1, 3, 5 and the pilot's repetitions.
+
+The plan counts a run as a pass only when every objective check passes. `benchmark` tests the mean share of checks passed, so the two agree when each case has one objective check. When some pilot runs pass only part of their checks, `pilot.partially_passing_runs` counts them and `notes` says that `--min-lift` then means a lift in fully passing runs.
+
+The plan is an estimate from the pilot's cases. A pilot with few cases gives rough pass rates, and new cases may be easier or harder than the pilot's, so treat the recommendation as a starting size and rerun `plan-eval` on the larger run.
+
+### Harm check
+
+A lift that is not significant is not evidence that the skill does no harm, because the interval can still reach far below zero. `benchmark --max-harm X` (0 < X ≤ 1) names the largest pass-rate loss you would accept. It adds `harm_check` beside `interval` on `paired_summary`, each `by_model` entry and `paired_edit_summary`. The block is `{verdict, max_harm, lower, upper, unit}` and reads the same interval:
+
+| Verdict | Meaning |
+|---|---|
+| `within-margin` | `interval.lower` ≥ `-max_harm`: the eval rules out a loss larger than the margin. |
+| `harm-not-excluded` | The interval straddles `-max_harm`: a larger loss is still consistent with the data. |
+| `harm-exceeds-margin` | `interval.upper` < `-max_harm`: the eval shows a loss larger than the margin. |
+| `unbounded` | The interval has no finite bounds, so it excludes nothing; `reason` is the interval's. |
+
+`harm_check` moves to `observed_harm_check` whenever `interval` moves to `observed_interval`. Without `--max-harm` the block is absent. The flag adds a report field and changes no exit code.
+
+The verdict inherits the interval's limits. Fewer than six cases that move, or deltas that are all equal, give an `unbounded` interval, so an eval where every case loses by the same amount reads `unbounded` and not `harm-exceeds-margin`. Read `absolute_delta` beside the verdict.
+
 ### The edit against the previous revision
 
 When `--variant` selects an `old_skill` arm beside `with_skill` (`benchmark --variant with_skill --variant without_skill --variant old_skill`), the report adds `paired_edit_summary`: the current skill against the revision it replaces, paired per (case, model) within this run under the `skill_edit` contrast. It carries `current_objective_pass_rate`, `previous_objective_pass_rate`, `delta`, the same `significance`, `interval`, and `noise_check` blocks as `paired_summary` (with `headroom` measured on the previous revision), `regressed_cases` (each `{case_id, current, previous, delta, model?}`), `availability`, and `pairing`. A missing arm blocks its pair as `missing_old_skill` or `missing_with_skill`, and a partial comparison withholds its headline under `observed_*`, as `paired_summary` does. Without an `old_skill` arm the key is absent.
+
+### A skill the model wrote for itself as the control
+
+A skill can beat no skill and still lose to the skill the model would write for itself in one prompt. The `old_skill` arm can hold that skill. Have the model you target write a skill for the same job, save it in the repo, point `old_skill_paths` at it, and declare what the arm holds:
+
+```json
+"old_skill_paths": ["evals/self-generated/SKILL.md"],
+"optional_variants": ["old_skill"],
+"old_skill_role": "self_generated"
+```
+
+Then run `prepare --include-old-skill` and `benchmark --variant with_skill --variant without_skill --variant old_skill` as for an edit. `paired_edit_summary.control_role` reads `self_generated`, so a reader knows `previous_objective_pass_rate` is the model-written skill's rate and `delta` is the curated skill's margin over it. `regressed_cases` lists the cases where the model-written skill did better. The pairing, the test and the interval are the same as for an edit; `old_skill_role` only labels them. It defaults to `previous_revision` and takes no other value.
+
+The harness does not write the skill and never picks a model. A manifest has one `old_skill` arm, so one run compares against the previous revision or against a model-written skill, not both. Treat the result as a control, not as release proof: a different model or prompt writes a different skill.
 
 ### How runs ended
 
@@ -626,7 +697,7 @@ The JSON report carries `counts`, `taxonomy`, `findings`, `recommendations`, `re
 - missing trigger/no-trigger coverage,
 - missing domain/difficulty/success-goal taxonomy for slice summaries,
 - where the cases came from: `case_sources` counts each case's declared `source` (`production`, `bug-report`, `hand-written`, `synthesized`, or `imported`); a suite where any case records none gets `case-source-unrecorded`, and one where every case is `synthesized` gets `synthesized-cases-only`,
-- the **known-answer check** (`known_answer_check`, model-free): every non-trigger case with at least one gate or critical text check (`contains`, `contains_any`, `contains_all`, `excludes_any`, `regex`, `not_regex`) takes part. A declared reference answer must pass every such check, or the case is listed in `reference_failures` with a `reference-answer-fails` finding. The null answer, the case's prompt echoed back, must fail at least one, or the case is listed in `null_answer_passes` with a `null-answer-passes` finding. Only a case whose gate checks are all text checks and whose prompt is inline (`prompt` or `turns`, not a private `prompt_ref`) is null-checked, and a case readiness already reports as leak-saturated is not reported again. The block also counts `references_checked` and `null_answers_checked`,
+- the **known-answer check** (`known_answer_check`, model-free): every non-trigger case with at least one gate or critical text check (`contains`, `contains_any`, `contains_all`, `excludes_any`, `regex`, `not_regex`) takes part. A declared reference answer must pass every such check, or the case is listed in `reference_failures` with a `reference-answer-fails` finding. The null answer, the case's prompt echoed back, must fail at least one, or the case is listed in `null_answer_passes` with a `null-answer-passes` finding. Only a case whose gate checks are all text checks and whose prompt is inline (`prompt` or `turns`, not a private `prompt_ref`) is null-checked, and a case readiness already reports as leak-saturated is not reported again. Two more answers that show no capability run on each null-checked case the echo does not pass: `skill-text`, the skill's own text pasted back, and `refusal`, the line "I can't help with that request." A case that passes every gate check on one of them is listed in `degenerate_answer_passes` as `{case_id, answer}` with one `degenerate-answer-passes` finding. A case that passes on `skill-text` cannot tell applying the skill from reciting it, and one that passes on `refusal` accepts a non-answer. A case whose polarity is negative (`kind` `negative` or `adversarial`, or a `neg-` id) is skipped, because declining is the right answer there. The block also counts `references_checked`, `null_answers_checked` and `degenerate_answers_checked`,
 - ablation-plan suggestions from major skill sections,
 - the instruction-simulated ablations that should be materialized (and dangling/unknown ablation references),
 - saturated and no-lift cases when run data is available, with a `floor-eval` (recommended) finding in place of `no-lift-eval` for a floor case, regression-intent cases included,
@@ -698,6 +769,7 @@ Every finding the harness emits has a registered kind in `findings.FindingKind`,
 | `judge-is-model-under-test` | grader | required | `audit-manifest` |
 | `reference-answer-fails` | grader | required | `audit-manifest` (known-answer check) |
 | `null-answer-passes` | grader | required | `audit-manifest` (known-answer check) |
+| `degenerate-answer-passes` | grader | recommended | `audit-manifest` (known-answer check) |
 | `high-cost-judge-only-case` | grader | recommended | `audit-manifest --runs` (cost) |
 | `order-flip-inconsistent` | grader | recommended | `judge-robustness` |
 | `passes-empty-control` | grader | required | `judge-robustness` |
@@ -951,6 +1023,20 @@ skill-benchmark trigger-compare --baseline baseline.json --ablation ablated.json
 Rows are re-validated through the typed trigger-observation contract (a row whose stored flags contradict the contract is rejected, never averaged). Reports declare the complete expected agent/model/query design, and every repetition carries a stable `(query_id, run_number)`: a missing whole cell, a short or duplicate repetition set, or a row outside the design makes the report malformed. Each report also carries a self-digested `manifest_identity`, a self-digested experimental `protocol` (producer/adapter and executable identities, model/flags, timeout, repetition count, and worker concurrency), and each row repeats the protocol digest plus observed isolation state. Missing or mismatched identity/protocol fields are a compatibility error; regenerate legacy reports with the current runner rather than comparing them. Cross-arm protocol or observed-isolation drift makes causal provenance unverified or blocks the affected cell.
 
 Comparison then forms complete (agent, model, query-ID) cells and collapses every agent/model cell for the same authored query ID and polarity into one **pass-rate** delta. The authored query is the inference unit: adding models or agents cannot multiply one query into significance. Pass rates make polarity inherent, so a should-not-trigger query regresses by over-triggering. The verdict goes through the `EvidenceClass` guard: `confirmed_causal` requires matching top-level and recorded ablation IDs, verified revision provenance, complete coverage with no blocked cells, a negative aggregate mean pass delta, and a sign-flip-significant drop across authored queries (≥ 6 consistently regressed queries, same discretization bound as the answer path). A negative but insignificant mean reports `indeterminate`; a non-negative mean cannot confirm a regression even if the two-sided test is significant. Cross-arm design mismatches or incomplete observations are listed as blocked cells with reasons and make the whole verdict indeterminate.
+
+## Trigger rate by library size
+
+The matrix mounts the skill under test alone. `trigger-distractors` and `trigger-distractor-report` measure what happens to activation when other skills sit beside it.
+
+```bash
+skill-benchmark trigger-distractors evals/shared-benchmark.json --distractors ../decoy-skills --sizes 0,5,20 --out-dir /tmp/library
+skill-trigger-matrix /tmp/library/library-5/catalog.json --out /tmp/library/matrix-5.json   # once per size
+skill-benchmark trigger-distractor-report --report 0=/tmp/library/matrix-0.json --report 5=/tmp/library/matrix-5.json --out library.json
+```
+
+`trigger-distractors` writes `library-<N>/catalog.json` for each size in `--sizes` and an index, `distractor-catalogs.json`. Each catalog copies the manifest's skills and the first N decoy skills of one order seeded by `--seed`, and scopes the manifest's trigger cases with `expected_skills` and `forbidden_skills`. `--distractors` names a directory whose subdirectories each hold a `SKILL.md`. `--split` limits the trigger cases. The command calls no model.
+
+`trigger-distractor-report` takes two or more `--report SIZE=PATH` entries, one matrix report per catalog. For each (agent, model) it lists `by_library_size` entries with `should_trigger.expected_load_rate`, `should_trigger.pass_rate`, `should_not_trigger.fire_rate`, `distractor_activations` and `incomplete`, and a `degradation_boundary` for the load rate and for the pass rate. `--drop` (default 0.1) sets the fall from the smallest library's rate that counts as degradation. The report is descriptive. [Tuning skill activation](tuning-skill-activation.md#measure-activation-as-the-library-grows) explains how to choose decoys and read the result.
 
 ## Jetty adapter
 

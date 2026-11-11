@@ -392,8 +392,13 @@ from effect_estimates import (
     DiscriminationFailure,
     Estimate,
     InferenceUnit,
+    cases_needed_for_alpha,
     ceiling_or_floor,
+    judge_corrected_lift,
+    judge_corrected_rate,
     minimum_units_note,
+    multiplicity,
+    plan_power,
     sign_flip_test,
 )
 from findings import (
@@ -472,6 +477,7 @@ from judge_verdict import (
 from manifest_contracts import (
     ABLATION_VARIANT_PREFIX,
     DEFAULT_EXECUTION_VARIANTS,
+    JUDGE_TASK_DELIMITER,
     OLD_SKILL,
     WITH_SKILL,
     WITHOUT_SKILL,
@@ -1401,6 +1407,11 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
             or len(optional_variants) != len(set(optional_variants))
             or any(v != "old_skill" for v in optional_variants)):
         die("manifest.optional_variants may contain unique old_skill only")
+    if "old_skill_role" in manifest:
+        if manifest["old_skill_role"] not in OLD_SKILL_ROLES:
+            die(f"manifest.old_skill_role must be one of {list(OLD_SKILL_ROLES)}")
+        if not manifest.get("old_skill_paths"):
+            die("manifest.old_skill_role requires manifest.old_skill_paths")
     judge_cfg = manifest.get("judge")
     if judge_cfg is not None:
         if not isinstance(judge_cfg, dict):
@@ -12669,6 +12680,57 @@ def judge_calibration(ids: list[str], human: dict[str, dict[str, Any]],
             **(observed if complete else empty), "observed": observed, "warnings": warnings}
 
 
+def _judge_task_variant(judge_task_id_text: str) -> str | None:
+    """The variant segment of `case[::model]::variant::run-n::assertion`, or None."""
+    segments = judge_task_id_text.split(JUDGE_TASK_DELIMITER)
+    if len(segments) in (4, 5) and re.fullmatch(r"run-[0-9]+", segments[-2]):
+        return segments[-3]
+    return None
+
+
+def judge_bias_correction(confusion: dict[str, int], judged: dict[str, bool], *,
+                          dropped: Sequence[str] = ()) -> dict[str, Any]:
+    """Judge pass rates corrected for the judge's error against human labels.
+
+    `confusion` comes from the labelled verdicts; `judged` is every complete
+    verdict, labelled or not, so a small labelled sample corrects a large
+    judged one. Rates are corrected overall and per variant, and the
+    with_skill minus without_skill difference is corrected as a lift.
+    `dropped` names rows left out of either population (an invalid label, an
+    incomplete verdict); with any, the block is partial, not complete."""
+    human_pass = confusion["tp"] + confusion["fn"]
+    human_fail = confusion["tn"] + confusion["fp"]
+    by_variant: dict[str, list[bool]] = collections.defaultdict(list)
+    for identifier, passed in judged.items():
+        variant = _judge_task_variant(identifier)
+        if variant is not None:
+            by_variant[variant].append(passed)
+    block: dict[str, Any] = {
+        "method": "rogan-gladen",
+        "labels": {"human_pass": human_pass, "human_fail": human_fail},
+        "sensitivity": round(confusion["tp"] / human_pass, 4) if human_pass else None,
+        "specificity": round(confusion["tn"] / human_fail, 4) if human_fail else None,
+        "overall": (judge_corrected_rate(sum(judged.values()), len(judged), confusion=confusion)
+                    if judged else None),
+        "by_variant": {variant: judge_corrected_rate(sum(passes), len(passes), confusion=confusion)
+                       for variant, passes in sorted(by_variant.items())},
+        "lift": None,
+    }
+    treatment, control = (by_variant.get(arm) for arm in ("with_skill", "without_skill"))
+    if treatment and control:
+        block["lift"] = judge_corrected_lift((sum(treatment), len(treatment)),
+                                             (sum(control), len(control)), confusion=confusion)
+    reason = (block["overall"] or {}).get("reason") or (None if judged else "no complete judge verdicts")
+    if reason:
+        block["availability"] = "unavailable"
+    elif dropped:
+        block["availability"], reason = "partial", "; ".join(dropped)
+    else:
+        block["availability"] = "complete"
+    block["reason"] = reason
+    return block
+
+
 def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, dict[str, Any]], *, min_labels: int = 50) -> dict[str, Any]:
     """Feature 2: validate a JUDGE against HUMAN labels (not another judge). Both
     are keyed by judge_task_id with a `passed` bool. Reports agreement, Cohen's
@@ -12731,6 +12793,13 @@ def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, di
         "warnings": warnings,
         "calibration": judge_calibration(
             ids, human, judge, population_gaps=population_gaps, min_labels=min_labels),
+        "bias_correction": judge_bias_correction(
+            observed["confusion"],
+            {identifier: row["passed"] for identifier, row in judge.items()
+             if identifier not in incomplete_judge},
+            dropped=[f"{label}: {count}" for label, count in (
+                ("invalid human labels", len(invalid_human_ids)),
+                ("incomplete judge verdicts", len(incomplete_judge))) if count]),
     }
 
 
@@ -14406,7 +14475,8 @@ def paired_case_counts(results: list[dict[str, Any]]) -> list[tuple[str, tuple[i
 
 
 def paired_block_from_rates(paired_with_rates: list[float], paired_without_rates: list[float], negative_cases: list[dict[str, Any]],
-                            *, min_lift: float | None = None) -> dict[str, Any]:
+                            *, min_lift: float | None = None,
+                            max_harm: float | None = None) -> dict[str, Any]:
     with_rate = statistics.mean(paired_with_rates) if paired_with_rates else None
     without_rate = statistics.mean(paired_without_rates) if paired_without_rates else None
     absolute_delta = None
@@ -14421,7 +14491,8 @@ def paired_block_from_rates(paired_with_rates: list[float], paired_without_rates
     # inverts it, and the noise check (could this eval have shown a lift at
     # all?), each labelled with the unit the test counts.
     estimate = Estimate.from_deltas(deltas, unit=InferenceUnit.CASE,
-                                    without_rates=paired_without_rates, min_lift=min_lift)
+                                    without_rates=paired_without_rates, min_lift=min_lift,
+                                    max_harm=max_harm)
     return {
         "with_skill_objective_pass_rate": with_rate,
         "without_skill_objective_pass_rate": without_rate,
@@ -14457,7 +14528,7 @@ def withhold_paired_headline(block: dict[str, Any], reason: str, *,
         "method": "unavailable", "n": 0, "p_value": None,
         "significant_at_0_05": False, "reason": reason,
     }
-    for key in ("interval", "noise_check"):
+    for key in ("interval", "noise_check", "harm_check"):
         if key in out:
             out[f"observed_{key}"] = out[key]
             out[key] = {"availability": "unavailable", "reason": reason}
@@ -14476,7 +14547,14 @@ def pairing_aware_block(block: dict[str, Any],
     return withhold_paired_headline(out, "incomplete_pairing", headline_fields=headline_fields)
 
 
-def paired_edit_summary(results: list[dict[str, Any]], *, min_lift: float | None = None) -> dict[str, Any] | None:
+# What the old_skill arm holds. The pairing is the same either way; the role
+# says whether a negative delta is an edit that regressed or a curated skill
+# that loses to one the model wrote for itself.
+OLD_SKILL_ROLES = ("previous_revision", "self_generated")
+
+
+def paired_edit_summary(results: list[dict[str, Any]], *, min_lift: float | None = None,
+                        max_harm: float | None = None) -> dict[str, Any] | None:
     """The current skill against the revision it replaces, paired within one run.
 
     Comparing iteration N with N+1 across two runs mixes the edit with
@@ -14513,7 +14591,8 @@ def paired_edit_summary(results: list[dict[str, Any]], *, min_lift: float | None
         "previous_objective_pass_rate": statistics.mean(previous) if previous else None,
         "delta": statistics.mean(deltas) if deltas else None,
         **Estimate.from_deltas(deltas, unit=InferenceUnit.CASE,
-                               without_rates=previous, min_lift=min_lift).blocks(),
+                               without_rates=previous, min_lift=min_lift,
+                               max_harm=max_harm).blocks(),
         "regressed_cases": regressed,
     }
     return pairing_aware_block(
@@ -14521,7 +14600,8 @@ def paired_edit_summary(results: list[dict[str, Any]], *, min_lift: float | None
         headline_fields=EDIT_HEADLINE_FIELDS)
 
 
-def build_paired_summary(results: list[dict[str, Any]], *, min_lift: float | None = None) -> dict[str, Any]:
+def build_paired_summary(results: list[dict[str, Any]], *, min_lift: float | None = None,
+                         max_harm: float | None = None) -> dict[str, Any]:
     # The pairing key is (case, model) — roadmap 2.1. Each model's rows pair
     # with_skill against without_skill within that model only; the headline
     # block pools the per-(case, model) pairs, and by_model carries each
@@ -14542,7 +14622,7 @@ def build_paired_summary(results: list[dict[str, Any]], *, min_lift: float | Non
         all_without.extend(n)
         all_negative.extend({**item, "model": model} for item in neg)
         by_model[model] = pairing_aware_block(
-            paired_block_from_rates(w, n, neg, min_lift=min_lift),
+            paired_block_from_rates(w, n, neg, min_lift=min_lift, max_harm=max_harm),
             _metric_pair_construction(rows, "objective_pass_rate"))
         gw, gn, _ = paired_case_rates(rows, key="graded_score")
         graded_with.extend(gw)
@@ -14557,7 +14637,8 @@ def build_paired_summary(results: list[dict[str, Any]], *, min_lift: float | Non
         graded_with.extend(gw)
         graded_without.extend(gn)
     out = pairing_aware_block(
-        paired_block_from_rates(all_with, all_without, all_negative, min_lift=min_lift),
+        paired_block_from_rates(all_with, all_without, all_negative, min_lift=min_lift,
+                                max_harm=max_harm),
         _metric_pair_construction(results, "objective_pass_rate"))
     if graded_with:
         # The graded channel (roadmap 2.2): how much better, after the binary
@@ -14587,6 +14668,12 @@ def build_paired_summary(results: list[dict[str, Any]], *, min_lift: float | Non
                          "pairing": _metric_pair_construction(results, "graded_score").diagnostics()}
     if by_model:
         out["by_model"] = by_model
+    if len(by_model) > 1:
+        # One report prints a test per model, so a p <= 0.05 somewhere is
+        # expected by chance. A withheld block claims no test.
+        out["by_model_multiplicity"] = multiplicity(
+            {model: block["significance"] for model, block in by_model.items()},
+            family="by_model")
     return out
 
 
@@ -15099,12 +15186,23 @@ def build_ablation_regression_report(manifest: dict[str, Any], results: list[dic
                 per_case_sig[label] = Estimate.from_deltas(
                     paired_combined_deltas(matched),
                     unit=InferenceUnit.REPLICATE_PAIR).blocks()["significance"]
+            # The family is every measured cohort the regression cites, not
+            # only the ones that regressed: each had the chance to.
+            family_sig = {
+                (cid if cohort_model is None else f"{cid}@{cohort_model}"): (
+                    per_case_sig.get(cid if cohort_model is None else f"{cid}@{cohort_model}")
+                    or Estimate.from_deltas(
+                        paired_combined_deltas(matched),
+                        unit=InferenceUnit.REPLICATE_PAIR).blocks()["significance"])
+                for (cid, cohort_model), matched in pairs_by_case_model.items() if cid in cases}
             significance = {
                 "method": "per-case-model-paired-sign-flip",
                 "unit": InferenceUnit.REPLICATE_PAIR.value,
                 "significant_at_0_05": any(s.get("significant_at_0_05") for s in per_case_sig.values()),
                 "min_p_value": min((s["p_value"] for s in per_case_sig.values() if s.get("p_value") is not None), default=None),
                 "by_case": per_case_sig,
+                **({"multiplicity": multiplicity(family_sig, family="by_case")}
+                   if len(family_sig) > 1 else {}),
             } if confirmed_cohorts else None
             relevant_blocked_pairs = [
                 blocked.to_dict() for blocked in ablation_pairing.blocked
@@ -15966,6 +16064,10 @@ def invalidate_report_pairing(block: dict[str, Any], reason: str, *,
     if isinstance(out.get("by_model"), dict):
         out["by_model"] = {model: invalidate_report_pairing(value, reason)
                            for model, value in out["by_model"].items()}
+        if "by_model_multiplicity" in out:
+            out["by_model_multiplicity"] = multiplicity(
+                {model: value["significance"] for model, value in out["by_model"].items()},
+                family="by_model")
     return out
 
 
@@ -16683,6 +16785,7 @@ def build_benchmark_report(
     embed_cmd: str | None = None,
     min_lift: float | None = None,
     *, review_diagnostics: bool = False,
+    max_harm: float | None = None,
 ) -> dict[str, Any]:
     manifest = validate_manifest(path)
     variants = variants_arg or manifest.get("variants", DEFAULT_VARIANTS)
@@ -16825,9 +16928,9 @@ def build_benchmark_report(
         runs, results, manifest=manifest, manifest_path=path,
         case_ids=answer_case_ids, variants=variants)
     design_coverage = coverage.summary
-    paired_summary = build_paired_summary(results, min_lift=min_lift)
+    paired_summary = build_paired_summary(results, min_lift=min_lift, max_harm=max_harm)
     # The edit's own effect when the run carries an old_skill arm.
-    edit_summary = paired_edit_summary(results, min_lift=min_lift)
+    edit_summary = paired_edit_summary(results, min_lift=min_lift, max_harm=max_harm)
     pairing_block_reasons = set(paired_summary["pairing"]["blocked_reason_counts"])
     unscorable_results = [row for row in results if not scorable_run(row)]
     grading_blocked_results = [
@@ -16962,7 +17065,10 @@ def build_benchmark_report(
         # so a rubric the skill could see never inflates the held-out number.
         "qualitative_by_visibility": qualitative_surface,
         "paired_summary": paired_summary,
-        **({"paired_edit_summary": edit_summary} if edit_summary is not None else {}),
+        **({"paired_edit_summary": {
+            **edit_summary,
+            "control_role": manifest.get("old_skill_role", OLD_SKILL_ROLES[0])}}
+           if edit_summary is not None else {}),
         # 5: pass@k / pass^k per (case, variant) from the repeated-run data, plus a
         # pooled per-variant reliability headline. Uses the unbiased estimator.
         "reliability": reliability,
@@ -16994,7 +17100,7 @@ def build_benchmark_report(
 
 
 def benchmark(args: argparse.Namespace) -> int:
-    report = build_benchmark_report(Path(args.manifest), Path(args.runs), args.split, args.variant, getattr(args, "judge_results", None), **grading_options(args), min_lift=getattr(args, "min_lift", None), review_diagnostics=args.review_diagnostics)
+    report = build_benchmark_report(Path(args.manifest), Path(args.runs), args.split, args.variant, getattr(args, "judge_results", None), **grading_options(args), min_lift=getattr(args, "min_lift", None), review_diagnostics=args.review_diagnostics, max_harm=args.max_harm)
     emit_report(report, args.out)
     return 0
 
@@ -18827,6 +18933,253 @@ def trend(args: argparse.Namespace) -> int:
     return 0
 
 
+def _whole_number_list(raw: str, flag: str, *, minimum: int = 0) -> list[int]:
+    try:
+        values = [int(part) for part in raw.split(",")]
+    except ValueError:
+        die(f"{flag} must be a comma-separated list of whole numbers")
+    if any(value < minimum for value in values) or len(values) != len(set(values)):
+        die(f"{flag} must be distinct whole numbers of {minimum} or more")
+    return sorted(values)
+
+
+# What skill-trigger-matrix reads from a trigger case. A catalog carries no
+# answer-eval field, so it never references a fixture it did not copy.
+TRIGGER_ROUTING_FIELDS = ("id", "split", "kind", "should_trigger", "prompt")
+
+
+def build_distractor_catalogs(manifest_path: Path, distractors_dir: Path, sizes: list[int],
+                              out_dir: Path, *, seed: int = 0, split: str | None = None) -> dict[str, Any]:
+    """Write one self-contained catalog per library size for skill-trigger-matrix.
+
+    Each catalog holds the manifest's own skills plus the first `size` decoys of
+    one seeded order, so a larger library always contains a smaller one. Its
+    trigger cases are scoped: a should-trigger case expects the manifest's
+    skills and forbids every decoy, and a should-not-trigger case forbids the
+    manifest's skills. The matrix runs each catalog unchanged."""
+    manifest = validate_manifest(manifest_path)
+    require_resolvable_skill_paths(manifest_path, manifest)
+    repo_root = repo_root_for_manifest(manifest_path)
+    rels = list(manifest["skill_paths"])
+    try:
+        keys = skill_root_keys_for(repo_root, rels)
+    except AblationError as exc:
+        die(str(exc))
+    roots = [(repo_root / rel) if (repo_root / rel).is_dir() else (repo_root / rel).parent for rel in rels]
+    if any(root.resolve() == repo_root.resolve() for root in roots):
+        die("a skill root is the repository root; move the skill into its own directory to build a catalog")
+    if not distractors_dir.is_dir():
+        die(f"--distractors is not a directory: {distractors_dir}")
+    out_real = out_dir.resolve()
+    for source in (*roots, distractors_dir):
+        source_real = source.resolve()
+        if out_real == source_real or source_real in out_real.parents or out_real in source_real.parents:
+            die(f"--out-dir {out_dir} overlaps {source}; choose a directory outside the skills and the decoys")
+    decoys = sorted(child.name for child in distractors_dir.iterdir()
+                    if (child / "SKILL.md").is_file())
+    linked = sorted(name for name in decoys if (distractors_dir / name).is_symlink())
+    if linked:
+        die(f"distractor skill directories must not be symlinks: {linked}")
+    clashes = sorted(set(decoys) & set(keys))
+    if clashes:
+        die(f"distractor skill directories share a name with the skill under test: {clashes}")
+    if max(sizes) > len(decoys):
+        die(f"--sizes asks for {max(sizes)} distractors; {distractors_dir} holds {len(decoys)} skill directories")
+    cases = [case for case in iter_cases(manifest, split) if case.get("kind") == "trigger"]
+    if not cases:
+        die("the manifest has no kind:'trigger' cases to scope")
+    for case in cases:
+        if "expected_skills" in case or "forbidden_skills" in case:
+            die(f"{case.get('id')}: trigger case already declares expected_skills or forbidden_skills")
+        if not case.get("prompt"):
+            die(f"{case.get('id')}: a catalog needs an inline prompt; prompt_ref stays private")
+    order = list(decoys)
+    random.Random(seed).shuffle(order)
+    target_ids = [f"skills/{key}/SKILL.md" for key in keys]
+    catalogs = []
+    for size in sizes:
+        if (out_dir / f"library-{size}").exists():
+            die(f"{out_dir / f'library-{size}'} already exists; choose an empty --out-dir")
+    for size in sizes:
+        dest = out_dir / f"library-{size}"
+        chosen = sorted(order[:size])
+        try:
+            for root, key in zip(roots, keys, strict=True):
+                _copy_skill_root(root, dest / "skills" / key)
+            for name in chosen:
+                _copy_skill_root(distractors_dir / name, dest / "skills" / name)
+        except (AblationError, OSError) as exc:
+            for written in sizes:
+                shutil.rmtree(out_dir / f"library-{written}", ignore_errors=True)
+            die(str(exc))
+        decoy_ids = [f"skills/{name}/SKILL.md" for name in chosen]
+        scoped = []
+        for case in cases:
+            if case.get("should_trigger"):
+                scope = {"expected_skills": target_ids,
+                         **({"forbidden_skills": decoy_ids} if decoy_ids else {})}
+            else:
+                scope = {"forbidden_skills": target_ids}
+            scoped.append({**{field: case[field] for field in TRIGGER_ROUTING_FIELDS if field in case},
+                           **scope})
+        catalog = {key: manifest[key] for key in ("version", "skill_name", "variants") if key in manifest}
+        catalog.update({"skill_paths": target_ids + decoy_ids, "cases": scoped, "ablations": []})
+        write_json(dest / "catalog.json", catalog)
+        validate_manifest(dest / "catalog.json")
+        catalogs.append({"library_size": size, "manifest": str(dest / "catalog.json"),
+                         "distractors": chosen})
+    return {"skill_name": manifest["skill_name"], "seed": seed, "skills_under_test": target_ids,
+            "distractors_available": len(decoys), "trigger_cases": len(cases), "catalogs": catalogs}
+
+
+def trigger_distractors(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out_dir)
+    index = build_distractor_catalogs(
+        Path(args.manifest), Path(args.distractors), _whole_number_list(args.sizes, "--sizes"),
+        out_dir, seed=args.seed, split=args.split)
+    write_json(out_dir / "distractor-catalogs.json", index)
+    print(f"wrote {len(index['catalogs'])} catalog(s) under {out_dir}")
+    return 0
+
+
+def distractor_report(reports_by_size: dict[int, dict[str, Any]], *, drop: float = 0.1) -> dict[str, Any]:
+    """Trigger behaviour by library size, from one matrix report per size.
+
+    For each (agent, model): how often every expected skill loaded on
+    should-trigger runs, how often the run passed outright, how often a
+    should-not-trigger run fired, and which decoys loaded. A degradation
+    boundary is the smallest size from which a rate stays at least `drop`
+    below the smallest library's rate, given for the expected-skill load rate
+    and for the pass rate. Descriptive: it tests nothing."""
+    cells: dict[tuple[str, str | None], dict[int, dict[str, Any]]] = collections.defaultdict(dict)
+    for size, report in sorted(reports_by_size.items()):
+        rows = report.get("results")
+        if not isinstance(rows, list):
+            die(f"library size {size}: the report has no results rows")
+        for row in rows:
+            entry = cells[(str(row.get("agent")), row.get("model"))].setdefault(size, {
+                "library_size": size, "incomplete": 0,
+                "should_trigger": {"runs": 0, "expected_loaded": 0, "passed": 0},
+                "should_not_trigger": {"runs": 0, "fired": 0},
+                "distractor_activations": collections.Counter()})
+            if type(row.get("pass")) is not bool or row.get("observation_complete") is False:
+                entry["incomplete"] += 1
+                continue
+            if row.get("should_trigger"):
+                side = entry["should_trigger"]
+                side["runs"] += 1
+                loaded = (not row.get("missing_expected_skills") if "expected_skills" in row
+                          else row.get("triggered") is True)
+                side["expected_loaded"] += bool(loaded)
+                side["passed"] += row["pass"]
+                entry["distractor_activations"].update(row.get("forbidden_activations") or [])
+            else:
+                side = entry["should_not_trigger"]
+                side["runs"] += 1
+                side["fired"] += row.get("triggered") is True
+    def rate(count: int, runs: int) -> float | None:
+        return round(count / runs, 4) if runs else None
+    out_cells = []
+    for (agent, model), by_size in sorted(cells.items(), key=lambda item: (item[0][0], str(item[0][1] or ""))):
+        series = []
+        rates: dict[str, list[tuple[int, float | None]]] = {"expected_load_rate": [], "pass_rate": []}
+        for size in sorted(by_size):
+            entry = by_size[size]
+            positive, negative = entry["should_trigger"], entry["should_not_trigger"]
+            rates["expected_load_rate"].append((size, rate(positive["expected_loaded"], positive["runs"])))
+            rates["pass_rate"].append((size, rate(positive["passed"], positive["runs"])))
+            series.append({
+                "library_size": size,
+                "incomplete": entry["incomplete"],
+                "should_trigger": {"runs": positive["runs"],
+                                   "expected_load_rate": rates["expected_load_rate"][-1][1],
+                                   "pass_rate": rates["pass_rate"][-1][1]},
+                "should_not_trigger": {"runs": negative["runs"],
+                                       "fire_rate": rate(negative["fired"], negative["runs"])},
+                "distractor_activations": dict(sorted(entry["distractor_activations"].items())),
+            })
+        missing = sorted(set(reports_by_size) - set(by_size))
+        boundaries: dict[str, int | None] = {}
+        for metric, points in rates.items():
+            first = points[0][1]
+            boundaries[metric] = next(
+                (points[index][0] for index in range(1, len(points))
+                 if not missing and first is not None
+                 and all(value is not None and first - value >= drop - 1e-9
+                         for _, value in points[index:])),
+                None)
+        out_cells.append({"agent": agent, "model": model, "by_library_size": series,
+                          "missing_library_sizes": missing,
+                          "degradation_boundary": boundaries})
+    return {"drop": drop, "library_sizes": sorted(reports_by_size), "cells": out_cells}
+
+
+def trigger_distractor_report(args: argparse.Namespace) -> int:
+    reports: dict[int, dict[str, Any]] = {}
+    for spec in args.report or []:
+        size_text, separator, path = spec.partition("=")
+        if not separator or not size_text.isdecimal() or not path:
+            die(f"--report must be SIZE=PATH with a whole-number library size; got {spec!r}")
+        if int(size_text) in reports:
+            die(f"--report names library size {size_text} twice")
+        reports[int(size_text)] = load_json(Path(path))
+    if len(reports) < 2:
+        die("trigger-distractor-report needs at least two --report SIZE=PATH entries")
+    if not 0 < args.drop <= 1:
+        die("--drop must be a rate difference in (0, 1]")
+    emit_report(distractor_report(reports, drop=args.drop), args.out)
+    return 0
+
+
+def planning_case_counts(results: list[dict[str, Any]]) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """Per-(case, model) pass counts for both arms, pooled as paired_summary pools them."""
+    models = sorted({str(r.get("model")) for r in results if r.get("model")})
+    unlabeled = [r for r in results if not r.get("model")]
+    pools = [[r for r in results if str(r.get("model")) == model] for model in models]
+    if unlabeled or not models:
+        pools.append(unlabeled if models else results)
+    return [(with_counts, without_counts) for rows in pools
+            for _, with_counts, without_counts in paired_case_counts(rows)]
+
+
+def plan_eval(args: argparse.Namespace) -> int:
+    """Forward planning from a pilot run: which (cases, repetitions) would let
+    the paired test show --min-lift. Model-free; reads only benchmark.json."""
+    report = load_json(Path(args.benchmark))
+    results = report.get("results") if isinstance(report, dict) else None
+    if not isinstance(results, list):
+        die(f"{args.benchmark} has no results rows; pass a benchmark.json written by `benchmark`")
+    counts = planning_case_counts(results)
+    pilot_cases = len(counts)
+    pilot_repetitions = max((runs for (runs, _), _ in counts), default=1)
+    needed = cases_needed_for_alpha()
+    cases_grid = (_whole_number_list(args.cases, "--cases", minimum=1) if args.cases is not None
+                  else sorted({max(needed, pilot_cases * factor) for factor in (1, 2, 4, 8)}))
+    repetitions_grid = (_whole_number_list(args.repetitions, "--repetitions", minimum=1)
+                        if args.repetitions is not None else sorted({1, 3, 5, pilot_repetitions}))
+    if not 0 < args.power < 1:
+        die("--power must lie strictly between 0 and 1")
+    plan = plan_power(counts, min_lift=args.min_lift, cases_grid=cases_grid,
+                      repetitions_grid=repetitions_grid, power=args.power, trials=args.trials)
+    share = plan["pilot"]["within_case_share"]
+    plan["pilot"]["repetitions"] = pilot_repetitions
+    plan["pilot"]["limiting_variance"] = (
+        None if share is None else "within-case" if share >= 0.5 else "between-case")
+    plan["unit"] = InferenceUnit.CASE.value
+    fractional = sum(1 for row in results
+                     if isinstance(row.get("objective_pass_rate"), (int, float))
+                     and 0 < row["objective_pass_rate"] < 1)
+    plan["pilot"]["partially_passing_runs"] = fractional
+    plan["notes"] = []
+    if fractional:
+        plan["notes"].append(
+            f"{fractional} pilot run(s) pass some objective checks and fail others. The plan counts a "
+            "run as a pass only when every objective check passes, while benchmark tests the mean "
+            "share of checks passed, so --min-lift here is a lift in fully passing runs.")
+    emit_report(plan, args.out)
+    return 0
+
+
 def suggest_case_candidates(report: dict[str, Any], manifest: dict[str, Any]) -> list[dict[str, Any]]:
     """The deterministic half of the living-eval loop (roadmap 2.10): saturated
     and no-lift flags select the cases that stopped discriminating; each yields
@@ -19907,8 +20260,11 @@ def reference_answer_text(case: dict[str, Any], manifest_dir: Path) -> str | Non
     return None
 
 
+REFUSAL_ANSWER = "I can't help with that request."
+
+
 def known_answer_check(manifest: dict[str, Any], manifest_path: Path, *,
-                       split: str | None = None) -> dict[str, Any]:
+                       split: str | None = None, skill_text: str | None = None) -> dict[str, Any]:
     """Grade known answers through each case's own deterministic checks (mark 2).
 
     A declared reference answer must pass every gate text check. The null
@@ -19917,11 +20273,19 @@ def known_answer_check(manifest: dict[str, Any], manifest_path: Path, *,
     answer. Only text checks that need nothing but the answer string run here;
     a case with other gate checks is not null-checked, because those checks
     fail an echo for reasons unrelated to the grader. Model-free.
+
+    Two more answers that show no capability run on the same cases: the skill's
+    own text pasted back, and a one-line refusal. A case the echo already
+    passes is not listed again. A case whose polarity is negative is skipped,
+    because declining is the right answer there.
     """
     output_path = manifest_path.parent / "known-answer-check.md"
     reference_failures: list[dict[str, Any]] = []
     null_passes: list[Any] = []
-    references_checked = nulls_checked = 0
+    degenerate_passes: list[dict[str, Any]] = []
+    references_checked = nulls_checked = degenerate_checked = 0
+    degenerate_answers = [(name, text) for name, text in
+                          (("skill-text", skill_text), ("refusal", REFUSAL_ANSWER)) if text]
     for case in iter_cases(manifest, split):
         if CaseKind.parse(case.get("kind", "behavior")).population is CasePopulation.TRIGGER:
             continue
@@ -19944,7 +20308,16 @@ def known_answer_check(manifest: dict[str, Any], manifest_path: Path, *,
         nulls_checked += 1
         if all(assertion_result(a, prompt, output_path)["passed"] is True for a in checkable):
             null_passes.append(case.get("id"))
+            continue
+        if case_polarity(case) == "negative":
+            continue
+        degenerate_checked += 1
+        degenerate_passes.extend(
+            {"case_id": case.get("id"), "answer": name} for name, text in degenerate_answers
+            if all(assertion_result(a, text, output_path)["passed"] is True for a in checkable))
     return {
+        "degenerate_answers_checked": degenerate_checked,
+        "degenerate_answer_passes": degenerate_passes,
         "references_checked": references_checked,
         "reference_failures": reference_failures,
         "null_answers_checked": nulls_checked,
@@ -20332,7 +20705,7 @@ def audit_manifest_report(
                 "every case is synthesized; add cases drawn from real requests or bug reports.")
 
     # Mark 2: the grader on known answers.
-    known = known_answer_check(manifest, manifest_path, split=split)
+    known = known_answer_check(manifest, manifest_path, split=split, skill_text=skill_text)
     if known["reference_failures"]:
         finding(FindingKind.REFERENCE_ANSWER_FAILS,
                 f"{len(known['reference_failures'])} case(s) fail their own reference answer; "
@@ -20343,6 +20716,11 @@ def audit_manifest_report(
         finding(FindingKind.NULL_ANSWER_PASSES,
                 f"{len(null_passes)} case(s) pass every gate check when the answer only echoes the "
                 "prompt; the checks cannot tell an answer from no answer.", null_passes)
+    if known["degenerate_answer_passes"]:
+        finding(FindingKind.DEGENERATE_ANSWER_PASSES,
+                f"{len(known['degenerate_answer_passes'])} case and answer pair(s) pass every gate "
+                "check with an answer that shows no capability: the skill's own text pasted back, "
+                "or a one-line refusal.", known["degenerate_answer_passes"])
 
     # Marks 3-5 on runs: only a complete benchmark can support them.
     bench_complete = bool(bench_report) and bench_report.get("availability") == "complete"
@@ -21128,6 +21506,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--variant", action="append")
     add_grading_options(p)
     p.add_argument("--min-lift", type=float, help="smallest pass-rate lift you would act on (e.g. 0.1); the noise check reports whether the eval can resolve it")
+    p.add_argument("--max-harm", type=float, help="largest pass-rate loss you would accept (e.g. 0.05); harm_check reports whether the lift interval rules out a larger one")
     p.add_argument("--out")
 
     p.add_argument("--review-diagnostics", action="store_true", help="include optional diagnostic verifier authoring leads; grades and gates are unchanged")
@@ -21214,6 +21593,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ablation", required=True, help="skill-trigger-matrix report JSON produced with --ablation on the same canonical revision")
     p.add_argument("--out")
 
+    p = sub.add_parser("trigger-distractors", help="build one self-contained catalog per library size: the manifest's skills plus N decoy skills, with scoped trigger cases for skill-trigger-matrix")
+    p.add_argument("manifest")
+    p.add_argument("--distractors", required=True, help="directory whose subdirectories are decoy skills (each holds a SKILL.md)")
+    p.add_argument("--sizes", required=True, help="comma-separated decoy counts, e.g. 0,5,20")
+    p.add_argument("--out-dir", required=True, help="empty directory for library-<N>/catalog.json and distractor-catalogs.json")
+    p.add_argument("--seed", type=int, default=0, help="seed for the decoy order; a larger library always contains a smaller one")
+    p.add_argument("--split", choices=sorted(VALID_SPLITS))
+
+    p = sub.add_parser("trigger-distractor-report", help="trigger behaviour by library size from one skill-trigger-matrix report per catalog: expected-skill load rate, pass rate, decoy activations, and the degradation boundary")
+    p.add_argument("--report", action="append", metavar="SIZE=PATH", help="library size = matrix report JSON (repeatable, at least two)")
+    p.add_argument("--drop", type=float, default=0.1, help="fall in a rate from the smallest library's that marks degradation (default 0.1)")
+    p.add_argument("--out")
+
     p = sub.add_parser("migrate", help="upgrade a version-1 manifest to version 2: stamp default severity/oracle tiers, mark binary judge rubrics, print the diff and the judgment-call checklist")
     p.add_argument("manifest")
     p.add_argument("--check", action="store_true", help="dry run: print the diff and checklist, write nothing")
@@ -21236,6 +21628,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("trend", help="append-only history of benchmark reports: series, successive diffs, severity-weighted recurring failures, prune candidates")
     p.add_argument("--history", required=True, help="history directory of run-<seq>.json reports")
     p.add_argument("--add", help="append this benchmark.json to the history before reporting")
+    p.add_argument("--out")
+
+    p = sub.add_parser("plan-eval", help="plan an eval from a pilot benchmark.json: simulated power of the paired test over a grid of case and repetition counts (model-free)")
+    p.add_argument("--benchmark", required=True, help="benchmark.json from a pilot run with both arms")
+    p.add_argument("--min-lift", type=float, required=True, help="smallest pass-rate lift the eval must be able to show (e.g. 0.1)")
+    p.add_argument("--power", type=float, default=0.8, help="share of simulated evals that must reach significance (default 0.8)")
+    p.add_argument("--cases", help="comma-separated case counts to try (default: 1x, 2x, 4x and 8x the pilot's, at least 6)")
+    p.add_argument("--repetitions", help="comma-separated repetitions per arm to try (default: 1, 3, 5 and the pilot's)")
+    p.add_argument("--trials", type=int, default=400, help="simulated evals per grid cell (default 400)")
     p.add_argument("--out")
 
     p = sub.add_parser("suggest-cases", help="living-eval loop: turn saturated/no-lift flags into harder-case candidates (generation opt-in via --generate-cmd; never edits a manifest)")
@@ -21395,10 +21796,13 @@ def main() -> int:
         CLICommand.COMPARE_TASKS: compare_tasks,
         CLICommand.COMPARE_RESULTS: compare_results,
         CLICommand.TRIGGER_COMPARE: trigger_compare,
+        CLICommand.TRIGGER_DISTRACTORS: trigger_distractors,
+        CLICommand.TRIGGER_DISTRACTOR_REPORT: trigger_distractor_report,
         CLICommand.MIGRATE: migrate_command,
         CLICommand.MIGRATE_TELEMETRY: migrate_telemetry_command,
         CLICommand.COST_SUMMARY: cost_summary_command,
         CLICommand.TREND: trend,
+        CLICommand.PLAN_EVAL: plan_eval,
         CLICommand.SUGGEST_CASES: suggest_cases,
         CLICommand.RENDER_VIEWER: render_viewer,
         CLICommand.PROFILE_SKILL: profile_skill,

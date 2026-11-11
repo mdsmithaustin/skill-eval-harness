@@ -42,10 +42,13 @@ class CLICommand(str, Enum):
     COMPARE_TASKS = "compare-tasks"
     COMPARE_RESULTS = "compare-results"
     TRIGGER_COMPARE = "trigger-compare"
+    TRIGGER_DISTRACTORS = "trigger-distractors"
+    TRIGGER_DISTRACTOR_REPORT = "trigger-distractor-report"
     MIGRATE = "migrate"
     MIGRATE_TELEMETRY = "migrate-telemetry"
     COST_SUMMARY = "cost-summary"
     TREND = "trend"
+    PLAN_EVAL = "plan-eval"
     SUGGEST_CASES = "suggest-cases"
     RENDER_VIEWER = "render-viewer"
     PROFILE_SKILL = "profile-skill"
@@ -62,12 +65,12 @@ _PATH_ARGUMENTS = frozenset({
     "judge_tasks", "judge_results", "transcripts", "benchmark", "labels",
     "truth", "results", "out_checklist", "history", "add", "workspace",
     "previous_workspace", "skill_path", "truth_out", "cost_history", "md",
-    "runs_root", "runs_subdir", "suite_file", "workspace_root", "pins", "out_dir",
+    "runs_root", "runs_subdir", "suite_file", "workspace_root", "pins", "out_dir", "distractors",
 })
 _PATH_SEQUENCES = frozenset({"manifests"})
 _POSITIVE_NUMBERS = frozenset({
     "timeout", "poll_interval", "concurrency", "runs_per_variant", "judge_runs",
-    "quorum", "ngram", "port", "leakage_min_chars", "assumed_tokens_per_run",
+    "quorum", "ngram", "port", "leakage_min_chars", "assumed_tokens_per_run", "trials",
 })
 _NONNEGATIVE_NUMBERS = frozenset({
     "magnitude_eps", "min_positive", "min_negative", "min_adversarial",
@@ -77,8 +80,8 @@ _NONNEGATIVE_NUMBERS = frozenset({
     "max_references", "max_modules",
 })
 _UNIT_INTERVAL_NUMBERS = frozenset({"overlap_threshold"})
-# A pass-rate difference worth acting on: above zero and at most one.
-_LIFT_NUMBERS = frozenset({"min_lift"})
+# A pass-rate difference (a lift worth acting on or a loss worth refusing): above zero and at most one.
+_LIFT_NUMBERS = frozenset({"min_lift", "max_harm"})
 
 
 def _validated_path(value: Any, label: str) -> Path:
