@@ -394,6 +394,7 @@ from effect_estimates import (
     InferenceUnit,
     ceiling_or_floor,
     minimum_units_note,
+    multiplicity,
     sign_flip_test,
 )
 from findings import (
@@ -14593,6 +14594,12 @@ def build_paired_summary(results: list[dict[str, Any]], *, min_lift: float | Non
                          "pairing": _metric_pair_construction(results, "graded_score").diagnostics()}
     if by_model:
         out["by_model"] = by_model
+    if len(by_model) > 1:
+        # One report prints a test per model, so a p <= 0.05 somewhere is
+        # expected by chance. A withheld block claims no test.
+        out["by_model_multiplicity"] = multiplicity(
+            {model: block["significance"] for model, block in by_model.items()},
+            family="by_model")
     return out
 
 
@@ -15111,6 +15118,8 @@ def build_ablation_regression_report(manifest: dict[str, Any], results: list[dic
                 "significant_at_0_05": any(s.get("significant_at_0_05") for s in per_case_sig.values()),
                 "min_p_value": min((s["p_value"] for s in per_case_sig.values() if s.get("p_value") is not None), default=None),
                 "by_case": per_case_sig,
+                **({"multiplicity": multiplicity(per_case_sig, family="by_case")}
+                   if len(per_case_sig) > 1 else {}),
             } if confirmed_cohorts else None
             relevant_blocked_pairs = [
                 blocked.to_dict() for blocked in ablation_pairing.blocked

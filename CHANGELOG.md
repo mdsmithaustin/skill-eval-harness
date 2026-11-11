@@ -4,6 +4,11 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add Holm-adjusted p-values for the test families a report prints together:
+  `paired_summary.by_model_multiplicity` across models and `significance.multiplicity`
+  across an ablation regression's cases. Existing significance fields and verdicts are
+  unchanged. See [several tests in one report](docs/commands.md#several-tests-in-one-report).
+
 - Add `benchmark --max-harm`. Each paired block gains `harm_check`, which reads the lift
   interval as a non-inferiority test and says whether the eval rules out a loss larger than
   the margin. See [harm check](docs/commands.md#harm-check).

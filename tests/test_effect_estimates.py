@@ -368,6 +368,46 @@ class NoiseCheckTests(unittest.TestCase):
         self.assertIn("every paired delta is the same", result["reason"])
         self.assertTrue(ee.sign_flip_test([1.0] * 6)["significant_at_0_05"])
 
+class HolmTests(unittest.TestCase):
+    def test_textbook_example(self):
+        # Sorted p 0.01, 0.02, 0.03, 0.04 with m = 4 step down to 0.04, 0.06, 0.06, 0.04:
+        # the last is raised to 0.06 so the adjusted values never decrease.
+        adjusted = ee.holm_adjust([0.04, 0.01, 0.03, 0.02])
+        for got, want in zip(adjusted, [0.06, 0.04, 0.06, 0.06]):
+            self.assertAlmostEqual(got, want)
+
+    def test_adjusted_values_cap_at_one_and_keep_input_order(self):
+        self.assertEqual(ee.holm_adjust([0.5, 0.9, 0.01]), [1.0, 1.0, 0.03])
+        self.assertEqual(ee.holm_adjust([]), [])
+        self.assertEqual(ee.holm_adjust([0.03]), [0.03])
+
+    def test_p_values_outside_the_unit_interval_are_rejected(self):
+        for values in ([1.2], [-0.1, 0.5]):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                ee.holm_adjust(values)
+
+    def test_one_lucky_model_among_four_does_not_survive(self):
+        # p = 0.03125 is six cases all improving. Alone it is significant;
+        # as the best of four models it adjusts to 0.125.
+        blocks = {"a": {"p_value": 0.03125, "p_value_upper_bound": 0.03125},
+                  "b": {"p_value": 0.5, "p_value_upper_bound": 0.5},
+                  "c": {"p_value": 1.0, "p_value_upper_bound": 1.0},
+                  "d": {"p_value": 0.25, "p_value_upper_bound": 0.25}}
+        result = ee.multiplicity(blocks, family="by_model")
+        self.assertEqual(result["tests"], 4)
+        self.assertEqual(result["by_test"]["a"]["adjusted_p_value"], 0.125)
+        self.assertEqual(result["significant_after_adjustment"], [])
+
+    def test_the_sampled_bound_decides_and_untested_blocks_do_not_count(self):
+        blocks = {"sampled": {"p_value": 0.001, "p_value_upper_bound": 0.02},
+                  "withheld": {"method": "unavailable", "p_value": None},
+                  "exact": {"p_value": 0.0002}}
+        result = ee.multiplicity(blocks, family="by_model")
+        self.assertEqual((result["tests"], result["untested"]), (2, ["withheld"]))
+        self.assertEqual(result["by_test"]["sampled"]["p_value"], 0.02)
+        self.assertEqual(result["significant_after_adjustment"], ["exact", "sampled"])
+
+
 class HarmCheckTests(unittest.TestCase):
     def check(self, deltas, max_harm):
         return ee.harm_check(ee.sign_flip_interval(deltas), max_harm=max_harm)
@@ -442,6 +482,27 @@ class PairedSummaryTests(unittest.TestCase):
         summary = sb.build_paired_summary(rows, max_harm=0.05)
         self.assertEqual(summary["harm_check"]["availability"], "unavailable")
         self.assertEqual(summary["observed_harm_check"]["verdict"], "within-margin")
+
+    def model_rows(self, pairs_by_model):
+        out = []
+        for model, pairs in pairs_by_model.items():
+            for row in self.rows(pairs):
+                out.append({**row, "model": model})
+        return out
+
+    def test_several_models_get_a_holm_family_and_one_model_does_not(self):
+        lucky = [(1.0, 0.0)] * 6
+        flat = [(1.0, 0.0), (0.0, 1.0)] * 3
+        one = sb.build_paired_summary(self.model_rows({"m1": lucky}))
+        self.assertNotIn("by_model_multiplicity", one)
+        summary = sb.build_paired_summary(
+            self.model_rows({"m1": lucky, "m2": flat, "m3": flat, "m4": flat}))
+        self.assertTrue(summary["by_model"]["m1"]["significance"]["significant_at_0_05"])
+        family = summary["by_model_multiplicity"]
+        self.assertEqual((family["method"], family["family"], family["tests"]),
+                         ("holm", "by_model", 4))
+        self.assertEqual(family["by_test"]["m1"]["adjusted_p_value"], 0.125)
+        self.assertEqual(family["significant_after_adjustment"], [])
 
     def test_blocked_pairing_moves_both_to_observed(self):
         rows = self.rows([(1.0, 0.0)] * 7 + [(1.0, 0.5)])

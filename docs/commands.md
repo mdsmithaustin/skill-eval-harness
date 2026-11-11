@@ -457,6 +457,17 @@ When the noise floor reaches the target (`min_lift`, else `headroom`), `projecte
 
 When pairing is incomplete, both fields move to `observed_interval` / `observed_noise_check` and the headline fields read `{"availability": "unavailable", "reason": "incomplete_pairing"}`, like the other headline fields. When every pair forms but the report is partial because a planned arm has no run or an assertion could not be graded, the same move happens on `paired_summary`, each `by_model` entry and `paired_edit_summary`, with `reason` (and `design_coverage_reason`) reading `answer_design_incomplete` or `grading_evidence_incomplete`; `graded` then moves to `observed_graded` and reads `{"availability": "partial", "delta": null, "reason": ...}`. A `graded` block also reads `partial` with a `null` delta when some pair is blocked, for example by a soft judge whose `score` is outside 0–1 (`blocked_reason_counts` names `invalid_graded_score`): the channel takes normalized scores, so return 0–1, use `graded_dimensions` or `atLeast`, or declare the judge's own scale as `score_scale: [low, high]`, which the harness normalizes ([graded score](vocabulary.md#things-you-assert)).
 
+### Several tests in one report
+
+A report with several models prints one lift test per model, and an ablation that cites several cases prints one test per case. At `alpha` 0.05, one test in twenty is significant by chance, so the best of four models clearing 0.05 is weak evidence. Two blocks give the Holm-adjusted reading of each family:
+
+- `paired_summary.by_model_multiplicity`, when the report has two or more models.
+- `ablation_regressions[].regressions[].significance.multiplicity`, when a regression has two or more confirmed cases.
+
+Each is `{method: "holm", family, tests, alpha, by_test: {name: {p_value, adjusted_p_value, significant}}, significant_after_adjustment, untested}`. `p_value` is the value the test decides on: `p_value_upper_bound` on the sampled path, else the exact `p_value`. A block whose headline is withheld ran no test the report claims, so it is listed in `untested` and does not count toward `tests`. The adjustment makes no assumption about how the tests depend on each other.
+
+The per-model and per-case `significant_at_0_05` fields are unchanged, and so is the ablation rule that one significant case confirms a regression. Read `significant_after_adjustment` before acting on one model or one case out of several. The pooled `paired_summary.significance` is one test and needs no adjustment.
+
 ### Harm check
 
 A lift that is not significant is not evidence that the skill does no harm, because the interval can still reach far below zero. `benchmark --max-harm X` (0 < X ≤ 1) names the largest pass-rate loss you would accept. It adds `harm_check` beside `interval` on `paired_summary`, each `by_model` entry and `paired_edit_summary`. The block is `{verdict, max_harm, lower, upper, unit}` and reads the same interval:

@@ -30,7 +30,7 @@ import math
 import random
 import statistics
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from fractions import Fraction
@@ -635,6 +635,61 @@ def noise_check(deltas: Sequence[float], without_rates: Sequence[float], *,
     if floor is not None and target is not None and target > 0 and floor >= target:
         out["projected_cases"] = math.ceil(n * (floor / target) ** 2)
     return out
+
+
+def holm_adjust(p_values: Sequence[float]) -> list[float]:
+    """Holm step-down adjusted p-values, in the order given.
+
+    The i-th smallest of m p-values is multiplied by ``m - i`` (counting from
+    zero), then made monotone and capped at one. Rejecting where the adjusted
+    value is at or below alpha keeps the chance of any false rejection in the
+    family at or below alpha, with no assumption about how the tests depend
+    on each other.
+    """
+    if any(not 0 <= value <= 1 for value in p_values):
+        raise ValueError("p-values must lie in [0, 1]")
+    m = len(p_values)
+    order = sorted(range(m), key=lambda index: (p_values[index], index))
+    adjusted = [0.0] * m
+    running = 0.0
+    for rank, index in enumerate(order):
+        running = max(running, min(1.0, (m - rank) * p_values[index]))
+        adjusted[index] = running
+    return adjusted
+
+
+def multiplicity(significance_by_name: Mapping[str, Mapping[str, Any]], *, family: str,
+                 alpha: float = DEFAULT_ALPHA) -> dict[str, Any]:
+    """Holm-adjust a family of significance blocks that one report prints together.
+
+    Each block's deciding p-value is its ``p_value_upper_bound`` when it has
+    one (the sampled path decides on the bound), else its ``p_value``. A block
+    with no p-value ran no test, so it is listed under ``untested`` and does
+    not count toward the family size.
+    """
+    tested: dict[str, float] = {}
+    untested: list[str] = []
+    for name, block in significance_by_name.items():
+        p = block.get("p_value_upper_bound")
+        if p is None:
+            p = block.get("p_value")
+        if p is None:
+            untested.append(name)
+        else:
+            tested[name] = float(p)
+    adjusted = dict(zip(tested, holm_adjust(list(tested.values()))))
+    return {
+        "method": "holm",
+        "family": family,
+        "tests": len(tested),
+        "alpha": alpha,
+        "by_test": {name: {"p_value": tested[name], "adjusted_p_value": adjusted[name],
+                           "significant": adjusted[name] <= alpha}
+                    for name in sorted(tested)},
+        "significant_after_adjustment": sorted(name for name, value in adjusted.items()
+                                               if value <= alpha),
+        "untested": sorted(untested),
+    }
 
 
 def harm_check(interval: dict[str, Any], *, max_harm: float) -> dict[str, Any]:
