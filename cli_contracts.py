@@ -77,8 +77,8 @@ _NONNEGATIVE_NUMBERS = frozenset({
     "max_references", "max_modules",
 })
 _UNIT_INTERVAL_NUMBERS = frozenset({"overlap_threshold"})
-# A pass-rate difference worth acting on: above zero and at most one.
-_LIFT_NUMBERS = frozenset({"min_lift"})
+# A pass-rate difference (a lift worth acting on or a loss worth refusing): above zero and at most one.
+_LIFT_NUMBERS = frozenset({"min_lift", "max_harm"})
 
 
 def _validated_path(value: Any, label: str) -> Path:

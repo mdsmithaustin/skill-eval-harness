@@ -83,6 +83,15 @@ class NoiseVerdict(str, Enum):
     RESOLVABLE = "resolvable"
 
 
+class HarmVerdict(str, Enum):
+    """Whether the interval rules out a loss larger than the margin."""
+
+    UNBOUNDED = "unbounded"
+    WITHIN_MARGIN = "within-margin"
+    HARM_NOT_EXCLUDED = "harm-not-excluded"
+    HARM_EXCEEDS_MARGIN = "harm-exceeds-margin"
+
+
 class InferenceUnit(str, Enum):
     """What one delta in a paired test is a delta of.
 
@@ -628,6 +637,32 @@ def noise_check(deltas: Sequence[float], without_rates: Sequence[float], *,
     return out
 
 
+def harm_check(interval: dict[str, Any], *, max_harm: float) -> dict[str, Any]:
+    """Does the interval rule out a loss larger than ``max_harm``?
+
+    A lift that is not significant is not evidence of no harm: the interval
+    may still reach far below zero. This is the non-inferiority reading of the
+    same interval. ``within-margin`` needs the lower bound at or above
+    ``-max_harm``; ``harm-exceeds-margin`` needs the upper bound below it; an
+    interval that straddles the margin leaves harm ``harm-not-excluded``. An
+    unbounded interval excludes nothing, so it can never clear the margin.
+    """
+    if not 0 < max_harm <= 1:
+        raise ValueError("max_harm must be a pass-rate difference in (0, 1]")
+    out: dict[str, Any] = {"max_harm": max_harm, "lower": None, "upper": None}
+    if not interval.get("bounded"):
+        return {**out, "verdict": HarmVerdict.UNBOUNDED.value,
+                **({"reason": interval["reason"]} if interval.get("reason") else {})}
+    lower, upper = float(interval["lower"]), float(interval["upper"])
+    if lower >= -max_harm:
+        verdict = HarmVerdict.WITHIN_MARGIN
+    elif upper < -max_harm:
+        verdict = HarmVerdict.HARM_EXCEEDS_MARGIN
+    else:
+        verdict = HarmVerdict.HARM_NOT_EXCLUDED
+    return {**out, "verdict": verdict.value, "lower": lower, "upper": upper}
+
+
 @dataclass(frozen=True)
 class Estimate:
     """One paired effect: the test, its interval and the noise check, from one set of deltas.
@@ -642,11 +677,13 @@ class Estimate:
     significance: dict[str, Any]
     interval: dict[str, Any]
     noise: dict[str, Any] | None
+    harm: dict[str, Any] | None = None
 
     @classmethod
     def from_deltas(cls, deltas: Sequence[float], *, unit: InferenceUnit,
                     without_rates: Sequence[float] | None = None,
                     min_lift: float | None = None,
+                    max_harm: float | None = None,
                     alpha: float = DEFAULT_ALPHA) -> Estimate:
         values = tuple(float(value) for value in deltas)
         interval = sign_flip_interval(values, confidence=1 - alpha)
@@ -654,20 +691,24 @@ class Estimate:
         if without_rates is not None:
             noise = noise_check(values, list(without_rates), interval=interval,
                                 alpha=alpha, min_lift=min_lift)
+        harm = None if max_harm is None else harm_check(interval, max_harm=max_harm)
         return cls(InferenceUnit(unit), values, sign_flip_test(values, alpha=alpha),
-                   interval, noise)
+                   interval, noise, harm)
 
     @property
     def significant(self) -> bool:
         return bool(self.significance.get("significant_at_0_05"))
 
     def blocks(self) -> dict[str, Any]:
-        """The report fields: ``significance``, ``interval`` and, when the
-        baseline rates were given, ``noise_check``, each naming its unit."""
+        """The report fields: ``significance``, ``interval``, ``noise_check``
+        when the baseline rates were given and ``harm_check`` when a margin
+        was, each naming its unit."""
         out: dict[str, Any] = {
             "significance": {**self.significance, "unit": self.unit.value},
             "interval": {**self.interval, "unit": self.unit.value},
         }
         if self.noise is not None:
             out["noise_check"] = {**self.noise, "unit": self.unit.value}
+        if self.harm is not None:
+            out["harm_check"] = {**self.harm, "unit": self.unit.value}
         return out

@@ -14406,7 +14406,8 @@ def paired_case_counts(results: list[dict[str, Any]]) -> list[tuple[str, tuple[i
 
 
 def paired_block_from_rates(paired_with_rates: list[float], paired_without_rates: list[float], negative_cases: list[dict[str, Any]],
-                            *, min_lift: float | None = None) -> dict[str, Any]:
+                            *, min_lift: float | None = None,
+                            max_harm: float | None = None) -> dict[str, Any]:
     with_rate = statistics.mean(paired_with_rates) if paired_with_rates else None
     without_rate = statistics.mean(paired_without_rates) if paired_without_rates else None
     absolute_delta = None
@@ -14421,7 +14422,8 @@ def paired_block_from_rates(paired_with_rates: list[float], paired_without_rates
     # inverts it, and the noise check (could this eval have shown a lift at
     # all?), each labelled with the unit the test counts.
     estimate = Estimate.from_deltas(deltas, unit=InferenceUnit.CASE,
-                                    without_rates=paired_without_rates, min_lift=min_lift)
+                                    without_rates=paired_without_rates, min_lift=min_lift,
+                                    max_harm=max_harm)
     return {
         "with_skill_objective_pass_rate": with_rate,
         "without_skill_objective_pass_rate": without_rate,
@@ -14457,7 +14459,7 @@ def withhold_paired_headline(block: dict[str, Any], reason: str, *,
         "method": "unavailable", "n": 0, "p_value": None,
         "significant_at_0_05": False, "reason": reason,
     }
-    for key in ("interval", "noise_check"):
+    for key in ("interval", "noise_check", "harm_check"):
         if key in out:
             out[f"observed_{key}"] = out[key]
             out[key] = {"availability": "unavailable", "reason": reason}
@@ -14476,7 +14478,8 @@ def pairing_aware_block(block: dict[str, Any],
     return withhold_paired_headline(out, "incomplete_pairing", headline_fields=headline_fields)
 
 
-def paired_edit_summary(results: list[dict[str, Any]], *, min_lift: float | None = None) -> dict[str, Any] | None:
+def paired_edit_summary(results: list[dict[str, Any]], *, min_lift: float | None = None,
+                        max_harm: float | None = None) -> dict[str, Any] | None:
     """The current skill against the revision it replaces, paired within one run.
 
     Comparing iteration N with N+1 across two runs mixes the edit with
@@ -14513,7 +14516,8 @@ def paired_edit_summary(results: list[dict[str, Any]], *, min_lift: float | None
         "previous_objective_pass_rate": statistics.mean(previous) if previous else None,
         "delta": statistics.mean(deltas) if deltas else None,
         **Estimate.from_deltas(deltas, unit=InferenceUnit.CASE,
-                               without_rates=previous, min_lift=min_lift).blocks(),
+                               without_rates=previous, min_lift=min_lift,
+                               max_harm=max_harm).blocks(),
         "regressed_cases": regressed,
     }
     return pairing_aware_block(
@@ -14521,7 +14525,8 @@ def paired_edit_summary(results: list[dict[str, Any]], *, min_lift: float | None
         headline_fields=EDIT_HEADLINE_FIELDS)
 
 
-def build_paired_summary(results: list[dict[str, Any]], *, min_lift: float | None = None) -> dict[str, Any]:
+def build_paired_summary(results: list[dict[str, Any]], *, min_lift: float | None = None,
+                         max_harm: float | None = None) -> dict[str, Any]:
     # The pairing key is (case, model) — roadmap 2.1. Each model's rows pair
     # with_skill against without_skill within that model only; the headline
     # block pools the per-(case, model) pairs, and by_model carries each
@@ -14542,7 +14547,7 @@ def build_paired_summary(results: list[dict[str, Any]], *, min_lift: float | Non
         all_without.extend(n)
         all_negative.extend({**item, "model": model} for item in neg)
         by_model[model] = pairing_aware_block(
-            paired_block_from_rates(w, n, neg, min_lift=min_lift),
+            paired_block_from_rates(w, n, neg, min_lift=min_lift, max_harm=max_harm),
             _metric_pair_construction(rows, "objective_pass_rate"))
         gw, gn, _ = paired_case_rates(rows, key="graded_score")
         graded_with.extend(gw)
@@ -14557,7 +14562,8 @@ def build_paired_summary(results: list[dict[str, Any]], *, min_lift: float | Non
         graded_with.extend(gw)
         graded_without.extend(gn)
     out = pairing_aware_block(
-        paired_block_from_rates(all_with, all_without, all_negative, min_lift=min_lift),
+        paired_block_from_rates(all_with, all_without, all_negative, min_lift=min_lift,
+                                max_harm=max_harm),
         _metric_pair_construction(results, "objective_pass_rate"))
     if graded_with:
         # The graded channel (roadmap 2.2): how much better, after the binary
@@ -16683,6 +16689,7 @@ def build_benchmark_report(
     embed_cmd: str | None = None,
     min_lift: float | None = None,
     *, review_diagnostics: bool = False,
+    max_harm: float | None = None,
 ) -> dict[str, Any]:
     manifest = validate_manifest(path)
     variants = variants_arg or manifest.get("variants", DEFAULT_VARIANTS)
@@ -16825,9 +16832,9 @@ def build_benchmark_report(
         runs, results, manifest=manifest, manifest_path=path,
         case_ids=answer_case_ids, variants=variants)
     design_coverage = coverage.summary
-    paired_summary = build_paired_summary(results, min_lift=min_lift)
+    paired_summary = build_paired_summary(results, min_lift=min_lift, max_harm=max_harm)
     # The edit's own effect when the run carries an old_skill arm.
-    edit_summary = paired_edit_summary(results, min_lift=min_lift)
+    edit_summary = paired_edit_summary(results, min_lift=min_lift, max_harm=max_harm)
     pairing_block_reasons = set(paired_summary["pairing"]["blocked_reason_counts"])
     unscorable_results = [row for row in results if not scorable_run(row)]
     grading_blocked_results = [
@@ -16994,7 +17001,7 @@ def build_benchmark_report(
 
 
 def benchmark(args: argparse.Namespace) -> int:
-    report = build_benchmark_report(Path(args.manifest), Path(args.runs), args.split, args.variant, getattr(args, "judge_results", None), **grading_options(args), min_lift=getattr(args, "min_lift", None), review_diagnostics=args.review_diagnostics)
+    report = build_benchmark_report(Path(args.manifest), Path(args.runs), args.split, args.variant, getattr(args, "judge_results", None), **grading_options(args), min_lift=getattr(args, "min_lift", None), review_diagnostics=args.review_diagnostics, max_harm=args.max_harm)
     emit_report(report, args.out)
     return 0
 
@@ -21128,6 +21135,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--variant", action="append")
     add_grading_options(p)
     p.add_argument("--min-lift", type=float, help="smallest pass-rate lift you would act on (e.g. 0.1); the noise check reports whether the eval can resolve it")
+    p.add_argument("--max-harm", type=float, help="largest pass-rate loss you would accept (e.g. 0.05); harm_check reports whether the lift interval rules out a larger one")
     p.add_argument("--out")
 
     p.add_argument("--review-diagnostics", action="store_true", help="include optional diagnostic verifier authoring leads; grades and gates are unchanged")

@@ -4,6 +4,10 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add `benchmark --max-harm`. Each paired block gains `harm_check`, which reads the lift
+  interval as a non-inferiority test and says whether the eval rules out a loss larger than
+  the margin. See [harm check](docs/commands.md#harm-check).
+
 - Add `outcome_pass_rate` to run results and variant summaries. It excludes process
   and efficiency assertion types while preserving existing vetoes and report gates.
   GitHub reports label the legacy objective difference as including process checks.

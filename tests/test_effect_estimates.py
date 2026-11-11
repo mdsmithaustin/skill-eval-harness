@@ -368,6 +368,51 @@ class NoiseCheckTests(unittest.TestCase):
         self.assertIn("every paired delta is the same", result["reason"])
         self.assertTrue(ee.sign_flip_test([1.0] * 6)["significant_at_0_05"])
 
+class HarmCheckTests(unittest.TestCase):
+    def check(self, deltas, max_harm):
+        return ee.harm_check(ee.sign_flip_interval(deltas), max_harm=max_harm)
+
+    def test_no_lift_is_not_no_harm(self):
+        # Eight cases that swing both ways: the lift is not significant, and
+        # the interval still reaches a third of a run below zero, so a 0.05
+        # margin is not cleared.
+        deltas = thirds([3, -3, 3, -3, 3, -3, 2, -2])
+        self.assertFalse(ee.sign_flip_test(deltas)["significant_at_0_05"])
+        result = self.check(deltas, 0.05)
+        self.assertEqual(result["verdict"], "harm-not-excluded")
+        self.assertLess(result["lower"], -0.05)
+
+    def test_lower_bound_at_or_above_the_margin_clears_it(self):
+        deltas = [0.5] * 11 + [0.25]
+        result = self.check(deltas, 0.05)
+        self.assertEqual(result["verdict"], "within-margin")
+        interval = ee.sign_flip_interval(deltas)
+        self.assertEqual((result["lower"], result["upper"]), (interval["lower"], interval["upper"]))
+
+    def test_the_margin_is_inclusive_at_the_lower_bound(self):
+        deltas = thirds([1, -1, 1, 0, -1, 1, 0, 1, -1, 0])
+        lower = ee.sign_flip_interval(deltas)["lower"]
+        self.assertLess(lower, 0)
+        self.assertEqual(self.check(deltas, -lower)["verdict"], "within-margin")
+        self.assertEqual(self.check(deltas, -lower - 1e-6)["verdict"], "harm-not-excluded")
+
+    def test_upper_bound_below_the_margin_is_harm(self):
+        deltas = [-0.5] * 11 + [-0.25]
+        self.assertEqual(self.check(deltas, 0.05)["verdict"], "harm-exceeds-margin")
+
+    def test_an_unbounded_interval_never_clears_a_margin(self):
+        result = self.check(thirds([1, 1, 1, 1, 1]), 1.0)
+        self.assertEqual(result["verdict"], "unbounded")
+        self.assertIsNone(result["lower"])
+        self.assertIn("cannot exclude any lift", result["reason"])
+
+    def test_margin_outside_the_pass_rate_range_is_rejected(self):
+        interval = ee.sign_flip_interval([0.5] * 11 + [0.25])
+        for value in (0, -0.1, 1.5):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ee.harm_check(interval, max_harm=value)
+
+
 class PairedSummaryTests(unittest.TestCase):
     def rows(self, pairs):
         out = []
@@ -383,6 +428,20 @@ class PairedSummaryTests(unittest.TestCase):
         self.assertGreater(summary["interval"]["lower"], 0)
         self.assertEqual(summary["noise_check"]["cases_moved"], 8)
         self.assertEqual(summary["noise_check"]["min_lift"], 0.2)
+
+    def test_summary_carries_harm_check_only_when_a_margin_is_given(self):
+        rows = self.rows([(1.0, 0.0)] * 7 + [(1.0, 0.5)])
+        self.assertNotIn("harm_check", sb.build_paired_summary(rows))
+        harm = sb.build_paired_summary(rows, max_harm=0.05)["harm_check"]
+        self.assertEqual((harm["verdict"], harm["max_harm"], harm["unit"]),
+                         ("within-margin", 0.05, "case"))
+
+    def test_blocked_pairing_moves_harm_check_to_observed(self):
+        rows = self.rows([(1.0, 0.0)] * 7 + [(1.0, 0.5)])
+        rows.append(result_row("orphan", "with_skill", rate=1.0, run_number=1))
+        summary = sb.build_paired_summary(rows, max_harm=0.05)
+        self.assertEqual(summary["harm_check"]["availability"], "unavailable")
+        self.assertEqual(summary["observed_harm_check"]["verdict"], "within-margin")
 
     def test_blocked_pairing_moves_both_to_observed(self):
         rows = self.rows([(1.0, 0.0)] * 7 + [(1.0, 0.5)])

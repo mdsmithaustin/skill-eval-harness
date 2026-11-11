@@ -457,6 +457,19 @@ When the noise floor reaches the target (`min_lift`, else `headroom`), `projecte
 
 When pairing is incomplete, both fields move to `observed_interval` / `observed_noise_check` and the headline fields read `{"availability": "unavailable", "reason": "incomplete_pairing"}`, like the other headline fields. When every pair forms but the report is partial because a planned arm has no run or an assertion could not be graded, the same move happens on `paired_summary`, each `by_model` entry and `paired_edit_summary`, with `reason` (and `design_coverage_reason`) reading `answer_design_incomplete` or `grading_evidence_incomplete`; `graded` then moves to `observed_graded` and reads `{"availability": "partial", "delta": null, "reason": ...}`. A `graded` block also reads `partial` with a `null` delta when some pair is blocked, for example by a soft judge whose `score` is outside 0–1 (`blocked_reason_counts` names `invalid_graded_score`): the channel takes normalized scores, so return 0–1, use `graded_dimensions` or `atLeast`, or declare the judge's own scale as `score_scale: [low, high]`, which the harness normalizes ([graded score](vocabulary.md#things-you-assert)).
 
+### Harm check
+
+A lift that is not significant is not evidence that the skill does no harm, because the interval can still reach far below zero. `benchmark --max-harm X` (0 < X ≤ 1) names the largest pass-rate loss you would accept. It adds `harm_check` beside `interval` on `paired_summary`, each `by_model` entry and `paired_edit_summary`. The block is `{verdict, max_harm, lower, upper, unit}` and reads the same interval:
+
+| Verdict | Meaning |
+|---|---|
+| `within-margin` | `interval.lower` ≥ `-max_harm`: the eval rules out a loss larger than the margin. |
+| `harm-not-excluded` | The interval straddles `-max_harm`: a larger loss is still consistent with the data. |
+| `harm-exceeds-margin` | `interval.upper` < `-max_harm`: the eval shows a loss larger than the margin. |
+| `unbounded` | The interval has no finite bounds, so it excludes nothing; `reason` is the interval's. |
+
+`harm_check` moves to `observed_harm_check` whenever `interval` moves to `observed_interval`. Without `--max-harm` the block is absent.
+
 ### The edit against the previous revision
 
 When `--variant` selects an `old_skill` arm beside `with_skill` (`benchmark --variant with_skill --variant without_skill --variant old_skill`), the report adds `paired_edit_summary`: the current skill against the revision it replaces, paired per (case, model) within this run under the `skill_edit` contrast. It carries `current_objective_pass_rate`, `previous_objective_pass_rate`, `delta`, the same `significance`, `interval`, and `noise_check` blocks as `paired_summary` (with `headroom` measured on the previous revision), `regressed_cases` (each `{case_id, current, previous, delta, model?}`), `availability`, and `pairing`. A missing arm blocks its pair as `missing_old_skill` or `missing_with_skill`, and a partial comparison withholds its headline under `observed_*`, as `paired_summary` does. Without an `old_skill` arm the key is absent.
