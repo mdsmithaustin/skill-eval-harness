@@ -826,12 +826,15 @@ def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *
     Power is the share of trials that reach ``alpha`` with a positive lift.
 
     A small pilot cannot pin down each case's true rates, so each cell carries
-    two readings. ``power`` simulates from the observed rates. Those carry the
-    pilot's own repetition noise as if it were case spread, so ``power`` reads
-    low and decides the recommendation. ``power_shrunk`` removes that noise and
-    is closer when every case gains about the same, and reads high when the
-    lift differs by case. It is null when the pilot ran one repetition. The
-    draws are seeded, so the plan is reproducible.
+    two readings and neither is a bound. ``power`` simulates from the observed
+    rates. Those carry the pilot's own repetition noise as if it were case
+    spread, so on average ``power`` does not overstate, and it decides the
+    recommendation. ``power_shrunk`` removes that noise. It is closer when the
+    cases are alike in baseline and in gain, and it can read high when the two
+    arms vary independently across cases. Both read low when baselines differ
+    widely. ``power_shrunk`` is null when the pilot cannot measure repetition
+    noise or the shrunk rates leave no room for ``min_lift``. The draws are
+    seeded per cell, so the plan is reproducible.
     """
     if not 0 < min_lift <= 1:
         raise ValueError("min_lift must be a pass-rate difference in (0, 1]")
@@ -847,25 +850,31 @@ def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *
     treatment = [arm for arm, _ in case_counts]
     control = [arm for _, arm in case_counts]
     without = _smoothed_rates(control)
+    # Headroom is a fact about the pilot's baseline, so it reads the raw rates:
+    # smoothing would invent room above a baseline that already passes.
+    headroom = 1 - statistics.fmean(passes / runs for runs, passes in control)
     shifted = _shifted_rates(_smoothed_rates(treatment), without, min_lift)
-    if shifted is None:
+    if shifted is None or min_lift > headroom:
         return {**base, "verdict": "min-lift-exceeds-headroom",
-                "headroom": round(1 - statistics.fmean(without), _DECIMALS),
+                "headroom": round(headroom, _DECIMALS),
                 "grid": [], "recommendation": None}
     shrunk_with, shrunk_without = _shrunk_rates(treatment), _shrunk_rates(control)
     shrunk_shifted = (None if shrunk_with is None or shrunk_without is None
                       else _shifted_rates(shrunk_with, shrunk_without, min_lift))
-    rng = random.Random(seed)
     grid: list[dict[str, Any]] = []
     for cases in sorted(set(cases_grid)):
         for repetitions in sorted(set(repetitions_grid)):
-            share = _simulated_power(shifted, without, cases=cases, repetitions=repetitions,
-                                     trials=trials, rng=rng, alpha=alpha)
+            # One stream per reading per cell, so a cell's power does not
+            # depend on which other cells the grid holds.
+            share = _simulated_power(
+                shifted, without, cases=cases, repetitions=repetitions, trials=trials,
+                rng=random.Random(f"{seed}:{cases}:{repetitions}:observed"), alpha=alpha)
             shrunk_share = None
             if shrunk_shifted is not None and shrunk_without is not None:
                 shrunk_share = round(_simulated_power(
                     shrunk_shifted, shrunk_without, cases=cases, repetitions=repetitions,
-                    trials=trials, rng=rng, alpha=alpha), 4)
+                    trials=trials, rng=random.Random(f"{seed}:{cases}:{repetitions}:shrunk"),
+                    alpha=alpha), 4)
             grid.append({"cases": cases, "repetitions": repetitions,
                          "runs_per_arm": cases * repetitions, "power": round(share, 4),
                          "power_standard_error": round(math.sqrt(share * (1 - share) / trials), 4),

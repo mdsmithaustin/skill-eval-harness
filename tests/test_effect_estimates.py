@@ -459,7 +459,7 @@ class PlanningTests(unittest.TestCase):
             return ee.plan_power(PILOT, min_lift=min_lift, cases_grid=[40], repetitions_grid=[3],
                                  trials=2000)["grid"][0]["power"]
         self.assertLess(power(0.1), 0.5)
-        self.assertEqual(power(0.4), 1.0)
+        self.assertGreater(power(0.4), 0.99)
         # With almost no lift, half the significant evals point the wrong way.
         # Counting them would report about twice this share.
         self.assertLess(power(0.001), 0.028)
@@ -474,7 +474,7 @@ class PlanningTests(unittest.TestCase):
         self.assertIsNone(ee._shrunk_rates([(1, 1), (1, 0)]))
         self.assertEqual(ee._smoothed_rates([(1, 1), (1, 0)]), [0.75, 0.25])
 
-    def test_each_cell_brackets_power_and_the_low_reading_decides(self):
+    def test_each_cell_carries_two_readings_and_the_observed_one_decides(self):
         # Every case is the same coin in each arm (0.7 against 0.4), so the
         # pilot's spread is all repetition noise. Observed rates treat that
         # noise as case spread and read lower than the noise-free reading.
@@ -512,6 +512,18 @@ class PlanningTests(unittest.TestCase):
         plan = ee.plan_power(ceiling, min_lift=0.5, cases_grid=[8], repetitions_grid=[3])
         self.assertEqual(plan["verdict"], "min-lift-exceeds-headroom")
         self.assertLess(plan["headroom"], 0.5)
+
+    def test_headroom_reads_the_raw_baseline_and_a_cell_ignores_its_neighbours(self):
+        # 22 of 24 baseline runs pass: one twelfth of headroom, whatever
+        # smoothing would add.
+        ceiling = [((3, 3), (3, 3))] * 6 + [((3, 3), (3, 2))] * 2
+        plan = ee.plan_power(ceiling, min_lift=0.1, cases_grid=[8], repetitions_grid=[3], trials=5)
+        self.assertEqual((plan["verdict"], plan["headroom"]), ("min-lift-exceeds-headroom", 0.083333))
+        alone = ee.plan_power(PILOT, min_lift=0.15, cases_grid=[32], repetitions_grid=[3], trials=100)
+        beside = ee.plan_power(PILOT, min_lift=0.15, cases_grid=[8, 32], repetitions_grid=[1, 3],
+                               trials=100)
+        self.assertEqual(alone["grid"][0], next(cell for cell in beside["grid"]
+                                                if (cell["cases"], cell["repetitions"]) == (32, 3)))
 
     def test_the_plan_is_reproducible_and_rejects_bad_targets(self):
         options = {"min_lift": 0.15, "cases_grid": [16], "repetitions_grid": [3], "trials": 50}
