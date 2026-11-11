@@ -42,6 +42,8 @@ class CLICommand(str, Enum):
     COMPARE_TASKS = "compare-tasks"
     COMPARE_RESULTS = "compare-results"
     TRIGGER_COMPARE = "trigger-compare"
+    TRIGGER_DISTRACTORS = "trigger-distractors"
+    TRIGGER_DISTRACTOR_REPORT = "trigger-distractor-report"
     MIGRATE = "migrate"
     MIGRATE_TELEMETRY = "migrate-telemetry"
     COST_SUMMARY = "cost-summary"
@@ -63,7 +65,7 @@ _PATH_ARGUMENTS = frozenset({
     "judge_tasks", "judge_results", "transcripts", "benchmark", "labels",
     "truth", "results", "out_checklist", "history", "add", "workspace",
     "previous_workspace", "skill_path", "truth_out", "cost_history", "md",
-    "runs_root", "runs_subdir", "suite_file", "workspace_root", "pins", "out_dir",
+    "runs_root", "runs_subdir", "suite_file", "workspace_root", "pins", "out_dir", "distractors",
 })
 _PATH_SEQUENCES = frozenset({"manifests"})
 _POSITIVE_NUMBERS = frozenset({

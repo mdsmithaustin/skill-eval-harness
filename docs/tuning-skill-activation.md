@@ -188,6 +188,70 @@ per canonical prompt, including its scope, so repeated agent and model runs rema
 one authored query for statistical inference. Regenerate both comparison arms
 with the same harness implementation after upgrading.
 
+## Measure activation as the library grows
+
+A skill that triggers when it is mounted alone can lose its routing once other
+skills sit beside it. Three 2026 studies report the same shape: selection holds
+up to some library size and then drops, and skills with similar descriptions
+confuse the model more than the count does (arXiv 2601.04748, 2607.01874,
+2604.04323). The matrix isolates the skill under test, so it does not show this
+unless you give it a catalog.
+
+`trigger-distractors` builds the catalogs. Collect decoy skills in one
+directory, one subdirectory per skill with its own `SKILL.md`. Real skills your
+users install beside this one are the best decoys, and a look-alike with a
+similar description is the hardest one.
+
+```bash
+skill-benchmark trigger-distractors evals/shared-benchmark.json \
+  --distractors ../decoy-skills --sizes 0,5,20 --out-dir /tmp/library
+```
+
+Each `library-<N>/catalog.json` is a self-contained manifest: the skills under
+test plus the first N decoys of one seeded order, so a larger library always
+contains a smaller one. Its trigger cases are scoped as in the catalog section
+above. A should-trigger case expects the skills under test and forbids every
+decoy. A should-not-trigger case forbids the skills under test and leaves the
+decoys unlisted, because a decoy that loads on an unrelated request is not this
+skill's failure. `distractor-catalogs.json` records the seed and which decoys
+each size holds. The command refuses a trigger case that already declares a
+scope, a case whose prompt is a private `prompt_ref`, and an `--out-dir` that
+already holds a catalog.
+
+Run the matrix once per catalog, with the same agents, models and repetitions,
+then summarize:
+
+```bash
+for n in 0 5 20; do
+  skill-trigger-matrix /tmp/library/library-$n/catalog.json --out /tmp/library/matrix-$n.json
+done
+skill-benchmark trigger-distractor-report \
+  --report 0=/tmp/library/matrix-0.json --report 5=/tmp/library/matrix-5.json \
+  --report 20=/tmp/library/matrix-20.json --out library.json
+```
+
+For each (agent, model) the report lists, per library size:
+
+- `should_trigger.expected_load_rate`: the share of complete should-trigger
+  runs where every skill under test loaded.
+- `should_trigger.pass_rate`: the share that also loaded no decoy.
+- `should_not_trigger.fire_rate`: the share of complete should-not-trigger runs
+  where a skill under test loaded.
+- `distractor_activations`: how many should-trigger runs each decoy loaded on.
+  The decoy with the highest count is the one to write the description against.
+- `incomplete`: runs with no verdict, which no rate counts.
+
+`degradation_boundary` gives, for `expected_load_rate` and for `pass_rate`, the
+smallest library size from which the rate stays at least `--drop` (default 0.1)
+below the smallest library's rate. It is `null` when the rate never stays down.
+A gap between the two rates means the skill still loads but a decoy loads with
+it.
+
+The report is descriptive and tests nothing. Each rate comes from the authored
+queries times the repetitions, so read a boundary from a handful of queries as
+a lead, and add queries before acting on a small drop. Each catalog has its own
+skill tree hash, so `trigger-compare` does not pair two library sizes.
+
 ## Reading the matrix
 
 - **Positives fail on some model** → the description omits the invocation language

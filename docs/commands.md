@@ -1018,6 +1018,20 @@ Rows are re-validated through the typed trigger-observation contract (a row whos
 
 Comparison then forms complete (agent, model, query-ID) cells and collapses every agent/model cell for the same authored query ID and polarity into one **pass-rate** delta. The authored query is the inference unit: adding models or agents cannot multiply one query into significance. Pass rates make polarity inherent, so a should-not-trigger query regresses by over-triggering. The verdict goes through the `EvidenceClass` guard: `confirmed_causal` requires matching top-level and recorded ablation IDs, verified revision provenance, complete coverage with no blocked cells, a negative aggregate mean pass delta, and a sign-flip-significant drop across authored queries (≥ 6 consistently regressed queries, same discretization bound as the answer path). A negative but insignificant mean reports `indeterminate`; a non-negative mean cannot confirm a regression even if the two-sided test is significant. Cross-arm design mismatches or incomplete observations are listed as blocked cells with reasons and make the whole verdict indeterminate.
 
+## Trigger rate by library size
+
+The matrix mounts the skill under test alone. `trigger-distractors` and `trigger-distractor-report` measure what happens to activation when other skills sit beside it.
+
+```bash
+skill-benchmark trigger-distractors evals/shared-benchmark.json --distractors ../decoy-skills --sizes 0,5,20 --out-dir /tmp/library
+skill-trigger-matrix /tmp/library/library-5/catalog.json --out /tmp/library/matrix-5.json   # once per size
+skill-benchmark trigger-distractor-report --report 0=/tmp/library/matrix-0.json --report 5=/tmp/library/matrix-5.json --out library.json
+```
+
+`trigger-distractors` writes `library-<N>/catalog.json` for each size in `--sizes` and an index, `distractor-catalogs.json`. Each catalog copies the manifest's skills and the first N decoy skills of one order seeded by `--seed`, and scopes the manifest's trigger cases with `expected_skills` and `forbidden_skills`. `--distractors` names a directory whose subdirectories each hold a `SKILL.md`. `--split` limits the trigger cases. The command calls no model.
+
+`trigger-distractor-report` takes two or more `--report SIZE=PATH` entries, one matrix report per catalog. For each (agent, model) it lists `by_library_size` entries with `should_trigger.expected_load_rate`, `should_trigger.pass_rate`, `should_not_trigger.fire_rate`, `distractor_activations` and `incomplete`, and a `degradation_boundary` for the load rate and for the pass rate. `--drop` (default 0.1) sets the fall from the smallest library's rate that counts as degradation. The report is descriptive. [Tuning skill activation](tuning-skill-activation.md#measure-activation-as-the-library-grows) explains how to choose decoys and read the result.
+
 ## Jetty adapter
 
 `run-jetty --max-cost-usd` limits fresh submission admission. Add

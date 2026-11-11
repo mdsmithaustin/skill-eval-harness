@@ -4,6 +4,12 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add `trigger-distractors` and `trigger-distractor-report`. The first builds one catalog
+  per library size, the manifest's skills plus N decoy skills, for `skill-trigger-matrix`
+  to run unchanged. The second reads one matrix report per size and reports the load rate,
+  pass rate, decoy activations and degradation boundary. See
+  [activation as the library grows](docs/tuning-skill-activation.md#measure-activation-as-the-library-grows).
+
 - Add `manifest.old_skill_role` (`previous_revision` or `self_generated`) and
   `paired_edit_summary.control_role`, so the `old_skill` arm can hold a skill the model wrote
   for itself and the report says so. See

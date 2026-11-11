@@ -609,6 +609,8 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-trigger-matrix` | Autonomous trigger rate per (agent × model), split by should-fire / should-not-fire. |
 | `skill-pi-trigger-eval` | `skill-trigger-matrix --agent pi` under its own name, kept for existing scripts. |
 | `skill-benchmark trigger-compare` | Pair baseline and `--ablation` trigger reports of the same skill revision: declared-cell/repetition completeness, duplicate rejection, agent/model cells collapsed by stable authored-query ID, direction-aware sign-flip significance, and a causal-confirmation evidence class. |
+| `skill-benchmark trigger-distractors` | Build one self-contained catalog per library size, the manifest's skills plus N decoy skills with scoped trigger cases, for `skill-trigger-matrix` to run unchanged. |
+| `skill-benchmark trigger-distractor-report` | Read one matrix report per library size and report the expected-skill load rate, pass rate, decoy activations and degradation boundary per (agent, model). |
 
 ## Compatibility notes
 

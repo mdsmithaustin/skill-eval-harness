@@ -18909,6 +18909,181 @@ def trend(args: argparse.Namespace) -> int:
     return 0
 
 
+def _whole_number_list(raw: str, flag: str) -> list[int]:
+    try:
+        values = [int(part) for part in raw.split(",")]
+    except ValueError:
+        die(f"{flag} must be a comma-separated list of whole numbers")
+    if any(value < 0 for value in values) or len(values) != len(set(values)):
+        die(f"{flag} must be distinct whole numbers of zero or more")
+    return sorted(values)
+
+
+def build_distractor_catalogs(manifest_path: Path, distractors_dir: Path, sizes: list[int],
+                              out_dir: Path, *, seed: int = 0, split: str | None = None) -> dict[str, Any]:
+    """Write one self-contained catalog per library size for skill-trigger-matrix.
+
+    Each catalog holds the manifest's own skills plus the first `size` decoys of
+    one seeded order, so a larger library always contains a smaller one. Its
+    trigger cases are scoped: a should-trigger case expects the manifest's
+    skills and forbids every decoy, and a should-not-trigger case forbids the
+    manifest's skills. The matrix runs each catalog unchanged."""
+    manifest = validate_manifest(manifest_path)
+    require_resolvable_skill_paths(manifest_path, manifest)
+    repo_root = repo_root_for_manifest(manifest_path)
+    rels = list(manifest["skill_paths"])
+    try:
+        keys = skill_root_keys_for(repo_root, rels)
+    except AblationError as exc:
+        die(str(exc))
+    roots = [(repo_root / rel) if (repo_root / rel).is_dir() else (repo_root / rel).parent for rel in rels]
+    if any(root.resolve() == repo_root.resolve() for root in roots):
+        die("a skill root is the repository root; move the skill into its own directory to build a catalog")
+    if not distractors_dir.is_dir():
+        die(f"--distractors is not a directory: {distractors_dir}")
+    decoys = sorted(child.name for child in distractors_dir.iterdir()
+                    if (child / "SKILL.md").is_file())
+    clashes = sorted(set(decoys) & set(keys))
+    if clashes:
+        die(f"distractor skill directories share a name with the skill under test: {clashes}")
+    if max(sizes) > len(decoys):
+        die(f"--sizes asks for {max(sizes)} distractors; {distractors_dir} holds {len(decoys)} skill directories")
+    cases = [case for case in iter_cases(manifest, split) if case.get("kind") == "trigger"]
+    if not cases:
+        die("the manifest has no kind:'trigger' cases to scope")
+    for case in cases:
+        if "expected_skills" in case or "forbidden_skills" in case:
+            die(f"{case.get('id')}: trigger case already declares expected_skills or forbidden_skills")
+        if not case.get("prompt"):
+            die(f"{case.get('id')}: a catalog needs an inline prompt; prompt_ref stays private")
+    order = list(decoys)
+    random.Random(seed).shuffle(order)
+    target_ids = [f"skills/{key}/SKILL.md" for key in keys]
+    catalogs = []
+    for size in sizes:
+        dest = out_dir / f"library-{size}"
+        if dest.exists():
+            die(f"{dest} already exists; choose an empty --out-dir")
+        chosen = sorted(order[:size])
+        for root, key in zip(roots, keys, strict=True):
+            shutil.copytree(root, dest / "skills" / key)
+        for name in chosen:
+            shutil.copytree(distractors_dir / name, dest / "skills" / name)
+        decoy_ids = [f"skills/{name}/SKILL.md" for name in chosen]
+        scoped = []
+        for case in cases:
+            if case.get("should_trigger"):
+                scope = {"expected_skills": target_ids,
+                         **({"forbidden_skills": decoy_ids} if decoy_ids else {})}
+            else:
+                scope = {"forbidden_skills": target_ids}
+            scoped.append({**case, **scope})
+        catalog = {key: manifest[key] for key in ("version", "skill_name", "variants") if key in manifest}
+        catalog.update({"skill_paths": target_ids + decoy_ids, "cases": scoped, "ablations": []})
+        write_json(dest / "catalog.json", catalog)
+        validate_manifest(dest / "catalog.json")
+        catalogs.append({"library_size": size, "manifest": str(dest / "catalog.json"),
+                         "distractors": chosen})
+    return {"skill_name": manifest["skill_name"], "seed": seed, "skills_under_test": target_ids,
+            "distractors_available": len(decoys), "trigger_cases": len(cases), "catalogs": catalogs}
+
+
+def trigger_distractors(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out_dir)
+    index = build_distractor_catalogs(
+        Path(args.manifest), Path(args.distractors), _whole_number_list(args.sizes, "--sizes"),
+        out_dir, seed=args.seed, split=args.split)
+    write_json(out_dir / "distractor-catalogs.json", index)
+    print(f"wrote {len(index['catalogs'])} catalog(s) under {out_dir}")
+    return 0
+
+
+def distractor_report(reports_by_size: dict[int, dict[str, Any]], *, drop: float = 0.1) -> dict[str, Any]:
+    """Trigger behaviour by library size, from one matrix report per size.
+
+    For each (agent, model): how often every expected skill loaded on
+    should-trigger runs, how often the run passed outright, how often a
+    should-not-trigger run fired, and which decoys loaded. A degradation
+    boundary is the smallest size from which a rate stays at least `drop`
+    below the smallest library's rate, given for the expected-skill load rate
+    and for the pass rate. Descriptive: it tests nothing."""
+    cells: dict[tuple[str, str | None], dict[int, dict[str, Any]]] = collections.defaultdict(dict)
+    for size, report in sorted(reports_by_size.items()):
+        rows = report.get("results")
+        if not isinstance(rows, list):
+            die(f"library size {size}: the report has no results rows")
+        for row in rows:
+            entry = cells[(str(row.get("agent")), row.get("model"))].setdefault(size, {
+                "library_size": size, "incomplete": 0,
+                "should_trigger": {"runs": 0, "expected_loaded": 0, "passed": 0},
+                "should_not_trigger": {"runs": 0, "fired": 0},
+                "distractor_activations": collections.Counter()})
+            if type(row.get("pass")) is not bool:
+                entry["incomplete"] += 1
+                continue
+            if row.get("should_trigger"):
+                side = entry["should_trigger"]
+                side["runs"] += 1
+                loaded = (not row.get("missing_expected_skills") if "expected_skills" in row
+                          else row.get("triggered") is True)
+                side["expected_loaded"] += bool(loaded)
+                side["passed"] += row["pass"]
+                entry["distractor_activations"].update(row.get("forbidden_activations") or [])
+            else:
+                side = entry["should_not_trigger"]
+                side["runs"] += 1
+                side["fired"] += row.get("triggered") is True
+    def rate(count: int, runs: int) -> float | None:
+        return round(count / runs, 4) if runs else None
+    out_cells = []
+    for (agent, model), by_size in sorted(cells.items(), key=lambda item: (item[0][0], str(item[0][1] or ""))):
+        series = []
+        rates: dict[str, list[tuple[int, float | None]]] = {"expected_load_rate": [], "pass_rate": []}
+        for size in sorted(by_size):
+            entry = by_size[size]
+            positive, negative = entry["should_trigger"], entry["should_not_trigger"]
+            rates["expected_load_rate"].append((size, rate(positive["expected_loaded"], positive["runs"])))
+            rates["pass_rate"].append((size, rate(positive["passed"], positive["runs"])))
+            series.append({
+                "library_size": size,
+                "incomplete": entry["incomplete"],
+                "should_trigger": {"runs": positive["runs"],
+                                   "expected_load_rate": rates["expected_load_rate"][-1][1],
+                                   "pass_rate": rates["pass_rate"][-1][1]},
+                "should_not_trigger": {"runs": negative["runs"],
+                                       "fire_rate": rate(negative["fired"], negative["runs"])},
+                "distractor_activations": dict(sorted(entry["distractor_activations"].items())),
+            })
+        boundaries: dict[str, int | None] = {}
+        for metric, points in rates.items():
+            first = points[0][1]
+            boundaries[metric] = next(
+                (points[index][0] for index in range(1, len(points))
+                 if first is not None
+                 and all(value is not None and first - value >= drop for _, value in points[index:])),
+                None)
+        out_cells.append({"agent": agent, "model": model, "by_library_size": series,
+                          "degradation_boundary": boundaries})
+    return {"drop": drop, "library_sizes": sorted(reports_by_size), "cells": out_cells}
+
+
+def trigger_distractor_report(args: argparse.Namespace) -> int:
+    reports: dict[int, dict[str, Any]] = {}
+    for spec in args.report or []:
+        size_text, separator, path = spec.partition("=")
+        if not separator or not size_text.isdecimal() or not path:
+            die(f"--report must be SIZE=PATH with a whole-number library size; got {spec!r}")
+        if int(size_text) in reports:
+            die(f"--report names library size {size_text} twice")
+        reports[int(size_text)] = load_json(Path(path))
+    if len(reports) < 2:
+        die("trigger-distractor-report needs at least two --report SIZE=PATH entries")
+    if not 0 < args.drop <= 1:
+        die("--drop must be a rate difference in (0, 1]")
+    emit_report(distractor_report(reports, drop=args.drop), args.out)
+    return 0
+
+
 def planning_case_counts(results: list[dict[str, Any]]) -> list[tuple[tuple[int, int], tuple[int, int]]]:
     """Per-(case, model) pass counts for both arms, pooled as paired_summary pools them."""
     models = sorted({str(r.get("model")) for r in results if r.get("model")})
@@ -21373,6 +21548,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ablation", required=True, help="skill-trigger-matrix report JSON produced with --ablation on the same canonical revision")
     p.add_argument("--out")
 
+    p = sub.add_parser("trigger-distractors", help="build one self-contained catalog per library size: the manifest's skills plus N decoy skills, with scoped trigger cases for skill-trigger-matrix")
+    p.add_argument("manifest")
+    p.add_argument("--distractors", required=True, help="directory whose subdirectories are decoy skills (each holds a SKILL.md)")
+    p.add_argument("--sizes", required=True, help="comma-separated decoy counts, e.g. 0,5,20")
+    p.add_argument("--out-dir", required=True, help="empty directory for library-<N>/catalog.json and distractor-catalogs.json")
+    p.add_argument("--seed", type=int, default=0, help="seed for the decoy order; a larger library always contains a smaller one")
+    p.add_argument("--split", choices=sorted(VALID_SPLITS))
+
+    p = sub.add_parser("trigger-distractor-report", help="trigger behaviour by library size from one skill-trigger-matrix report per catalog: expected-skill load rate, pass rate, decoy activations, and the degradation boundary")
+    p.add_argument("--report", action="append", metavar="SIZE=PATH", help="library size = matrix report JSON (repeatable, at least two)")
+    p.add_argument("--drop", type=float, default=0.1, help="load-rate drop from the smallest library that marks degradation (default 0.1)")
+    p.add_argument("--out")
+
     p = sub.add_parser("migrate", help="upgrade a version-1 manifest to version 2: stamp default severity/oracle tiers, mark binary judge rubrics, print the diff and the judgment-call checklist")
     p.add_argument("manifest")
     p.add_argument("--check", action="store_true", help="dry run: print the diff and checklist, write nothing")
@@ -21563,6 +21751,8 @@ def main() -> int:
         CLICommand.COMPARE_TASKS: compare_tasks,
         CLICommand.COMPARE_RESULTS: compare_results,
         CLICommand.TRIGGER_COMPARE: trigger_compare,
+        CLICommand.TRIGGER_DISTRACTORS: trigger_distractors,
+        CLICommand.TRIGGER_DISTRACTOR_REPORT: trigger_distractor_report,
         CLICommand.MIGRATE: migrate_command,
         CLICommand.MIGRATE_TELEMETRY: migrate_telemetry_command,
         CLICommand.COST_SUMMARY: cost_summary_command,
