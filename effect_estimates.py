@@ -774,16 +774,36 @@ def _shifted_rates(with_rates: Sequence[float], without_rates: Sequence[float],
     return [min(1.0, max(0.0, rate + high)) for rate in with_rates]
 
 
+def _pilot_rates(arm: Sequence[tuple[int, int]]) -> tuple[list[float], str]:
+    """One arm's per-case pass rates as the planner's stand-in for true rates.
+
+    A case's observed rate is its true rate plus repetition noise, so using
+    observed rates as true ones counts that noise twice and understates power.
+    With two or more runs per case the noise is estimable: each rate is pulled
+    toward the arm mean by the share of the observed variance that repetition
+    noise explains. With one run per case it is not, so the rates are only
+    smoothed by half a run and the plan leans low.
+    """
+    rates = [passes / runs for runs, passes in arm]
+    if len(rates) < 2 or any(runs < 2 for runs, _ in arm):
+        return [(passes + 0.5) / (runs + 1) for runs, passes in arm], "smoothed"
+    mean = statistics.fmean(rates)
+    observed = statistics.variance(rates)
+    noise = statistics.fmean(rate * (1 - rate) / (runs - 1) for rate, (runs, _) in zip(rates, arm))
+    kept = max(0.0, observed - noise) / observed if observed > 0 else 0.0
+    return [mean + kept * (rate - mean) for rate in rates], "shrunk"
+
+
 def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *,
                min_lift: float, cases_grid: Sequence[int], repetitions_grid: Sequence[int],
                power: float = 0.8, trials: int = 400, seed: int = 0,
                alpha: float = DEFAULT_ALPHA) -> dict[str, Any]:
     """How many cases and repetitions would let the paired test show ``min_lift``?
 
-    The pilot supplies each case's two pass rates, smoothed by half a run so a
-    case seen once is not treated as certain. The skill-arm rates are shifted
-    until the mean lift equals ``min_lift``, which keeps the pilot's spread of
-    easy and hard cases. Each grid cell then simulates ``trials`` evals: draw
+    The pilot supplies each case's two pass rates through ``_pilot_rates``;
+    ``rate_model`` says whether they were shrunk or only smoothed. The
+    skill-arm rates are shifted until the mean lift equals ``min_lift``, which
+    keeps the pilot's spread of easy and hard cases. Each grid cell then simulates ``trials`` evals: draw
     cases with replacement, draw each arm's passes, and run the exact
     sign-flip test. ``power`` is the share that reach ``alpha`` with a positive
     lift. The draws are seeded, so the plan is reproducible.
@@ -799,8 +819,9 @@ def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *
                             "trials": trials, "seed": seed}
     if not case_counts:
         return {**base, "verdict": "no-pilot-pairs", "grid": [], "recommendation": None}
-    without = [(passes + 0.5) / (runs + 1) for _, (runs, passes) in case_counts]
-    shifted = _shifted_rates([(passes + 0.5) / (runs + 1) for (runs, passes), _ in case_counts],
+    without, rate_model = _pilot_rates([control for _, control in case_counts])
+    base["rate_model"] = rate_model
+    shifted = _shifted_rates(_pilot_rates([treatment for treatment, _ in case_counts])[0],
                              without, min_lift)
     if shifted is None:
         return {**base, "verdict": "min-lift-exceeds-headroom",

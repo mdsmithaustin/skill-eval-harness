@@ -12688,13 +12688,16 @@ def _judge_task_variant(judge_task_id_text: str) -> str | None:
     return None
 
 
-def judge_bias_correction(confusion: dict[str, int], judged: dict[str, bool]) -> dict[str, Any]:
+def judge_bias_correction(confusion: dict[str, int], judged: dict[str, bool], *,
+                          dropped: Sequence[str] = ()) -> dict[str, Any]:
     """Judge pass rates corrected for the judge's error against human labels.
 
     `confusion` comes from the labelled verdicts; `judged` is every complete
     verdict, labelled or not, so a small labelled sample corrects a large
     judged one. Rates are corrected overall and per variant, and the
-    with_skill minus without_skill difference is corrected as a lift."""
+    with_skill minus without_skill difference is corrected as a lift.
+    `dropped` names rows left out of either population (an invalid label, an
+    incomplete verdict); with any, the block is partial, not complete."""
     human_pass = confusion["tp"] + confusion["fn"]
     human_fail = confusion["tn"] + confusion["fp"]
     by_variant: dict[str, list[bool]] = collections.defaultdict(list)
@@ -12718,7 +12721,12 @@ def judge_bias_correction(confusion: dict[str, int], judged: dict[str, bool]) ->
         block["lift"] = judge_corrected_lift((sum(treatment), len(treatment)),
                                              (sum(control), len(control)), confusion=confusion)
     reason = (block["overall"] or {}).get("reason") or (None if judged else "no complete judge verdicts")
-    block["availability"] = "unavailable" if reason else "complete"
+    if reason:
+        block["availability"] = "unavailable"
+    elif dropped:
+        block["availability"], reason = "partial", "; ".join(dropped)
+    else:
+        block["availability"] = "complete"
     block["reason"] = reason
     return block
 
@@ -12788,7 +12796,10 @@ def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, di
         "bias_correction": judge_bias_correction(
             observed["confusion"],
             {identifier: row["passed"] for identifier, row in judge.items()
-             if identifier not in incomplete_judge}),
+             if identifier not in incomplete_judge},
+            dropped=[f"{label}: {count}" for label, count in (
+                ("invalid human labels", len(invalid_human_ids)),
+                ("incomplete judge verdicts", len(incomplete_judge))) if count]),
     }
 
 
@@ -16044,6 +16055,10 @@ def invalidate_report_pairing(block: dict[str, Any], reason: str, *,
     if isinstance(out.get("by_model"), dict):
         out["by_model"] = {model: invalidate_report_pairing(value, reason)
                            for model, value in out["by_model"].items()}
+        if "by_model_multiplicity" in out:
+            out["by_model_multiplicity"] = multiplicity(
+                {model: value["significance"] for model, value in out["by_model"].items()},
+                family="by_model")
     return out
 
 
@@ -18961,9 +18976,10 @@ def build_distractor_catalogs(manifest_path: Path, distractors_dir: Path, sizes:
     target_ids = [f"skills/{key}/SKILL.md" for key in keys]
     catalogs = []
     for size in sizes:
+        if (out_dir / f"library-{size}").exists():
+            die(f"{out_dir / f'library-{size}'} already exists; choose an empty --out-dir")
+    for size in sizes:
         dest = out_dir / f"library-{size}"
-        if dest.exists():
-            die(f"{dest} already exists; choose an empty --out-dir")
         chosen = sorted(order[:size])
         for root, key in zip(roots, keys, strict=True):
             shutil.copytree(root, dest / "skills" / key)
@@ -19060,7 +19076,8 @@ def distractor_report(reports_by_size: dict[int, dict[str, Any]], *, drop: float
             boundaries[metric] = next(
                 (points[index][0] for index in range(1, len(points))
                  if first is not None
-                 and all(value is not None and first - value >= drop for _, value in points[index:])),
+                 and all(value is not None and first - value >= drop - 1e-9
+                         for _, value in points[index:])),
                 None)
         out_cells.append({"agent": agent, "model": model, "by_library_size": series,
                           "degradation_boundary": boundaries})
@@ -19119,6 +19136,16 @@ def plan_eval(args: argparse.Namespace) -> int:
     plan["pilot"]["limiting_variance"] = (
         None if share is None else "within-case" if share >= 0.5 else "between-case")
     plan["unit"] = InferenceUnit.CASE.value
+    fractional = sum(1 for row in results
+                     if isinstance(row.get("objective_pass_rate"), (int, float))
+                     and 0 < row["objective_pass_rate"] < 1)
+    plan["pilot"]["partially_passing_runs"] = fractional
+    plan["notes"] = []
+    if fractional:
+        plan["notes"].append(
+            f"{fractional} pilot run(s) pass some objective checks and fail others. The plan counts a "
+            "run as a pass only when every objective check passes, while benchmark tests the mean "
+            "share of checks passed, so --min-lift here is a lift in fully passing runs.")
     emit_report(plan, args.out)
     return 0
 

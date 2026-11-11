@@ -230,10 +230,21 @@ is the true one multiplied by `sensitivity + specificity - 1`. An imperfect
 judge therefore shrinks a real lift toward zero: a judge at 0.85 and 0.8
 reports a true 0.31 lift as 0.2.
 
-Read the block with three limits in mind:
+Read the block with these limits in mind:
+
+- Label a random sample of the judged verdicts. Choosing runs by the judge's
+  verdict, such as fifty passes and fifty fails, biases both error rates and
+  the correction with them.
+- The unit is one judge verdict on one assertion, not one run. A case with
+  several judge assertions contributes several verdicts.
+- The intervals treat verdicts as independent. Verdicts on the same case move
+  together, so with few cases the true uncertainty is wider than the interval,
+  most of all when the corrected rate is near 0 or 1.
 
 - It needs at least 10 human pass and 10 human fail labels, and a judge better
   than chance. Otherwise `availability` is `unavailable` and `reason` says why.
+  `availability` is `partial` when an invalid label or an incomplete judge
+  verdict was left out, and `reason` counts them.
 - The intervals are normal approximations that carry the noise of the judged
   sample and of both label counts. With labels near the minimum they are rough.
   The `lift` interval treats the arms as independent, so it is wider than a

@@ -117,8 +117,12 @@ class CatalogTests(unittest.TestCase):
             manifest = Path(td) / "repo" / "evals" / "shared-benchmark.json"
             code, _, stderr = run_cli("trigger-distractors", manifest, "--distractors", Path(td) / "decoys",
                                       "--sizes", "1", "--out-dir", Path(td) / "catalogs")
-        self.assertNotEqual(code, 0)
-        self.assertIn("already exists", stderr)
+            self.assertNotEqual(code, 0)
+            self.assertIn("already exists", stderr)
+            code, _, stderr = run_cli("trigger-distractors", manifest, "--distractors", Path(td) / "decoys",
+                                      "--sizes", "0,1", "--out-dir", Path(td) / "catalogs")
+            self.assertIn("library-1 already exists", stderr)
+            self.assertFalse((Path(td) / "catalogs" / "library-0").exists())
 
 
 class LibraryReportTests(unittest.TestCase):
@@ -143,6 +147,15 @@ class LibraryReportTests(unittest.TestCase):
         self.assertEqual(by_size[20]["should_trigger"], {"runs": 4, "expected_load_rate": 0.25, "pass_rate": 0.25})
         self.assertEqual((by_size[20]["incomplete"], by_size[20]["should_not_trigger"]["fire_rate"]), (1, None))
         self.assertEqual(cell["degradation_boundary"], {"expected_load_rate": 20, "pass_rate": 5})
+
+    def test_a_drop_of_exactly_the_threshold_counts(self):
+        def at(passed):
+            return {"results": [row(True, True)] * passed
+                    + [row(True, False, missing=["skills/reviewer/SKILL.md"])] * (10 - passed)}
+        for first, later in ((9, 8), (10, 9), (7, 6)):
+            with self.subTest(first=first):
+                cell = sb.distractor_report({0: at(first), 5: at(later)})["cells"][0]
+                self.assertEqual(cell["degradation_boundary"]["expected_load_rate"], 5)
 
     def test_a_dip_that_recovers_is_not_a_boundary(self):
         def at(passed, total=4):

@@ -2512,9 +2512,28 @@ class JudgeAlignmentTests(unittest.TestCase):
         # The observed 0.2 lift is the true lift shrunk by 0.65.
         lift = correction["lift"]
         self.assertEqual((lift["observed_delta"], lift["corrected_delta"]), (0.2, 0.3077))
-        self.assertLess(lift["interval"]["lower"], 0.3077)
-        self.assertGreater(lift["interval"]["lower"], 0)
+        # Variance by hand: (0.65 * 0.35 / 300 + 0.45 * 0.55 / 300
+        # + 0.3077**2 * (0.85 * 0.15 / 40 + 0.8 * 0.2 / 40)) / 0.65**2 = 0.005358,
+        # so the 95% reach is 1.96 * sqrt(0.005358) = 0.1435.
+        self.assertEqual((lift["interval"]["lower"], lift["interval"]["upper"]), (0.1642, 0.4512))
         self.assertEqual(correction["overall"]["n"], 600)
+
+    def test_bias_correction_interval_carries_all_three_sources_of_noise(self):
+        # theta = (0.6 - 0.2) / 0.65 = 0.6154. Variance by hand:
+        # (0.6 * 0.4 / 300 + 0.6154**2 * 0.85 * 0.15 / 40
+        # + 0.3846**2 * 0.8 * 0.2 / 40) / 0.65**2 = 0.006151, reach 0.1537.
+        rate = sb.judge_corrected_rate(180, 300, confusion={"tp": 34, "fn": 6, "tn": 32, "fp": 8})
+        self.assertEqual(rate["corrected_pass_rate"], 0.6154)
+        self.assertEqual((rate["interval"]["lower"], rate["interval"]["upper"]), (0.4617, 0.7691))
+
+    def test_bias_correction_leaves_incomplete_verdicts_out_and_says_so(self):
+        human, judge = self._labelled_population()
+        judge["extra::with_skill::run-1::quality"] = {"passed": True, "returncode": 1}
+        correction = sb.judge_alignment_report(human, judge)["bias_correction"]
+        self.assertEqual(correction["overall"]["n"], 600)
+        self.assertEqual((correction["availability"], correction["reason"]),
+                         ("partial", "incomplete judge verdicts: 1"))
+        self.assertEqual(correction["by_variant"]["with_skill"]["corrected_pass_rate"], 0.6923)
 
     def test_bias_correction_interval_widens_with_fewer_labels(self):
         many = {"tp": 340, "fn": 60, "tn": 320, "fp": 80}

@@ -216,7 +216,16 @@ decoys unlisted, because a decoy that loads on an unrelated request is not this
 skill's failure. `distractor-catalogs.json` records the seed and which decoys
 each size holds. The command refuses a trigger case that already declares a
 scope, a case whose prompt is a private `prompt_ref`, and an `--out-dir` that
-already holds a catalog.
+already holds one of the requested catalogs. It checks all of that before it
+writes anything.
+
+Three limits apply. A catalog copies the prompt of every trigger case it
+scopes, so pass `--split tune` to keep held-out prompts out of the output
+directory. When the manifest declares several skills, a should-trigger case
+expects all of them, and the load rate means that all of them loaded. The
+command compares directory names only. Claude, Codex and Vibe match a load by
+skill name, so the matrix rejects a catalog whose decoy shares the name the
+skill under test goes by.
 
 Run the matrix once per catalog, with the same agents, models and repetitions,
 then summarize:

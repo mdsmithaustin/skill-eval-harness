@@ -466,7 +466,7 @@ A report with several models prints one lift test per model, and an ablation tha
 - `paired_summary.by_model_multiplicity`, when the report has two or more models.
 - `ablation_regressions[].regressions[].significance.multiplicity`, when a regression has two or more confirmed cases.
 
-Each is `{method: "holm", family, tests, alpha, by_test: {name: {p_value, adjusted_p_value, significant}}, significant_after_adjustment, untested}`. `p_value` is the value the test decides on: `p_value_upper_bound` on the sampled path, else the exact `p_value`. A block whose headline is withheld ran no test the report claims, so it is listed in `untested` and does not count toward `tests`. The adjustment makes no assumption about how the tests depend on each other.
+Each is `{method: "holm", family, tests, alpha, by_test: {name: {p_value, adjusted_p_value, significant}}, significant_after_adjustment, untested}`. `p_value` is the value the test decides on: `p_value_upper_bound` on the sampled path, else the exact `p_value`. A block whose headline is withheld ran no test the report claims, so it is listed in `untested` and does not count toward `tests`. When the whole report is withheld, every model is `untested`. The adjustment makes no assumption about how the tests depend on each other.
 
 The per-model and per-case `significant_at_0_05` fields are unchanged, and so is the ablation rule that one significant case confirms a regression. Read `significant_after_adjustment` before acting on one model or one case out of several. The pooled `paired_summary.significance` is one test and needs no adjustment.
 
@@ -480,7 +480,9 @@ skill-benchmark plan-eval --benchmark benchmark.json --min-lift 0.1 --out plan.j
 
 `pilot` splits the variance of the per-case deltas. `within_case_variance` is repetition noise, the mean binomial variance of a case's delta, which more repetitions shrink. `between_case_variance` is the rest, which only more cases average away. `limiting_variance` names the larger part as `within-case` or `between-case`. All three are null when the pilot ran one repetition per arm, because one run cannot show repetition noise.
 
-`grid` holds one row per `(cases, repetitions)` pair: `runs_per_arm`, the simulated `power`, and its `power_standard_error`. Each row simulates `--trials` evals (default 400). A trial draws cases from the pilot with replacement, draws each arm's passes from the case's pass rates, and runs the exact sign-flip test. The skill arm's rates are the pilot's, shifted by one amount so the mean lift equals `--min-lift`. Pass rates are smoothed by half a run, so a case the pilot saw pass once is not treated as certain. `power` is the share of trials that reach p ≤ 0.05 with a positive lift. The draws are seeded, so the same inputs give the same plan.
+`grid` holds one row per `(cases, repetitions)` pair: `runs_per_arm`, the simulated `power`, and its `power_standard_error`. Each row simulates `--trials` evals (default 400). A trial draws cases from the pilot with replacement, draws each arm's passes from the case's pass rates, and runs the exact sign-flip test. The skill arm's rates are the pilot's, shifted by one amount so the mean lift equals `--min-lift`.
+
+A case's observed pass rate is its true rate plus repetition noise, and simulating from observed rates would count that noise twice and understate power. `rate_model` says how the plan handles it. `shrunk` means every pilot case ran at least twice per arm, so each rate was pulled toward its arm's mean by the share of the observed spread that repetition noise explains. `smoothed` means some case ran once, the noise could not be measured, and rates were only moved half a run toward one half. A `smoothed` plan leans low. A `shrunk` plan still leans low when the cases split into clearly easy and clearly hard groups, so read `power` as a conservative estimate. `power` is the share of trials that reach p ≤ 0.05 with a positive lift. The draws are seeded, so the same inputs give the same plan.
 
 `recommendation` is the row with the fewest `runs_per_arm` whose power reaches `--power` (default 0.8). `verdict` is one of:
 
@@ -492,6 +494,8 @@ skill-benchmark plan-eval --benchmark benchmark.json --min-lift 0.1 --out plan.j
 | `no-pilot-pairs` | The report has no complete `with_skill` and `without_skill` pairs. |
 
 `--cases` and `--repetitions` take comma-separated lists. The defaults are 1, 2, 4 and 8 times the pilot's case count (never below 6, the fewest cases that can reach p ≤ 0.05) and 1, 3, 5 and the pilot's repetitions.
+
+The plan counts a run as a pass only when every objective check passes. `benchmark` tests the mean share of checks passed, so the two agree when each case has one objective check. When some pilot runs pass only part of their checks, `pilot.partially_passing_runs` counts them and `notes` says that `--min-lift` then means a lift in fully passing runs.
 
 The plan is an estimate from the pilot's cases. A pilot with few cases gives rough pass rates, and new cases may be easier or harder than the pilot's, so treat the recommendation as a starting size and rerun `plan-eval` on the larger run.
 
@@ -506,7 +510,9 @@ A lift that is not significant is not evidence that the skill does no harm, beca
 | `harm-exceeds-margin` | `interval.upper` < `-max_harm`: the eval shows a loss larger than the margin. |
 | `unbounded` | The interval has no finite bounds, so it excludes nothing; `reason` is the interval's. |
 
-`harm_check` moves to `observed_harm_check` whenever `interval` moves to `observed_interval`. Without `--max-harm` the block is absent.
+`harm_check` moves to `observed_harm_check` whenever `interval` moves to `observed_interval`. Without `--max-harm` the block is absent. The flag adds a report field and changes no exit code.
+
+The verdict inherits the interval's limits. Fewer than six cases that move, or deltas that are all equal, give an `unbounded` interval, so an eval where every case loses by the same amount reads `unbounded` and not `harm-exceeds-margin`. Read `absolute_delta` beside the verdict.
 
 ### The edit against the previous revision
 

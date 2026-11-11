@@ -454,6 +454,29 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan["recommendation"]["cases"], 128)
         self.assertEqual(plan["recommendation"]["runs_per_arm"], 384)
 
+    def test_a_larger_target_lift_is_easier_to_show_and_a_loss_never_counts(self):
+        def power(min_lift):
+            return ee.plan_power(PILOT, min_lift=min_lift, cases_grid=[40], repetitions_grid=[3],
+                                 trials=2000)["grid"][0]["power"]
+        self.assertLess(power(0.1), 0.5)
+        self.assertEqual(power(0.4), 1.0)
+        # With almost no lift, half the significant evals point the wrong way.
+        # Counting them would report about twice this share.
+        self.assertLess(power(0.001), 0.028)
+
+    def test_pilot_rates_shed_repetition_noise_when_it_can_be_measured(self):
+        # Three observed rates whose spread is no wider than four coin flips
+        # would give: nothing separates the cases, so each gets the arm mean.
+        arm = [(4, 2)] * 3 + [(4, 3)] * 3 + [(4, 1)] * 2
+        rates, model = ee._pilot_rates(arm)
+        self.assertEqual((model, set(rates)), ("shrunk", {0.53125}))
+        # Deterministic cases keep their rates: there is no noise to remove.
+        self.assertEqual(ee._pilot_rates([(3, 3), (3, 0), (3, 3)]), ([1.0, 0.0, 1.0], "shrunk"))
+        # One run per case cannot show noise, so the rates are only smoothed.
+        self.assertEqual(ee._pilot_rates([(1, 1), (1, 0)]), ([0.75, 0.25], "smoothed"))
+        self.assertEqual(ee.plan_power(PILOT, min_lift=0.1, cases_grid=[8], repetitions_grid=[3],
+                                       trials=10)["rate_model"], "shrunk")
+
     def test_five_cases_can_never_reach_alpha_whatever_the_lift(self):
         # 2 / 2**5 = 0.0625: no simulated eval of five cases is significant.
         plan = ee.plan_power(PILOT, min_lift=0.5, cases_grid=[5], repetitions_grid=[5], trials=100)
@@ -557,6 +580,16 @@ class HarmCheckTests(unittest.TestCase):
         self.assertEqual(self.check(deltas, -lower)["verdict"], "within-margin")
         self.assertEqual(self.check(deltas, -lower - 1e-6)["verdict"], "harm-not-excluded")
 
+    def test_a_loss_inside_the_margin_at_its_upper_end_is_not_yet_harm(self):
+        # The interval is [-1/3, -1/9]: a certain loss, but the margin 0.2
+        # lies inside it, so a loss larger than the margin is neither shown
+        # nor ruled out.
+        deltas = thirds([-1, -1, -1, 0, -1, 0, -1, -1, 0, -1])
+        result = self.check(deltas, 0.2)
+        self.assertEqual((result["lower"], result["upper"]), (-0.333333, -0.111111))
+        self.assertEqual(result["verdict"], "harm-not-excluded")
+        self.assertEqual(self.check(deltas, 0.1)["verdict"], "harm-exceeds-margin")
+
     def test_upper_bound_below_the_margin_is_harm(self):
         deltas = [-0.5] * 11 + [-0.25]
         self.assertEqual(self.check(deltas, 0.05)["verdict"], "harm-exceeds-margin")
@@ -623,6 +656,15 @@ class PairedSummaryTests(unittest.TestCase):
         self.assertEqual((family["method"], family["family"], family["tests"]),
                          ("holm", "by_model", 4))
         self.assertEqual(family["by_test"]["m1"]["adjusted_p_value"], 0.125)
+        self.assertEqual(family["significant_after_adjustment"], [])
+
+    def test_a_withheld_report_withdraws_the_family_with_its_tests(self):
+        lucky = [(1.0, 0.0)] * 7
+        summary = sb.build_paired_summary(self.model_rows({"m1": lucky, "m2": lucky}))
+        self.assertEqual(summary["by_model_multiplicity"]["significant_after_adjustment"], ["m1", "m2"])
+        withheld = sb.invalidate_report_pairing(summary, "grading_evidence_incomplete")
+        family = withheld["by_model_multiplicity"]
+        self.assertEqual((family["tests"], family["by_test"], family["untested"]), (0, {}, ["m1", "m2"]))
         self.assertEqual(family["significant_after_adjustment"], [])
 
     def test_blocked_pairing_moves_both_to_observed(self):
