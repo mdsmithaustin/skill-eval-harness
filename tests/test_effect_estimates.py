@@ -519,6 +519,19 @@ class PlanningTests(unittest.TestCase):
         ceiling = [((3, 3), (3, 3))] * 6 + [((3, 3), (3, 2))] * 2
         plan = ee.plan_power(ceiling, min_lift=0.1, cases_grid=[8], repetitions_grid=[3], trials=5)
         self.assertEqual((plan["verdict"], plan["headroom"]), ("min-lift-exceeds-headroom", 0.083333))
+        # A lift equal to the headroom is reachable, also when 1 - 0.9 is not
+        # exactly 0.1 in floating point.
+        for pilot, lift in (([((10, 10), (10, 9))] * 6, 0.1), ([((5, 5), (5, 4))] * 6, 0.2)):
+            with self.subTest(lift=lift):
+                edge = ee.plan_power(pilot, min_lift=lift, cases_grid=[8], repetitions_grid=[3], trials=5)
+                self.assertNotEqual(edge["verdict"], "min-lift-exceeds-headroom")
+                self.assertEqual(len(edge["grid"]), 1)
+        # A baseline that never passes leaves all the room there is, though
+        # smoothing would raise it to one eighth.
+        floor = ee.plan_power([((3, 3), (3, 0))] * 8, min_lift=0.9, cases_grid=[8],
+                              repetitions_grid=[3], trials=200)
+        self.assertEqual(floor["verdict"], "plan-found")
+        self.assertGreater(floor["grid"][0]["power"], 0.9)
         alone = ee.plan_power(PILOT, min_lift=0.15, cases_grid=[32], repetitions_grid=[3], trials=100)
         beside = ee.plan_power(PILOT, min_lift=0.15, cases_grid=[8, 32], repetitions_grid=[1, 3],
                                trials=100)

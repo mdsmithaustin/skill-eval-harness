@@ -853,11 +853,15 @@ def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *
     # Headroom is a fact about the pilot's baseline, so it reads the raw rates:
     # smoothing would invent room above a baseline that already passes.
     headroom = 1 - statistics.fmean(passes / runs for runs, passes in control)
-    shifted = _shifted_rates(_smoothed_rates(treatment), without, min_lift)
-    if shifted is None or min_lift > headroom:
+    if min_lift > headroom + _TOLERANCE:
         return {**base, "verdict": "min-lift-exceeds-headroom",
                 "headroom": round(headroom, _DECIMALS),
                 "grid": [], "recommendation": None}
+    # Smoothing lifts a low baseline, which can leave the smoothed rates less
+    # room than the pilot showed. The skill arm then always passes: the
+    # largest lift the smoothed rates allow, a little under the target.
+    shifted = (_shifted_rates(_smoothed_rates(treatment), without, min_lift)
+               or [1.0] * len(without))
     shrunk_with, shrunk_without = _shrunk_rates(treatment), _shrunk_rates(control)
     shrunk_shifted = (None if shrunk_with is None or shrunk_without is None
                       else _shifted_rates(shrunk_with, shrunk_without, min_lift))
