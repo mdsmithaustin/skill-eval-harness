@@ -464,7 +464,7 @@ When pairing is incomplete, both fields move to `observed_interval` / `observed_
 A report with several models prints one lift test per model, and an ablation that cites several cases prints one test per case. At `alpha` 0.05, one test in twenty is significant by chance, so the best of four models clearing 0.05 is weak evidence. Two blocks give the Holm-adjusted reading of each family:
 
 - `paired_summary.by_model_multiplicity`, when the report has two or more models.
-- `ablation_regressions[].regressions[].significance.multiplicity`, when a confirmed regression cites two or more measured cases. The family holds every measured case the regression cites, including the ones that did not regress, because each had the chance to.
+- `ablation_regressions[].regressions[].significance.multiplicity`, when a confirmed regression cites two or more measured (case, model) cohorts. The family holds every measured cohort the regression cites, including the ones that did not regress, because each had the chance to.
 
 Each is `{method: "holm", family, tests, alpha, by_test: {name: {p_value, adjusted_p_value, significant}}, significant_after_adjustment, untested}`. `p_value` is the value the test decides on: `p_value_upper_bound` on the sampled path, else the exact `p_value`. A block whose headline is withheld ran no test the report claims, so it is listed in `untested` and does not count toward `tests`. When the whole report is withheld, every model is `untested`. The adjustment makes no assumption about how the tests depend on each other.
 

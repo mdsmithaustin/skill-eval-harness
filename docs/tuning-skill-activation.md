@@ -218,8 +218,9 @@ each size holds. The command refuses a trigger case that already declares a
 scope, a case whose prompt is a private `prompt_ref`, and an `--out-dir` that
 already holds one of the requested catalogs. It also refuses an `--out-dir`
 inside or around a skill or the decoy directory. It checks all of that before
-it writes anything. A skill directory with a symlink that points outside
-itself is refused too, and the catalogs written so far are removed. A catalog
+it writes anything, along with a decoy directory that is itself a symlink. A
+skill directory that holds a symlink pointing outside itself is refused when
+it is copied, and the catalogs written so far are removed. A catalog
 case carries only `id`, `split`, `kind`, `should_trigger`, `prompt` and its
 scope, so it never refers to a fixture the catalog does not hold.
 

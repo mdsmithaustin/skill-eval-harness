@@ -120,6 +120,23 @@ class CatalogTests(unittest.TestCase):
             self.assertIn("symlink escaping the root", stderr)
             self.assertEqual(list(out.glob("library-*")), [])
 
+    def test_a_decoy_directory_that_is_a_symlink_is_refused_before_any_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = make_eval_repo(root, skill_name="reviewer", skill_text=TARGET, cases=CASES)
+            decoys = write_decoys(root, ("poems",))
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "SKILL.md").write_text("---\nname: ext\ndescription: Elsewhere.\n---\n", encoding="utf-8")
+            (decoys / "ext").symlink_to(outside, target_is_directory=True)
+            for out in (outside, root / "catalogs"):
+                with self.subTest(out=out.name):
+                    code, _, stderr = run_cli("trigger-distractors", manifest, "--distractors", decoys,
+                                              "--sizes", "2", "--out-dir", out)
+                    self.assertNotEqual(code, 0)
+                    self.assertIn("must not be symlinks: ['ext']", stderr)
+                    self.assertEqual(list(out.glob("library-*")), [])
+
     def test_the_decoy_order_is_seeded(self):
         with tempfile.TemporaryDirectory() as td:
             manifest = make_eval_repo(Path(td), skill_name="reviewer", skill_text=TARGET, cases=CASES)

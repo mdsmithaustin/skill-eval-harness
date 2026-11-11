@@ -18977,6 +18977,9 @@ def build_distractor_catalogs(manifest_path: Path, distractors_dir: Path, sizes:
             die(f"--out-dir {out_dir} overlaps {source}; choose a directory outside the skills and the decoys")
     decoys = sorted(child.name for child in distractors_dir.iterdir()
                     if (child / "SKILL.md").is_file())
+    linked = sorted(name for name in decoys if (distractors_dir / name).is_symlink())
+    if linked:
+        die(f"distractor skill directories must not be symlinks: {linked}")
     clashes = sorted(set(decoys) & set(keys))
     if clashes:
         die(f"distractor skill directories share a name with the skill under test: {clashes}")
@@ -19005,7 +19008,7 @@ def build_distractor_catalogs(manifest_path: Path, distractors_dir: Path, sizes:
                 _copy_skill_root(root, dest / "skills" / key)
             for name in chosen:
                 _copy_skill_root(distractors_dir / name, dest / "skills" / name)
-        except AblationError as exc:
+        except (AblationError, OSError) as exc:
             for written in sizes:
                 shutil.rmtree(out_dir / f"library-{written}", ignore_errors=True)
             die(str(exc))
