@@ -26,7 +26,8 @@ All notable public changes are listed here. Release tags are the source of truth
 
 - Add `plan-eval`. It reads a pilot `benchmark.json`, splits per-case variance into
   repetition noise and case spread, and simulates the paired test's power over a grid of
-  case and repetition counts. See [plan an eval](docs/commands.md#plan-an-eval-before-spending-on-it).
+  case and repetition counts. Each row gives a conservative `power` and a `power_shrunk`
+  with the pilot's repetition noise removed. See [plan an eval](docs/commands.md#plan-an-eval-before-spending-on-it).
 
 - Add Holm-adjusted p-values for the test families a report prints together:
   `paired_summary.by_model_multiplicity` across models and `significance.multiplicity`

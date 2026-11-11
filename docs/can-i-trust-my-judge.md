@@ -243,7 +243,7 @@ Read the block with these limits in mind:
 
 - It needs at least 10 human pass and 10 human fail labels, and a judge better
   than chance. Otherwise `availability` is `unavailable` and `reason` says why.
-  `availability` is `partial` when an invalid label or an incomplete judge
+- `availability` is `partial` when an invalid label or an incomplete judge
   verdict was left out, and `reason` counts them.
 - The intervals are normal approximations that carry the noise of the judged
   sample and of both label counts. With labels near the minimum they are rough.

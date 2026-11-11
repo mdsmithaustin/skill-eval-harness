@@ -464,18 +464,42 @@ class PlanningTests(unittest.TestCase):
         # Counting them would report about twice this share.
         self.assertLess(power(0.001), 0.028)
 
-    def test_pilot_rates_shed_repetition_noise_when_it_can_be_measured(self):
+    def test_shrunk_rates_shed_repetition_noise_when_it_can_be_measured(self):
         # Three observed rates whose spread is no wider than four coin flips
         # would give: nothing separates the cases, so each gets the arm mean.
-        arm = [(4, 2)] * 3 + [(4, 3)] * 3 + [(4, 1)] * 2
-        rates, model = ee._pilot_rates(arm)
-        self.assertEqual((model, set(rates)), ("shrunk", {0.53125}))
+        self.assertEqual(set(ee._shrunk_rates([(4, 2)] * 3 + [(4, 3)] * 3 + [(4, 1)] * 2)), {0.53125})
         # Deterministic cases keep their rates: there is no noise to remove.
-        self.assertEqual(ee._pilot_rates([(3, 3), (3, 0), (3, 3)]), ([1.0, 0.0, 1.0], "shrunk"))
-        # One run per case cannot show noise, so the rates are only smoothed.
-        self.assertEqual(ee._pilot_rates([(1, 1), (1, 0)]), ([0.75, 0.25], "smoothed"))
-        self.assertEqual(ee.plan_power(PILOT, min_lift=0.1, cases_grid=[8], repetitions_grid=[3],
-                                       trials=10)["rate_model"], "shrunk")
+        self.assertEqual(ee._shrunk_rates([(3, 3), (3, 0), (3, 3)]), [1.0, 0.0, 1.0])
+        # One run per case cannot show noise.
+        self.assertIsNone(ee._shrunk_rates([(1, 1), (1, 0)]))
+        self.assertEqual(ee._smoothed_rates([(1, 1), (1, 0)]), [0.75, 0.25])
+
+    def test_each_cell_brackets_power_and_the_low_reading_decides(self):
+        # Every case is the same coin in each arm (0.7 against 0.4), so the
+        # pilot's spread is all repetition noise. Observed rates treat that
+        # noise as case spread and read lower than the noise-free reading.
+        rng = random.Random(11)
+        pilot = [((3, sum(rng.random() < 0.7 for _ in range(3))),
+                  (3, sum(rng.random() < 0.4 for _ in range(3)))) for _ in range(30)]
+        plan = ee.plan_power(pilot, min_lift=0.3, cases_grid=[20, 30], repetitions_grid=[3],
+                             power=0.8, trials=600)
+        small, large = plan["grid"]
+        self.assertLess(small["power"], small["power_shrunk"])
+        self.assertLess(small["power"], 0.8)
+        self.assertGreaterEqual(small["power_shrunk"], 0.8)
+        # The recommendation waits for the conservative reading to clear the target.
+        self.assertEqual(plan["recommendation"]["cases"], 30)
+        self.assertGreaterEqual(large["power"], 0.8)
+
+    def test_a_one_repetition_pilot_has_no_noise_free_reading(self):
+        single = [((1, 1), (1, 0)), ((1, 0), (1, 0)), ((1, 1), (1, 1))] * 4
+        mixed = [((1, 1), (3, 2)), ((1, 0), (3, 1)), ((1, 1), (3, 0))] * 3
+        for pilot in (single, mixed):
+            with self.subTest(pilot=pilot[0]):
+                cell = ee.plan_power(pilot, min_lift=0.2, cases_grid=[8], repetitions_grid=[1],
+                                     trials=5)["grid"][0]
+                self.assertIsNone(cell["power_shrunk"])
+                self.assertIsNotNone(cell["power"])
 
     def test_five_cases_can_never_reach_alpha_whatever_the_lift(self):
         # 2 / 2**5 = 0.0625: no simulated eval of five cases is significant.
@@ -529,6 +553,27 @@ class PlanEvalCommandTests(unittest.TestCase):
         self.assertEqual(plan["pilot"]["limiting_variance"], "within-case")
         self.assertEqual([(cell["cases"], cell["repetitions"]) for cell in plan["grid"]], [(6, 2), (24, 2)])
         self.assertLess(plan["grid"][0]["power"], plan["grid"][1]["power"])
+
+    def test_runs_that_pass_part_of_their_checks_are_counted_and_explained(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = json.loads(self.pilot(root).read_text(encoding="utf-8"))
+            whole = root / "whole.json"
+            self.assertEqual(run_cli("plan-eval", "--benchmark", root / "benchmark.json", "--min-lift", "0.3",
+                                     "--cases", "6", "--repetitions", "2", "--trials", "5",
+                                     "--out", whole)[0], 0)
+            report["results"][0]["objective_pass_rate"] = 0.5
+            partial = root / "partial.json"
+            partial.write_text(json.dumps(report), encoding="utf-8")
+            out = root / "plan.json"
+            self.assertEqual(run_cli("plan-eval", "--benchmark", partial, "--min-lift", "0.3",
+                                     "--cases", "6", "--repetitions", "2", "--trials", "5",
+                                     "--out", out)[0], 0)
+            clean = json.loads(whole.read_text(encoding="utf-8"))
+            plan = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual((clean["pilot"]["partially_passing_runs"], clean["notes"]), (0, []))
+        self.assertEqual(plan["pilot"]["partially_passing_runs"], 1)
+        self.assertIn("a lift in fully passing runs", plan["notes"][0])
 
     def test_bad_grids_and_reports_are_usage_errors(self):
         with tempfile.TemporaryDirectory() as td:

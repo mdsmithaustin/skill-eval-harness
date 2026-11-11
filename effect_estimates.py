@@ -774,24 +774,44 @@ def _shifted_rates(with_rates: Sequence[float], without_rates: Sequence[float],
     return [min(1.0, max(0.0, rate + high)) for rate in with_rates]
 
 
-def _pilot_rates(arm: Sequence[tuple[int, int]]) -> tuple[list[float], str]:
-    """One arm's per-case pass rates as the planner's stand-in for true rates.
+def _smoothed_rates(arm: Sequence[tuple[int, int]]) -> list[float]:
+    """Observed per-case pass rates, moved half a run toward one half so a
+    case seen once is not treated as certain."""
+    return [(passes + 0.5) / (runs + 1) for runs, passes in arm]
 
-    A case's observed rate is its true rate plus repetition noise, so using
-    observed rates as true ones counts that noise twice and understates power.
-    With two or more runs per case the noise is estimable: each rate is pulled
-    toward the arm mean by the share of the observed variance that repetition
-    noise explains. With one run per case it is not, so the rates are only
-    smoothed by half a run and the plan leans low.
+
+def _shrunk_rates(arm: Sequence[tuple[int, int]]) -> list[float] | None:
+    """Per-case pass rates with repetition noise removed, or None when one run
+    per case leaves that noise unmeasurable.
+
+    Each rate is pulled toward the arm mean by the share of the observed
+    variance that repetition noise explains. That treats every case as having
+    the same true lift apart from noise, so it erases a lift that differs by
+    case.
     """
     rates = [passes / runs for runs, passes in arm]
     if len(rates) < 2 or any(runs < 2 for runs, _ in arm):
-        return [(passes + 0.5) / (runs + 1) for runs, passes in arm], "smoothed"
+        return None
     mean = statistics.fmean(rates)
     observed = statistics.variance(rates)
     noise = statistics.fmean(rate * (1 - rate) / (runs - 1) for rate, (runs, _) in zip(rates, arm))
     kept = max(0.0, observed - noise) / observed if observed > 0 else 0.0
-    return [mean + kept * (rate - mean) for rate in rates], "shrunk"
+    return [mean + kept * (rate - mean) for rate in rates]
+
+
+def _simulated_power(with_rates: Sequence[float], without_rates: Sequence[float], *,
+                     cases: int, repetitions: int, trials: int, rng: random.Random,
+                     alpha: float) -> float:
+    wins = 0
+    for _ in range(trials):
+        steps = []
+        for index in rng.choices(range(len(without_rates)), k=cases):
+            gained = sum(rng.random() < with_rates[index] for _ in range(repetitions))
+            kept = sum(rng.random() < without_rates[index] for _ in range(repetitions))
+            steps.append(gained - kept)
+        if sum(steps) > 0 and lattice_sign_flip_p(steps) <= alpha:
+            wins += 1
+    return wins / trials
 
 
 def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *,
@@ -800,13 +820,18 @@ def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *
                alpha: float = DEFAULT_ALPHA) -> dict[str, Any]:
     """How many cases and repetitions would let the paired test show ``min_lift``?
 
-    The pilot supplies each case's two pass rates through ``_pilot_rates``;
-    ``rate_model`` says whether they were shrunk or only smoothed. The
-    skill-arm rates are shifted until the mean lift equals ``min_lift``, which
-    keeps the pilot's spread of easy and hard cases. Each grid cell then simulates ``trials`` evals: draw
-    cases with replacement, draw each arm's passes, and run the exact
-    sign-flip test. ``power`` is the share that reach ``alpha`` with a positive
-    lift. The draws are seeded, so the plan is reproducible.
+    Each grid cell simulates ``trials`` evals: draw cases from the pilot with
+    replacement, draw each arm's passes, and run the exact sign-flip test.
+    The skill-arm rates are shifted until the mean lift equals ``min_lift``.
+    Power is the share of trials that reach ``alpha`` with a positive lift.
+
+    A small pilot cannot pin down each case's true rates, so each cell carries
+    two readings. ``power`` simulates from the observed rates. Those carry the
+    pilot's own repetition noise as if it were case spread, so ``power`` reads
+    low and decides the recommendation. ``power_shrunk`` removes that noise and
+    is closer when every case gains about the same, and reads high when the
+    lift differs by case. It is null when the pilot ran one repetition. The
+    draws are seeded, so the plan is reproducible.
     """
     if not 0 < min_lift <= 1:
         raise ValueError("min_lift must be a pass-rate difference in (0, 1]")
@@ -819,31 +844,32 @@ def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *
                             "trials": trials, "seed": seed}
     if not case_counts:
         return {**base, "verdict": "no-pilot-pairs", "grid": [], "recommendation": None}
-    without, rate_model = _pilot_rates([control for _, control in case_counts])
-    base["rate_model"] = rate_model
-    shifted = _shifted_rates(_pilot_rates([treatment for treatment, _ in case_counts])[0],
-                             without, min_lift)
+    treatment = [arm for arm, _ in case_counts]
+    control = [arm for _, arm in case_counts]
+    without = _smoothed_rates(control)
+    shifted = _shifted_rates(_smoothed_rates(treatment), without, min_lift)
     if shifted is None:
         return {**base, "verdict": "min-lift-exceeds-headroom",
                 "headroom": round(1 - statistics.fmean(without), _DECIMALS),
                 "grid": [], "recommendation": None}
+    shrunk_with, shrunk_without = _shrunk_rates(treatment), _shrunk_rates(control)
+    shrunk_shifted = (None if shrunk_with is None or shrunk_without is None
+                      else _shifted_rates(shrunk_with, shrunk_without, min_lift))
     rng = random.Random(seed)
-    grid = []
+    grid: list[dict[str, Any]] = []
     for cases in sorted(set(cases_grid)):
         for repetitions in sorted(set(repetitions_grid)):
-            wins = 0
-            for _ in range(trials):
-                steps = []
-                for index in rng.choices(range(len(without)), k=cases):
-                    gained = sum(rng.random() < shifted[index] for _ in range(repetitions))
-                    kept = sum(rng.random() < without[index] for _ in range(repetitions))
-                    steps.append(gained - kept)
-                if sum(steps) > 0 and lattice_sign_flip_p(steps) <= alpha:
-                    wins += 1
-            share = wins / trials
+            share = _simulated_power(shifted, without, cases=cases, repetitions=repetitions,
+                                     trials=trials, rng=rng, alpha=alpha)
+            shrunk_share = None
+            if shrunk_shifted is not None and shrunk_without is not None:
+                shrunk_share = round(_simulated_power(
+                    shrunk_shifted, shrunk_without, cases=cases, repetitions=repetitions,
+                    trials=trials, rng=rng, alpha=alpha), 4)
             grid.append({"cases": cases, "repetitions": repetitions,
                          "runs_per_arm": cases * repetitions, "power": round(share, 4),
-                         "power_standard_error": round(math.sqrt(share * (1 - share) / trials), 4)})
+                         "power_standard_error": round(math.sqrt(share * (1 - share) / trials), 4),
+                         "power_shrunk": shrunk_share})
     enough = [cell for cell in grid if cell["power"] >= power]
     recommendation = min(enough, key=lambda cell: (cell["runs_per_arm"], cell["cases"]), default=None)
     return {**base, "verdict": "plan-found" if recommendation else "grid-too-small",
