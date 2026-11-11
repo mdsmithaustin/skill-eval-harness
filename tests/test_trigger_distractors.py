@@ -99,7 +99,7 @@ class CatalogTests(unittest.TestCase):
             ({"sizes": (1,), "cases": scoped}, "already declares expected_skills or forbidden_skills"),
             ({"sizes": (1,), "cases": private}, "a catalog needs an inline prompt"),
             ({"sizes": (1,), "cases": answer_only}, "no kind:'trigger' cases"),
-            ({"sizes": (1, 1)}, "--sizes must be distinct whole numbers"),
+            ({"sizes": (1, 1)}, "--sizes must be distinct whole numbers of 0 or more"),
         ]
         for options, message in rows:
             with self.subTest(message=message), tempfile.TemporaryDirectory() as td:

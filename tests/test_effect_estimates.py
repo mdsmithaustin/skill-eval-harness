@@ -517,7 +517,7 @@ class PlanEvalCommandTests(unittest.TestCase):
                     (("--benchmark", benchmark, "--min-lift", "0.3", "--cases", "6,x"),
                      "--cases must be a comma-separated list of whole numbers"),
                     (("--benchmark", benchmark, "--min-lift", "0.3", "--repetitions", "0"),
-                     "--repetitions must be a comma-separated list of positive whole numbers"),
+                     "--repetitions must be distinct whole numbers of 1 or more"),
                     (("--benchmark", benchmark, "--min-lift", "0.3", "--power", "1"),
                      "--power must lie strictly between 0 and 1"),
                     (("--benchmark", benchmark, "--min-lift", "2"),

@@ -18909,13 +18909,13 @@ def trend(args: argparse.Namespace) -> int:
     return 0
 
 
-def _whole_number_list(raw: str, flag: str) -> list[int]:
+def _whole_number_list(raw: str, flag: str, *, minimum: int = 0) -> list[int]:
     try:
         values = [int(part) for part in raw.split(",")]
     except ValueError:
         die(f"{flag} must be a comma-separated list of whole numbers")
-    if any(value < 0 for value in values) or len(values) != len(set(values)):
-        die(f"{flag} must be distinct whole numbers of zero or more")
+    if any(value < minimum for value in values) or len(values) != len(set(values)):
+        die(f"{flag} must be distinct whole numbers of {minimum} or more")
     return sorted(values)
 
 
@@ -19095,18 +19095,6 @@ def planning_case_counts(results: list[dict[str, Any]]) -> list[tuple[tuple[int,
             for _, with_counts, without_counts in paired_case_counts(rows)]
 
 
-def _planning_grid(raw: str | None, default: list[int], flag: str) -> list[int]:
-    if raw is None:
-        return default
-    try:
-        values = [int(part) for part in raw.split(",")]
-    except ValueError:
-        die(f"{flag} must be a comma-separated list of whole numbers")
-    if not values or any(value < 1 for value in values):
-        die(f"{flag} must be a comma-separated list of positive whole numbers")
-    return values
-
-
 def plan_eval(args: argparse.Namespace) -> int:
     """Forward planning from a pilot run: which (cases, repetitions) would let
     the paired test show --min-lift. Model-free; reads only benchmark.json."""
@@ -19118,10 +19106,10 @@ def plan_eval(args: argparse.Namespace) -> int:
     pilot_cases = len(counts)
     pilot_repetitions = max((runs for (runs, _), _ in counts), default=1)
     needed = cases_needed_for_alpha()
-    cases_grid = _planning_grid(
-        args.cases, sorted({max(needed, pilot_cases * factor) for factor in (1, 2, 4, 8)}), "--cases")
-    repetitions_grid = _planning_grid(
-        args.repetitions, sorted({1, 3, 5, pilot_repetitions}), "--repetitions")
+    cases_grid = (_whole_number_list(args.cases, "--cases", minimum=1) if args.cases is not None
+                  else sorted({max(needed, pilot_cases * factor) for factor in (1, 2, 4, 8)}))
+    repetitions_grid = (_whole_number_list(args.repetitions, "--repetitions", minimum=1)
+                        if args.repetitions is not None else sorted({1, 3, 5, pilot_repetitions}))
     if not 0 < args.power < 1:
         die("--power must lie strictly between 0 and 1")
     plan = plan_power(counts, min_lift=args.min_lift, cases_grid=cases_grid,
@@ -21558,7 +21546,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("trigger-distractor-report", help="trigger behaviour by library size from one skill-trigger-matrix report per catalog: expected-skill load rate, pass rate, decoy activations, and the degradation boundary")
     p.add_argument("--report", action="append", metavar="SIZE=PATH", help="library size = matrix report JSON (repeatable, at least two)")
-    p.add_argument("--drop", type=float, default=0.1, help="load-rate drop from the smallest library that marks degradation (default 0.1)")
+    p.add_argument("--drop", type=float, default=0.1, help="fall in a rate from the smallest library's that marks degradation (default 0.1)")
     p.add_argument("--out")
 
     p = sub.add_parser("migrate", help="upgrade a version-1 manifest to version 2: stamp default severity/oracle tiers, mark binary judge rubrics, print the diff and the judgment-call checklist")
