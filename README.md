@@ -570,7 +570,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-benchmark contamination` | Output-side perimeter: canary tripwire, output↔answer n-gram overlap, released-at/cutoff gate. |
 | `skill-benchmark error-analysis` | Open-coding review queue + axial failure taxonomy over a `benchmark.json`; `--feedback feedback.json` fills each row's note from the served review. |
 | `skill-benchmark compare-judges` | Flag whether measured lift depends on which judge model graded. |
-| `skill-benchmark judge-alignment` | Score a judge against human labels (`--labels feedback.json`, or a legacy labels file): agreement, Cohen's kappa, precision/recall/F1, and score calibration (Brier, ECE, AUROC, threshold sweep). |
+| `skill-benchmark judge-alignment` | Score a judge against human labels (`--labels feedback.json`, or a legacy labels file): agreement, Cohen's kappa, precision/recall/F1, score calibration (Brier, ECE, AUROC, threshold sweep), and judged pass rates and lift corrected for the judge's error rates. |
 | `skill-benchmark judge-robustness` | Order-flip self-consistency + negative controls a robust judge must reject (opt-in, model-touching). |
 | `skill-benchmark judge` | Run deferred `judge`/`rubric` assertions through `--judge-backend`/`--judge-model` or `--judge-cmd` (model-touching). |
 

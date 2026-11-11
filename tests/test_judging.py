@@ -2483,6 +2483,67 @@ class JudgeAlignmentTests(unittest.TestCase):
         self.assertEqual(sb.cohen_kappa([True, True], [True, True]), 1.0)  # degenerate-agree
         self.assertAlmostEqual(sb.cohen_kappa([True, False, True, False], [False, True, False, True]), -1.0)
 
+    def _labelled_population(self):
+        """40 human-pass and 40 human-fail labels on a judge with sensitivity
+        0.85 and specificity 0.8, inside 300 judged runs per arm: with_skill
+        passes 195 of them and without_skill 135."""
+        human, judge = {}, {}
+        verdicts = {"with_skill": [True] * 195 + [False] * 105,
+                    "without_skill": [True] * 135 + [False] * 165}
+        for variant, passes in verdicts.items():
+            for index, passed in enumerate(passes):
+                judge[f"c{index}::{variant}::run-1::quality"] = self._judge(passed)
+        # Labels sit on with_skill runs: 34 + 8 judge-pass, 6 + 32 judge-fail.
+        for index in range(42):
+            human[f"c{index}::with_skill::run-1::quality"] = {"passed": index < 34}
+        for index in range(195, 233):
+            human[f"c{index}::with_skill::run-1::quality"] = {"passed": index < 201}
+        return human, judge
+
+    def test_bias_correction_rescales_the_judged_lift(self):
+        human, judge = self._labelled_population()
+        correction = sb.judge_alignment_report(human, judge)["bias_correction"]
+        self.assertEqual((correction["availability"], correction["method"]), ("complete", "rogan-gladen"))
+        self.assertEqual(correction["labels"], {"human_pass": 40, "human_fail": 40})
+        self.assertEqual((correction["sensitivity"], correction["specificity"]), (0.85, 0.8))
+        # (p + spec - 1) / (sens + spec - 1): (0.65 - 0.2) / 0.65 and (0.45 - 0.2) / 0.65.
+        self.assertEqual(correction["by_variant"]["with_skill"]["corrected_pass_rate"], 0.6923)
+        self.assertEqual(correction["by_variant"]["without_skill"]["corrected_pass_rate"], 0.3846)
+        # The observed 0.2 lift is the true lift shrunk by 0.65.
+        lift = correction["lift"]
+        self.assertEqual((lift["observed_delta"], lift["corrected_delta"]), (0.2, 0.3077))
+        self.assertLess(lift["interval"]["lower"], 0.3077)
+        self.assertGreater(lift["interval"]["lower"], 0)
+        self.assertEqual(correction["overall"]["n"], 600)
+
+    def test_bias_correction_interval_widens_with_fewer_labels(self):
+        many = {"tp": 340, "fn": 60, "tn": 320, "fp": 80}
+        few = {"tp": 34, "fn": 6, "tn": 32, "fp": 8}
+        wide = sb.judge_corrected_rate(180, 300, confusion=few)["interval"]
+        narrow = sb.judge_corrected_rate(180, 300, confusion=many)["interval"]
+        self.assertGreater(wide["upper"] - wide["lower"], narrow["upper"] - narrow["lower"])
+        # A perfect judge needs no correction and adds no label noise.
+        perfect = sb.judge_corrected_rate(180, 300, confusion={"tp": 40, "fn": 0, "tn": 40, "fp": 0})
+        self.assertEqual(perfect["corrected_pass_rate"], 0.6)
+
+    def test_bias_correction_needs_both_label_classes_and_a_judge_better_than_chance(self):
+        human = {"a": {"passed": True}, "b": {"passed": False}, "c": {"passed": True}}
+        judge = {key: self._judge(True) for key in ("a", "b", "c")}
+        correction = sb.judge_alignment_report(human, judge)["bias_correction"]
+        self.assertEqual(correction["availability"], "unavailable")
+        self.assertIn("needs at least 10 human pass and 10 human fail labels; found 2 pass and 1 fail",
+                      correction["reason"])
+        self.assertIsNone(correction["overall"]["corrected_pass_rate"])
+        self.assertEqual((correction["by_variant"], correction["lift"]), ({}, None))
+        coin = sb.judge_corrected_rate(5, 10, confusion={"tp": 5, "fn": 5, "tn": 5, "fp": 5})
+        self.assertIn("no better than chance", coin["reason"])
+
+    def test_bias_correction_reads_the_variant_from_model_fanned_ids(self):
+        self.assertEqual(sb._judge_task_variant("c1::opus::old_skill::run-2::quality"), "old_skill")
+        self.assertEqual(sb._judge_task_variant("c1::with_skill::run-1::quality"), "with_skill")
+        self.assertIsNone(sb._judge_task_variant("a"))
+        self.assertIsNone(sb._judge_task_variant("c1::with_skill::quality::extra"))
+
     def test_alignment_confusion_and_warnings(self):
         human = {"a": {"passed": True}, "b": {"passed": False}, "c": {"passed": True}}
         judge = {key: self._judge(True) for key in ("a", "b", "c")}   # b is a false positive

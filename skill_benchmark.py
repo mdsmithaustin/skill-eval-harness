@@ -394,6 +394,8 @@ from effect_estimates import (
     InferenceUnit,
     cases_needed_for_alpha,
     ceiling_or_floor,
+    judge_corrected_lift,
+    judge_corrected_rate,
     minimum_units_note,
     multiplicity,
     plan_power,
@@ -475,6 +477,7 @@ from judge_verdict import (
 from manifest_contracts import (
     ABLATION_VARIANT_PREFIX,
     DEFAULT_EXECUTION_VARIANTS,
+    JUDGE_TASK_DELIMITER,
     OLD_SKILL,
     WITH_SKILL,
     WITHOUT_SKILL,
@@ -12672,6 +12675,49 @@ def judge_calibration(ids: list[str], human: dict[str, dict[str, Any]],
             **(observed if complete else empty), "observed": observed, "warnings": warnings}
 
 
+def _judge_task_variant(judge_task_id_text: str) -> str | None:
+    """The variant segment of `case[::model]::variant::run-n::assertion`, or None."""
+    segments = judge_task_id_text.split(JUDGE_TASK_DELIMITER)
+    if len(segments) in (4, 5) and re.fullmatch(r"run-[0-9]+", segments[-2]):
+        return segments[-3]
+    return None
+
+
+def judge_bias_correction(confusion: dict[str, int], judged: dict[str, bool]) -> dict[str, Any]:
+    """Judge pass rates corrected for the judge's error against human labels.
+
+    `confusion` comes from the labelled verdicts; `judged` is every complete
+    verdict, labelled or not, so a small labelled sample corrects a large
+    judged one. Rates are corrected overall and per variant, and the
+    with_skill minus without_skill difference is corrected as a lift."""
+    human_pass = confusion["tp"] + confusion["fn"]
+    human_fail = confusion["tn"] + confusion["fp"]
+    by_variant: dict[str, list[bool]] = collections.defaultdict(list)
+    for identifier, passed in judged.items():
+        variant = _judge_task_variant(identifier)
+        if variant is not None:
+            by_variant[variant].append(passed)
+    block: dict[str, Any] = {
+        "method": "rogan-gladen",
+        "labels": {"human_pass": human_pass, "human_fail": human_fail},
+        "sensitivity": round(confusion["tp"] / human_pass, 4) if human_pass else None,
+        "specificity": round(confusion["tn"] / human_fail, 4) if human_fail else None,
+        "overall": (judge_corrected_rate(sum(judged.values()), len(judged), confusion=confusion)
+                    if judged else None),
+        "by_variant": {variant: judge_corrected_rate(sum(passes), len(passes), confusion=confusion)
+                       for variant, passes in sorted(by_variant.items())},
+        "lift": None,
+    }
+    treatment, control = (by_variant.get(arm) for arm in ("with_skill", "without_skill"))
+    if treatment and control:
+        block["lift"] = judge_corrected_lift((sum(treatment), len(treatment)),
+                                             (sum(control), len(control)), confusion=confusion)
+    reason = (block["overall"] or {}).get("reason") or (None if judged else "no complete judge verdicts")
+    block["availability"] = "unavailable" if reason else "complete"
+    block["reason"] = reason
+    return block
+
+
 def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, dict[str, Any]], *, min_labels: int = 50) -> dict[str, Any]:
     """Feature 2: validate a JUDGE against HUMAN labels (not another judge). Both
     are keyed by judge_task_id with a `passed` bool. Reports agreement, Cohen's
@@ -12734,6 +12780,10 @@ def judge_alignment_report(human: dict[str, dict[str, Any]], judge: dict[str, di
         "warnings": warnings,
         "calibration": judge_calibration(
             ids, human, judge, population_gaps=population_gaps, min_labels=min_labels),
+        "bias_correction": judge_bias_correction(
+            observed["confusion"],
+            {identifier: row["passed"] for identifier, row in judge.items()
+             if identifier not in incomplete_judge}),
     }
 
 

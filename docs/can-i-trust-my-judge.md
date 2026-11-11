@@ -206,6 +206,46 @@ precision, a harsh one fails recall. And take the warning seriously — four
 labels is demo-sized. The default `--min-labels 50` is the floor below which
 these metrics swing wildly with each added label.
 
+### Correct a judged pass rate for judge error
+
+A judge that passes some answers a human fails, and fails some a human passes,
+reports a pass rate that is not the true one. The `bias_correction` block of
+the same report uses the labelled verdicts to estimate the judge's two error
+rates and solves for the true rate (the Rogan-Gladen estimator):
+
+```text
+corrected = (observed + specificity - 1) / (sensitivity + specificity - 1)
+```
+
+`sensitivity` is the share of human passes the judge also passes, and
+`specificity` the share of human fails it also fails. `overall` and each
+`by_variant` entry carry `observed_pass_rate`, `corrected_pass_rate` and an
+`interval`. The observed rate counts every complete judge verdict, labelled or
+not, so a few dozen labels can correct a few hundred judged runs. The variant
+is read from the `judge_task_id`.
+
+`lift` corrects the `with_skill` minus `without_skill` difference. With one
+judge on both arms the false-positive rate cancels, and the observed difference
+is the true one multiplied by `sensitivity + specificity - 1`. An imperfect
+judge therefore shrinks a real lift toward zero: a judge at 0.85 and 0.8
+reports a true 0.31 lift as 0.2.
+
+Read the block with three limits in mind:
+
+- It needs at least 10 human pass and 10 human fail labels, and a judge better
+  than chance. Otherwise `availability` is `unavailable` and `reason` says why.
+- The intervals are normal approximations that carry the noise of the judged
+  sample and of both label counts. With labels near the minimum they are rough.
+  The `lift` interval treats the arms as independent, so it is wider than a
+  paired interval over the same cases.
+- The correction assumes the judge errs at the same rates on both arms. A judge
+  that rewards length would favour whichever arm writes more, and no shared
+  correction removes that. Label runs from both arms and compare the confusion
+  per arm before trusting a corrected lift.
+
+The benchmark report's own judged rates and gates are unchanged. This block is
+a second reading of them.
+
 ### Check that the score means what it says (`calibration`)
 
 Agreement grades the judge's pass/fail call. A scored judge also emits a number,

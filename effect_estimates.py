@@ -829,6 +829,94 @@ def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *
             "grid": grid, "recommendation": recommendation}
 
 
+# Fewer labels than this in either human class leave the judge's error rate
+# too rough to divide by.
+MIN_CLASS_LABELS = 10
+
+
+def _judge_error_rates(confusion: Mapping[str, int]) -> tuple[float, float, int, int] | str:
+    """Sensitivity, specificity and the label count behind each, or why not."""
+    human_pass = confusion["tp"] + confusion["fn"]
+    human_fail = confusion["tn"] + confusion["fp"]
+    if min(human_pass, human_fail) < MIN_CLASS_LABELS:
+        return (f"needs at least {MIN_CLASS_LABELS} human pass and {MIN_CLASS_LABELS} human fail "
+                f"labels; found {human_pass} pass and {human_fail} fail")
+    sensitivity = confusion["tp"] / human_pass
+    specificity = confusion["tn"] / human_fail
+    if sensitivity + specificity <= 1:
+        return ("the judge agrees with the human labels no better than chance "
+                f"(sensitivity {sensitivity:.3f} + specificity {specificity:.3f} <= 1)")
+    return sensitivity, specificity, human_pass, human_fail
+
+
+def _normal_interval(estimate: float, variance: float, confidence: float,
+                     low: float, high: float) -> dict[str, Any]:
+    reach = statistics.NormalDist().inv_cdf((1 + confidence) / 2) * math.sqrt(variance)
+    return {"confidence": confidence, "method": "normal-approximation",
+            "lower": round(max(low, estimate - reach), 4),
+            "upper": round(min(high, estimate + reach), 4)}
+
+
+def judge_corrected_rate(passes: int, total: int, *, confusion: Mapping[str, int],
+                         confidence: float = DEFAULT_CONFIDENCE) -> dict[str, Any]:
+    """A judge's pass rate corrected for the judge's own error rates.
+
+    A judge that passes some answers a human fails, and fails some a human
+    passes, reports ``p = theta * sens + (1 - theta) * (1 - spec)`` for a true
+    rate ``theta``. Solving for theta is the Rogan-Gladen estimator. Its
+    interval is a delta-method normal approximation that carries three
+    sources of noise: the judged sample and the two labelled samples behind
+    sensitivity and specificity.
+    """
+    if total < 1 or not 0 <= passes <= total:
+        raise ValueError("passes must lie between 0 and a positive total")
+    observed = passes / total
+    out: dict[str, Any] = {"n": total, "observed_pass_rate": round(observed, 4)}
+    rates = _judge_error_rates(confusion)
+    if isinstance(rates, str):
+        return {**out, "corrected_pass_rate": None, "interval": None, "reason": rates}
+    sensitivity, specificity, human_pass, human_fail = rates
+    youden = sensitivity + specificity - 1
+    theta = min(1.0, max(0.0, (observed + specificity - 1) / youden))
+    variance = (observed * (1 - observed) / total
+                + theta ** 2 * sensitivity * (1 - sensitivity) / human_pass
+                + (1 - theta) ** 2 * specificity * (1 - specificity) / human_fail) / youden ** 2
+    return {**out, "corrected_pass_rate": round(theta, 4),
+            "interval": _normal_interval(theta, variance, confidence, 0.0, 1.0)}
+
+
+def judge_corrected_lift(treatment: tuple[int, int], control: tuple[int, int], *,
+                         confusion: Mapping[str, int],
+                         confidence: float = DEFAULT_CONFIDENCE) -> dict[str, Any]:
+    """The difference of two judged pass rates, corrected for judge error.
+
+    With one judge for both arms the false-positive rate cancels and the
+    observed difference is the true one scaled by ``sens + spec - 1``, so an
+    imperfect judge shrinks a real lift toward zero. Each of ``treatment`` and
+    ``control`` is ``(passes, total)``. The interval treats the arms as
+    independent samples, which is wider than a paired interval when the same
+    cases feed both arms.
+    """
+    for passes, total in (treatment, control):
+        if total < 1 or not 0 <= passes <= total:
+            raise ValueError("passes must lie between 0 and a positive total")
+    with_rate = treatment[0] / treatment[1]
+    without_rate = control[0] / control[1]
+    out: dict[str, Any] = {"observed_delta": round(with_rate - without_rate, 4)}
+    rates = _judge_error_rates(confusion)
+    if isinstance(rates, str):
+        return {**out, "corrected_delta": None, "interval": None, "reason": rates}
+    sensitivity, specificity, human_pass, human_fail = rates
+    youden = sensitivity + specificity - 1
+    lift = (with_rate - without_rate) / youden
+    variance = ((with_rate * (1 - with_rate) / treatment[1]
+                 + without_rate * (1 - without_rate) / control[1])
+                + lift ** 2 * (sensitivity * (1 - sensitivity) / human_pass
+                               + specificity * (1 - specificity) / human_fail)) / youden ** 2
+    return {**out, "corrected_delta": round(max(-1.0, min(1.0, lift)), 4),
+            "interval": _normal_interval(lift, variance, confidence, -1.0, 1.0)}
+
+
 def harm_check(interval: dict[str, Any], *, max_harm: float) -> dict[str, Any]:
     """Does the interval rule out a loss larger than ``max_harm``?
 

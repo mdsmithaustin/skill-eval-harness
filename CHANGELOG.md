@@ -4,6 +4,10 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add `bias_correction` to `judge-alignment`. It estimates the judge's sensitivity and
+  specificity from the human labels and corrects judged pass rates, per variant, and the
+  judged lift for them. See [correct a judged pass rate](docs/can-i-trust-my-judge.md#correct-a-judged-pass-rate-for-judge-error).
+
 - Add `plan-eval`. It reads a pilot `benchmark.json`, splits per-case variance into
   repetition noise and case spread, and simulates the paired test's power over a grid of
   case and repetition counts. See [plan an eval](docs/commands.md#plan-an-eval-before-spending-on-it).
