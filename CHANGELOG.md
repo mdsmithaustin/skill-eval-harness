@@ -4,6 +4,11 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add `manifest.old_skill_role` (`previous_revision` or `self_generated`) and
+  `paired_edit_summary.control_role`, so the `old_skill` arm can hold a skill the model wrote
+  for itself and the report says so. See
+  [a model-written control](docs/commands.md#a-skill-the-model-wrote-for-itself-as-the-control).
+
 - Extend the `audit-manifest` known-answer check with two more answers that show no
   capability: the skill's own text pasted back and a one-line refusal. A case that passes
   every gate check on either gets a recommended `degenerate-answer-passes` finding. See

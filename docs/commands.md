@@ -512,6 +512,20 @@ A lift that is not significant is not evidence that the skill does no harm, beca
 
 When `--variant` selects an `old_skill` arm beside `with_skill` (`benchmark --variant with_skill --variant without_skill --variant old_skill`), the report adds `paired_edit_summary`: the current skill against the revision it replaces, paired per (case, model) within this run under the `skill_edit` contrast. It carries `current_objective_pass_rate`, `previous_objective_pass_rate`, `delta`, the same `significance`, `interval`, and `noise_check` blocks as `paired_summary` (with `headroom` measured on the previous revision), `regressed_cases` (each `{case_id, current, previous, delta, model?}`), `availability`, and `pairing`. A missing arm blocks its pair as `missing_old_skill` or `missing_with_skill`, and a partial comparison withholds its headline under `observed_*`, as `paired_summary` does. Without an `old_skill` arm the key is absent.
 
+### A skill the model wrote for itself as the control
+
+A skill can beat no skill and still lose to the skill the model would write for itself in one prompt. The `old_skill` arm can hold that skill. Have the model you target write a skill for the same job, save it in the repo, point `old_skill_paths` at it, and declare what the arm holds:
+
+```json
+"old_skill_paths": ["evals/self-generated/SKILL.md"],
+"optional_variants": ["old_skill"],
+"old_skill_role": "self_generated"
+```
+
+Then run `prepare --include-old-skill` and `benchmark --variant with_skill --variant without_skill --variant old_skill` as for an edit. `paired_edit_summary.control_role` reads `self_generated`, so a reader knows `previous_objective_pass_rate` is the model-written skill's rate and `delta` is the curated skill's margin over it. `regressed_cases` lists the cases where the model-written skill did better. The pairing, the test and the interval are the same as for an edit; `old_skill_role` only labels them. It defaults to `previous_revision` and takes no other value.
+
+The harness does not write the skill and never picks a model. A manifest has one `old_skill` arm, so one run compares against the previous revision or against a model-written skill, not both. Treat the result as a control, not as release proof: a different model or prompt writes a different skill.
+
 ### How runs ended
 
 `run_endings.by_variant` counts every run's `stop_class`, `served_model_check`, and effort level per variant; runs that predate these fields count as `unrecorded`. A `stop_class` or `served_model_check` recorded with an earlier spelling is counted under that spelling; effort is counted by the requested level, so an unpinned run is `backend_default` whatever its `applied_by` reads. The totals are `refused_runs`, `cut_off_runs` (truncated plus turn-limited), `served_model_mismatches`, `served_model_mixed`, and `effort_levels`. `notes` explains each non-zero total (a `mixed` run is scored, but no single model can be credited with it) and warns when a multi-model report ran every arm at `backend_default` effort. Counts include unscorable runs, because the block describes what the eval ran rather than what it scored; the fields are defined under [Effort and how answer runs ended](#effort-and-how-answer-runs-ended).

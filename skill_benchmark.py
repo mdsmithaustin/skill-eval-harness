@@ -1407,6 +1407,11 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
             or len(optional_variants) != len(set(optional_variants))
             or any(v != "old_skill" for v in optional_variants)):
         die("manifest.optional_variants may contain unique old_skill only")
+    if "old_skill_role" in manifest:
+        if manifest["old_skill_role"] not in OLD_SKILL_ROLES:
+            die(f"manifest.old_skill_role must be one of {list(OLD_SKILL_ROLES)}")
+        if not manifest.get("old_skill_paths"):
+            die("manifest.old_skill_role requires manifest.old_skill_paths")
     judge_cfg = manifest.get("judge")
     if judge_cfg is not None:
         if not isinstance(judge_cfg, dict):
@@ -14531,6 +14536,12 @@ def pairing_aware_block(block: dict[str, Any],
     return withhold_paired_headline(out, "incomplete_pairing", headline_fields=headline_fields)
 
 
+# What the old_skill arm holds. The pairing is the same either way; the role
+# says whether a negative delta is an edit that regressed or a curated skill
+# that loses to one the model wrote for itself.
+OLD_SKILL_ROLES = ("previous_revision", "self_generated")
+
+
 def paired_edit_summary(results: list[dict[str, Any]], *, min_lift: float | None = None,
                         max_harm: float | None = None) -> dict[str, Any] | None:
     """The current skill against the revision it replaces, paired within one run.
@@ -17030,7 +17041,10 @@ def build_benchmark_report(
         # so a rubric the skill could see never inflates the held-out number.
         "qualitative_by_visibility": qualitative_surface,
         "paired_summary": paired_summary,
-        **({"paired_edit_summary": edit_summary} if edit_summary is not None else {}),
+        **({"paired_edit_summary": {
+            **edit_summary,
+            "control_role": manifest.get("old_skill_role", OLD_SKILL_ROLES[0])}}
+           if edit_summary is not None else {}),
         # 5: pass@k / pass^k per (case, variant) from the repeated-run data, plus a
         # pooled per-variant reliability headline. Uses the unbiased estimator.
         "reliability": reliability,

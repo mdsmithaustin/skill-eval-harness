@@ -51,7 +51,7 @@ Trigger polarity is the load-time analogue, defined under **Trigger / no-trigger
 
 ## Comparison structure
 
-**Variant** — which arm of the comparison a run belongs to. The two defaults are `with_skill` and `without_skill`. Optional arms are `old_skill` (requires `old_skill_paths` and `--include-old-skill`) and `ablation:<id>`. The harness compares arms; a single arm in isolation says little.
+**Variant** — which arm of the comparison a run belongs to. The two defaults are `with_skill` and `without_skill`. Optional arms are `old_skill` (requires `old_skill_paths` and `--include-old-skill`) and `ablation:<id>`. `old_skill` holds the previous revision unless `old_skill_role` is `self_generated`, which marks it as a skill the model wrote for itself. The harness compares arms; a single arm in isolation says little.
 
 **Ablation** — an opt-in variant that simulates removing one component of a skill, declared under `manifest.ablations` and prepared with `--include-ablations`. Each entry names the `removed_component` and its `expected_regressions`. An ablation is a hypothesis about which instructions are load-bearing; it becomes evidence only once it is run on a discriminating case. It is an ablation study in the original sense (Newell; Meyes et al. 2019) applied to instruction components, and because each entry declares `expected_regressions` it doubles as a directional-expectation (DIR) test (Ribeiro et al. 2020): a perturbation with a predicted direction of change.
 

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from helpers import (
+    assert_dies,
     attest_answer_design,
     demo_manifest,
     result_row,
@@ -188,6 +189,46 @@ class EditContrastTests(unittest.TestCase):
         self.assertEqual([case["case_id"] for case in edit["regressed_cases"]], ["c0"])
         # Without the old arm selected, the report carries no edit block at all.
         self.assertNotIn("paired_edit_summary", plain)
+
+    def edit_report(self, **manifest_fields):
+        cases = [{"id": f"c{i}", "split": "tune", "kind": "behavior", "prompt": "Do it.",
+                  "assertions": [{"name": "has-alpha", "type": "contains", "value": "alpha"}]}
+                 for i in range(2)]
+        manifest = demo_manifest(cases=cases, old_skill_paths=["old/SKILL.md"],
+                                 optional_variants=["old_skill"], **manifest_fields)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = write_demo_manifest(root, manifest)
+            (root / "repo" / "old").mkdir()
+            (root / "repo" / "old" / "SKILL.md").write_text(
+                "---\nname: demo\ndescription: Old\n---\n", encoding="utf-8")
+            runs = root / "runs"
+            for case in ("c0", "c1"):
+                write_run(runs / case / "with_skill", "alpha")
+                write_run(runs / case / "old_skill", "none")
+                write_run(runs / case / "without_skill", "none")
+            arms = ["with_skill", "without_skill", "old_skill"]
+            attest_answer_design(path, runs, variants=arms)
+            return sb.build_benchmark_report(path, runs, variants_arg=arms)["paired_edit_summary"]
+
+    def test_the_control_arm_names_its_role(self):
+        self.assertEqual(self.edit_report()["control_role"], "previous_revision")
+        generated = self.edit_report(old_skill_role="self_generated")
+        self.assertEqual(generated["control_role"], "self_generated")
+        # The pairing and the numbers do not depend on the role.
+        self.assertEqual((generated["delta"], generated["contrast_id"]), (1.0, "skill_edit"))
+
+    def test_an_unknown_or_unbacked_role_is_rejected(self):
+        rows = [
+            ({"old_skill_paths": ["old/SKILL.md"], "old_skill_role": "rival"},
+             "manifest.old_skill_role must be one of ['previous_revision', 'self_generated']"),
+            ({"old_skill_role": "self_generated"},
+             "manifest.old_skill_role requires manifest.old_skill_paths"),
+        ]
+        for fields, message in rows:
+            with self.subTest(fields=fields), tempfile.TemporaryDirectory() as td:
+                path = write_demo_manifest(Path(td), demo_manifest(**fields))
+                assert_dies(self, lambda path=path: sb.validate_manifest(path), message)
 
     def test_ungraded_evidence_withholds_the_edit_as_it_withholds_the_lift(self):
         # Seven cases, each with a script oracle that does not run without
