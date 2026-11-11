@@ -692,6 +692,143 @@ def multiplicity(significance_by_name: Mapping[str, Mapping[str, Any]], *, famil
     }
 
 
+def lattice_sign_flip_p(steps: Sequence[int]) -> float:
+    """Exact two-sided sign-flip p-value for whole-number deltas.
+
+    The planner simulates thousands of evals whose per-case deltas are whole
+    runs out of the repetitions, so the sum of signed deltas lives on the
+    integers and one convolution counts every sign pattern. It is the same
+    p-value ``sign_flip_test`` reports on its exact path.
+    """
+    moved = [abs(step) for step in steps if step]
+    if not moved:
+        return 1.0
+    reach = sum(moved)
+    counts = [0] * (2 * reach + 1)
+    counts[reach] = 1
+    for size in moved:
+        shifted = [0] * (2 * reach + 1)
+        for index, count in enumerate(counts):
+            if count:
+                shifted[index - size] += count
+                shifted[index + size] += count
+        counts = shifted
+    observed = abs(sum(steps))
+    extreme = sum(count for index, count in enumerate(counts) if abs(index - reach) >= observed)
+    return extreme / (1 << len(moved))
+
+
+def variance_split(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]]) -> dict[str, Any]:
+    """Split the variance of per-case deltas into repetition noise and case spread.
+
+    Each entry is ``((runs, passes), (runs, passes))`` for the skill arm and
+    the baseline arm of one case. ``within_case_variance`` is the mean
+    binomial variance of a case's delta, which more repetitions shrink.
+    ``between_case_variance`` is what is left of the observed variance, which
+    only more cases average away. With one run per arm the within-case share
+    cannot be estimated and both parts are null.
+    """
+    deltas = [with_passes / with_runs - without_passes / without_runs
+              for (with_runs, with_passes), (without_runs, without_passes) in case_counts]
+    out: dict[str, Any] = {
+        "cases": len(deltas),
+        "observed_delta_variance": round(statistics.variance(deltas), _DECIMALS) if len(deltas) > 1 else None,
+        "within_case_variance": None,
+        "between_case_variance": None,
+        "within_case_share": None,
+    }
+    if len(deltas) < 2 or any(runs < 2 for arms in case_counts for runs, _ in arms):
+        return out
+    within = statistics.fmean(
+        sum((passes / runs) * (1 - passes / runs) / (runs - 1) for runs, passes in arms)
+        for arms in case_counts)
+    total = statistics.variance(deltas)
+    between = max(0.0, total - within)
+    out["within_case_variance"] = round(within, _DECIMALS)
+    out["between_case_variance"] = round(between, _DECIMALS)
+    if within + between > 0:
+        out["within_case_share"] = round(within / (within + between), _DECIMALS)
+    return out
+
+
+def _shifted_rates(with_rates: Sequence[float], without_rates: Sequence[float],
+                   min_lift: float) -> list[float] | None:
+    """The pilot's skill-arm rates moved by one shift so the mean lift is ``min_lift``.
+
+    Clipping at 0 and 1 keeps each case's rate a probability, and bisection on
+    the shift recovers the target mean. None when even a skill arm that always
+    passes cannot reach it: the baseline leaves too little headroom.
+    """
+    def lift(shift: float) -> float:
+        return statistics.fmean(min(1.0, max(0.0, rate + shift)) - base
+                                for rate, base in zip(with_rates, without_rates))
+    if lift(1.0) < min_lift:
+        return None
+    low, high = -1.0, 1.0
+    for _ in range(_SEARCH_STEPS):
+        middle = (low + high) / 2
+        if lift(middle) < min_lift:
+            low = middle
+        else:
+            high = middle
+    return [min(1.0, max(0.0, rate + high)) for rate in with_rates]
+
+
+def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *,
+               min_lift: float, cases_grid: Sequence[int], repetitions_grid: Sequence[int],
+               power: float = 0.8, trials: int = 400, seed: int = 0,
+               alpha: float = DEFAULT_ALPHA) -> dict[str, Any]:
+    """How many cases and repetitions would let the paired test show ``min_lift``?
+
+    The pilot supplies each case's two pass rates, smoothed by half a run so a
+    case seen once is not treated as certain. The skill-arm rates are shifted
+    until the mean lift equals ``min_lift``, which keeps the pilot's spread of
+    easy and hard cases. Each grid cell then simulates ``trials`` evals: draw
+    cases with replacement, draw each arm's passes, and run the exact
+    sign-flip test. ``power`` is the share that reach ``alpha`` with a positive
+    lift. The draws are seeded, so the plan is reproducible.
+    """
+    if not 0 < min_lift <= 1:
+        raise ValueError("min_lift must be a pass-rate difference in (0, 1]")
+    if not 0 < power < 1:
+        raise ValueError("power must lie strictly between 0 and 1")
+    if trials < 1 or any(value < 1 for value in (*cases_grid, *repetitions_grid)):
+        raise ValueError("trials, cases and repetitions must be positive")
+    target: dict[str, Any] = {"min_lift": min_lift, "alpha": alpha, "power": power}
+    base: dict[str, Any] = {"target": target, "pilot": variance_split(case_counts),
+                            "trials": trials, "seed": seed}
+    if not case_counts:
+        return {**base, "verdict": "no-pilot-pairs", "grid": [], "recommendation": None}
+    without = [(passes + 0.5) / (runs + 1) for _, (runs, passes) in case_counts]
+    shifted = _shifted_rates([(passes + 0.5) / (runs + 1) for (runs, passes), _ in case_counts],
+                             without, min_lift)
+    if shifted is None:
+        return {**base, "verdict": "min-lift-exceeds-headroom",
+                "headroom": round(1 - statistics.fmean(without), _DECIMALS),
+                "grid": [], "recommendation": None}
+    rng = random.Random(seed)
+    grid = []
+    for cases in sorted(set(cases_grid)):
+        for repetitions in sorted(set(repetitions_grid)):
+            wins = 0
+            for _ in range(trials):
+                steps = []
+                for index in rng.choices(range(len(without)), k=cases):
+                    gained = sum(rng.random() < shifted[index] for _ in range(repetitions))
+                    kept = sum(rng.random() < without[index] for _ in range(repetitions))
+                    steps.append(gained - kept)
+                if sum(steps) > 0 and lattice_sign_flip_p(steps) <= alpha:
+                    wins += 1
+            share = wins / trials
+            grid.append({"cases": cases, "repetitions": repetitions,
+                         "runs_per_arm": cases * repetitions, "power": round(share, 4),
+                         "power_standard_error": round(math.sqrt(share * (1 - share) / trials), 4)})
+    enough = [cell for cell in grid if cell["power"] >= power]
+    recommendation = min(enough, key=lambda cell: (cell["runs_per_arm"], cell["cases"]), default=None)
+    return {**base, "verdict": "plan-found" if recommendation else "grid-too-small",
+            "grid": grid, "recommendation": recommendation}
+
+
 def harm_check(interval: dict[str, Any], *, max_harm: float) -> dict[str, Any]:
     """Does the interval rule out a loss larger than ``max_harm``?
 

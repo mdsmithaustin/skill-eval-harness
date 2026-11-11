@@ -4,6 +4,10 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add `plan-eval`. It reads a pilot `benchmark.json`, splits per-case variance into
+  repetition noise and case spread, and simulates the paired test's power over a grid of
+  case and repetition counts. See [plan an eval](docs/commands.md#plan-an-eval-before-spending-on-it).
+
 - Add Holm-adjusted p-values for the test families a report prints together:
   `paired_summary.by_model_multiplicity` across models and `significance.multiplicity`
   across an ablation regression's cases. Existing significance fields and verdicts are

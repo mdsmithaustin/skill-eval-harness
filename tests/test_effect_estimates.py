@@ -21,6 +21,7 @@ from helpers import (
     attest_answer_design,
     demo_manifest,
     judge_with_stub,
+    make_eval_repo,
     result_row,
     run_cli,
     write_demo_manifest,
@@ -406,6 +407,126 @@ class HolmTests(unittest.TestCase):
         self.assertEqual((result["tests"], result["untested"]), (2, ["withheld"]))
         self.assertEqual(result["by_test"]["sampled"]["p_value"], 0.02)
         self.assertEqual(result["significant_after_adjustment"], ["exact", "sampled"])
+
+
+PILOT = [((3, 3), (3, 1)), ((3, 2), (3, 2)), ((3, 3), (3, 0)), ((3, 1), (3, 1)),
+         ((3, 2), (3, 0)), ((3, 3), (3, 3)), ((3, 0), (3, 1)), ((3, 2), (3, 1))]
+
+
+class PlanningTests(unittest.TestCase):
+    def test_lattice_p_value_is_the_exact_test_p_value(self):
+        rng = random.Random(7)
+        for _ in range(200):
+            repetitions = rng.choice([1, 2, 3, 5])
+            steps = [rng.randint(-repetitions, repetitions) for _ in range(rng.randint(1, 14))]
+            exact = ee.sign_flip_test([step / repetitions for step in steps])
+            with self.subTest(steps=steps):
+                self.assertAlmostEqual(ee.lattice_sign_flip_p(steps), exact["p_value"], places=12)
+        self.assertEqual(ee.lattice_sign_flip_p([]), 1.0)
+        self.assertEqual(ee.lattice_sign_flip_p([0, 0]), 1.0)
+        self.assertEqual(ee.lattice_sign_flip_p([1] * 6), 0.03125)
+
+    def test_variance_split_separates_repetition_noise_from_case_spread(self):
+        # Every case is a coin flip in both arms, so all the variance of the
+        # deltas is repetition noise: 2 * (0.5 * 0.5) / (2 - 1) per case.
+        noisy = ee.variance_split([((2, 1), (2, 1))] * 6)
+        self.assertEqual(noisy["within_case_variance"], 0.5)
+        self.assertEqual((noisy["between_case_variance"], noisy["within_case_share"]), (0.0, 1.0))
+        # Deterministic arms that disagree by case: no repetition noise at all.
+        spread = ee.variance_split([((3, 3), (3, 0)), ((3, 0), (3, 3))] * 3)
+        self.assertEqual((spread["within_case_variance"], spread["within_case_share"]), (0.0, 0.0))
+        self.assertGreater(spread["between_case_variance"], 1)
+
+    def test_one_run_per_arm_cannot_split_the_variance(self):
+        split = ee.variance_split([((1, 1), (1, 0)), ((1, 0), (1, 0)), ((1, 1), (1, 1))])
+        self.assertIsNotNone(split["observed_delta_variance"])
+        self.assertIsNone(split["within_case_variance"])
+        self.assertIsNone(split["within_case_share"])
+
+    def test_power_grows_with_cases_and_the_cheapest_sufficient_cell_is_recommended(self):
+        plan = ee.plan_power(PILOT, min_lift=0.15, cases_grid=[8, 32, 128],
+                             repetitions_grid=[3], trials=200)
+        powers = [cell["power"] for cell in plan["grid"]]
+        self.assertEqual(powers, sorted(powers))
+        self.assertLess(powers[0], 0.2)
+        self.assertGreater(powers[-1], 0.9)
+        self.assertEqual(plan["verdict"], "plan-found")
+        self.assertEqual(plan["recommendation"]["cases"], 128)
+        self.assertEqual(plan["recommendation"]["runs_per_arm"], 384)
+
+    def test_five_cases_can_never_reach_alpha_whatever_the_lift(self):
+        # 2 / 2**5 = 0.0625: no simulated eval of five cases is significant.
+        plan = ee.plan_power(PILOT, min_lift=0.5, cases_grid=[5], repetitions_grid=[5], trials=100)
+        self.assertEqual(plan["grid"][0]["power"], 0.0)
+        self.assertEqual((plan["verdict"], plan["recommendation"]), ("grid-too-small", None))
+
+    def test_a_lift_the_baseline_leaves_no_room_for_is_named(self):
+        ceiling = [((3, 3), (3, 3))] * 8
+        plan = ee.plan_power(ceiling, min_lift=0.5, cases_grid=[8], repetitions_grid=[3])
+        self.assertEqual(plan["verdict"], "min-lift-exceeds-headroom")
+        self.assertLess(plan["headroom"], 0.5)
+
+    def test_the_plan_is_reproducible_and_rejects_bad_targets(self):
+        options = {"min_lift": 0.15, "cases_grid": [16], "repetitions_grid": [3], "trials": 50}
+        self.assertEqual(ee.plan_power(PILOT, **options), ee.plan_power(PILOT, **options))
+        self.assertEqual(ee.plan_power([], **options)["verdict"], "no-pilot-pairs")
+        for bad in ({"min_lift": 0}, {"power": 1.0}, {"trials": 0}, {"cases_grid": [0]}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                ee.plan_power(PILOT, **{**options, **bad})
+
+
+class PlanEvalCommandTests(unittest.TestCase):
+    def pilot(self, root):
+        cases = [{"id": f"c{index}", "split": "tune", "prompt": "Do it.",
+                  "assertions": [{"name": "has-alpha", "type": "contains", "value": "alpha"}]}
+                 for index in range(6)]
+        manifest = make_eval_repo(root, cases=cases)
+        runs = root / "runs"
+        for index in range(6):
+            for run_number in (1, 2):
+                write_run(runs / f"c{index}" / "with_skill" / f"run-{run_number}",
+                          "alpha" if index < 4 or run_number == 1 else "beta")
+                write_run(runs / f"c{index}" / "without_skill" / f"run-{run_number}",
+                          "alpha" if index == 0 else "beta")
+        attest_answer_design(manifest, runs)
+        benchmark = root / "benchmark.json"
+        self.assertEqual(run_cli("benchmark", manifest, "--runs", runs, "--out", benchmark)[0], 0)
+        return benchmark
+
+    def test_plan_reads_a_pilot_benchmark_through_the_cli(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = root / "plan.json"
+            code, _, stderr = run_cli("plan-eval", "--benchmark", self.pilot(root), "--min-lift", "0.3",
+                                      "--cases", "6,24", "--repetitions", "2", "--trials", "100",
+                                      "--out", out)
+            self.assertEqual((code, stderr), (0, ""))
+            plan = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual((plan["pilot"]["cases"], plan["pilot"]["repetitions"], plan["unit"]), (6, 2, "case"))
+        self.assertEqual(plan["pilot"]["limiting_variance"], "within-case")
+        self.assertEqual([(cell["cases"], cell["repetitions"]) for cell in plan["grid"]], [(6, 2), (24, 2)])
+        self.assertLess(plan["grid"][0]["power"], plan["grid"][1]["power"])
+
+    def test_bad_grids_and_reports_are_usage_errors(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            benchmark = self.pilot(root)
+            empty = root / "empty.json"
+            empty.write_text("{}", encoding="utf-8")
+            for argv, message in (
+                    (("--benchmark", benchmark, "--min-lift", "0.3", "--cases", "6,x"),
+                     "--cases must be a comma-separated list of whole numbers"),
+                    (("--benchmark", benchmark, "--min-lift", "0.3", "--repetitions", "0"),
+                     "--repetitions must be a comma-separated list of positive whole numbers"),
+                    (("--benchmark", benchmark, "--min-lift", "0.3", "--power", "1"),
+                     "--power must lie strictly between 0 and 1"),
+                    (("--benchmark", benchmark, "--min-lift", "2"),
+                     "min-lift must be a pass-rate difference in (0, 1]"),
+                    (("--benchmark", empty, "--min-lift", "0.3"), "has no results rows")):
+                with self.subTest(message=message):
+                    code, _, stderr = run_cli("plan-eval", *argv)
+                    self.assertNotEqual(code, 0)
+                    self.assertIn(message, stderr)
 
 
 class HarmCheckTests(unittest.TestCase):

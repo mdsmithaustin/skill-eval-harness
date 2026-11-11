@@ -46,6 +46,7 @@ class CLICommand(str, Enum):
     MIGRATE_TELEMETRY = "migrate-telemetry"
     COST_SUMMARY = "cost-summary"
     TREND = "trend"
+    PLAN_EVAL = "plan-eval"
     SUGGEST_CASES = "suggest-cases"
     RENDER_VIEWER = "render-viewer"
     PROFILE_SKILL = "profile-skill"
@@ -67,7 +68,7 @@ _PATH_ARGUMENTS = frozenset({
 _PATH_SEQUENCES = frozenset({"manifests"})
 _POSITIVE_NUMBERS = frozenset({
     "timeout", "poll_interval", "concurrency", "runs_per_variant", "judge_runs",
-    "quorum", "ngram", "port", "leakage_min_chars", "assumed_tokens_per_run",
+    "quorum", "ngram", "port", "leakage_min_chars", "assumed_tokens_per_run", "trials",
 })
 _NONNEGATIVE_NUMBERS = frozenset({
     "magnitude_eps", "min_positive", "min_negative", "min_adversarial",

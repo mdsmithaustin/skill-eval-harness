@@ -392,9 +392,11 @@ from effect_estimates import (
     DiscriminationFailure,
     Estimate,
     InferenceUnit,
+    cases_needed_for_alpha,
     ceiling_or_floor,
     minimum_units_note,
     multiplicity,
+    plan_power,
     sign_flip_test,
 )
 from findings import (
@@ -18843,6 +18845,57 @@ def trend(args: argparse.Namespace) -> int:
     return 0
 
 
+def planning_case_counts(results: list[dict[str, Any]]) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """Per-(case, model) pass counts for both arms, pooled as paired_summary pools them."""
+    models = sorted({str(r.get("model")) for r in results if r.get("model")})
+    unlabeled = [r for r in results if not r.get("model")]
+    pools = [[r for r in results if str(r.get("model")) == model] for model in models]
+    if unlabeled or not models:
+        pools.append(unlabeled if models else results)
+    return [(with_counts, without_counts) for rows in pools
+            for _, with_counts, without_counts in paired_case_counts(rows)]
+
+
+def _planning_grid(raw: str | None, default: list[int], flag: str) -> list[int]:
+    if raw is None:
+        return default
+    try:
+        values = [int(part) for part in raw.split(",")]
+    except ValueError:
+        die(f"{flag} must be a comma-separated list of whole numbers")
+    if not values or any(value < 1 for value in values):
+        die(f"{flag} must be a comma-separated list of positive whole numbers")
+    return values
+
+
+def plan_eval(args: argparse.Namespace) -> int:
+    """Forward planning from a pilot run: which (cases, repetitions) would let
+    the paired test show --min-lift. Model-free; reads only benchmark.json."""
+    report = load_json(Path(args.benchmark))
+    results = report.get("results") if isinstance(report, dict) else None
+    if not isinstance(results, list):
+        die(f"{args.benchmark} has no results rows; pass a benchmark.json written by `benchmark`")
+    counts = planning_case_counts(results)
+    pilot_cases = len(counts)
+    pilot_repetitions = max((runs for (runs, _), _ in counts), default=1)
+    needed = cases_needed_for_alpha()
+    cases_grid = _planning_grid(
+        args.cases, sorted({max(needed, pilot_cases * factor) for factor in (1, 2, 4, 8)}), "--cases")
+    repetitions_grid = _planning_grid(
+        args.repetitions, sorted({1, 3, 5, pilot_repetitions}), "--repetitions")
+    if not 0 < args.power < 1:
+        die("--power must lie strictly between 0 and 1")
+    plan = plan_power(counts, min_lift=args.min_lift, cases_grid=cases_grid,
+                      repetitions_grid=repetitions_grid, power=args.power, trials=args.trials)
+    share = plan["pilot"]["within_case_share"]
+    plan["pilot"]["repetitions"] = pilot_repetitions
+    plan["pilot"]["limiting_variance"] = (
+        None if share is None else "within-case" if share >= 0.5 else "between-case")
+    plan["unit"] = InferenceUnit.CASE.value
+    emit_report(plan, args.out)
+    return 0
+
+
 def suggest_case_candidates(report: dict[str, Any], manifest: dict[str, Any]) -> list[dict[str, Any]]:
     """The deterministic half of the living-eval loop (roadmap 2.10): saturated
     and no-lift flags select the cases that stopped discriminating; each yields
@@ -21255,6 +21308,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--add", help="append this benchmark.json to the history before reporting")
     p.add_argument("--out")
 
+    p = sub.add_parser("plan-eval", help="plan an eval from a pilot benchmark.json: simulated power of the paired test over a grid of case and repetition counts (model-free)")
+    p.add_argument("--benchmark", required=True, help="benchmark.json from a pilot run with both arms")
+    p.add_argument("--min-lift", type=float, required=True, help="smallest pass-rate lift the eval must be able to show (e.g. 0.1)")
+    p.add_argument("--power", type=float, default=0.8, help="share of simulated evals that must reach significance (default 0.8)")
+    p.add_argument("--cases", help="comma-separated case counts to try (default: 1x, 2x, 4x and 8x the pilot's, at least 6)")
+    p.add_argument("--repetitions", help="comma-separated repetitions per arm to try (default: 1, 3, 5 and the pilot's)")
+    p.add_argument("--trials", type=int, default=400, help="simulated evals per grid cell (default 400)")
+    p.add_argument("--out")
+
     p = sub.add_parser("suggest-cases", help="living-eval loop: turn saturated/no-lift flags into harder-case candidates (generation opt-in via --generate-cmd; never edits a manifest)")
     p.add_argument("--benchmark", required=True, help="benchmark.json with case_flags")
     p.add_argument("--manifest", required=True)
@@ -21416,6 +21478,7 @@ def main() -> int:
         CLICommand.MIGRATE_TELEMETRY: migrate_telemetry_command,
         CLICommand.COST_SUMMARY: cost_summary_command,
         CLICommand.TREND: trend,
+        CLICommand.PLAN_EVAL: plan_eval,
         CLICommand.SUGGEST_CASES: suggest_cases,
         CLICommand.RENDER_VIEWER: render_viewer,
         CLICommand.PROFILE_SKILL: profile_skill,

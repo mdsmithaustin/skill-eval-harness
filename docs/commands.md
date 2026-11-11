@@ -468,6 +468,31 @@ Each is `{method: "holm", family, tests, alpha, by_test: {name: {p_value, adjust
 
 The per-model and per-case `significant_at_0_05` fields are unchanged, and so is the ablation rule that one significant case confirms a regression. Read `significant_after_adjustment` before acting on one model or one case out of several. The pooled `paired_summary.significance` is one test and needs no adjustment.
 
+### Plan an eval before spending on it
+
+`noise_check` says what limited an eval after it ran. `plan-eval` answers the earlier question: how many cases and repetitions would let the paired test show the lift you care about. It reads a pilot `benchmark.json` and calls no model.
+
+```bash
+skill-benchmark plan-eval --benchmark benchmark.json --min-lift 0.1 --out plan.json
+```
+
+`pilot` splits the variance of the per-case deltas. `within_case_variance` is repetition noise, the mean binomial variance of a case's delta, which more repetitions shrink. `between_case_variance` is the rest, which only more cases average away. `limiting_variance` names the larger part as `within-case` or `between-case`. All three are null when the pilot ran one repetition per arm, because one run cannot show repetition noise.
+
+`grid` holds one row per `(cases, repetitions)` pair: `runs_per_arm`, the simulated `power`, and its `power_standard_error`. Each row simulates `--trials` evals (default 400). A trial draws cases from the pilot with replacement, draws each arm's passes from the case's pass rates, and runs the exact sign-flip test. The skill arm's rates are the pilot's, shifted by one amount so the mean lift equals `--min-lift`. Pass rates are smoothed by half a run, so a case the pilot saw pass once is not treated as certain. `power` is the share of trials that reach p ≤ 0.05 with a positive lift. The draws are seeded, so the same inputs give the same plan.
+
+`recommendation` is the row with the fewest `runs_per_arm` whose power reaches `--power` (default 0.8). `verdict` is one of:
+
+| Verdict | Meaning |
+|---|---|
+| `plan-found` | A grid row reaches the target power. |
+| `grid-too-small` | No row does. Widen `--cases` or `--repetitions`. |
+| `min-lift-exceeds-headroom` | The baseline already passes too often for `--min-lift` to fit; `headroom` is the largest mean lift left. |
+| `no-pilot-pairs` | The report has no complete `with_skill` and `without_skill` pairs. |
+
+`--cases` and `--repetitions` take comma-separated lists. The defaults are 1, 2, 4 and 8 times the pilot's case count (never below 6, the fewest cases that can reach p ≤ 0.05) and 1, 3, 5 and the pilot's repetitions.
+
+The plan is an estimate from the pilot's cases. A pilot with few cases gives rough pass rates, and new cases may be easier or harder than the pilot's, so treat the recommendation as a starting size and rerun `plan-eval` on the larger run.
+
 ### Harm check
 
 A lift that is not significant is not evidence that the skill does no harm, because the interval can still reach far below zero. `benchmark --max-harm X` (0 < X ≤ 1) names the largest pass-rate loss you would accept. It adds `harm_check` beside `interval` on `paired_summary`, each `by_model` entry and `paired_edit_summary`. The block is `{verdict, max_harm, lower, upper, unit}` and reads the same interval:

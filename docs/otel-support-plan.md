@@ -89,7 +89,7 @@ a more specific unit.
 | Ingestion and artifact mutation | `import-jetty-results`, `import-trace`, `migrate-telemetry`, `compare-results` | new ingest/migration root; validate then atomic commit, linked to producer/export context | 3, 5 |
 | Autonomous activation | `skill-trigger-matrix`, `skill-pi-trigger-eval`, `trigger-compare` | one root per query repetition; bounded comparison root over completed observations | 3, 5 |
 | Deterministic evaluation and judges | `grade`, `judge`, `judge-robustness`, `compare-judges`, `judge-alignment` | one grade root per discovered run; bounded opt-in script/embed operations; judge task, invocation, result-ingest, and analysis operations | 4, 5 |
-| Aggregation and analysis | `benchmark`, `aggregate`, `cost-summary`, `token-overhead`, `contamination`, `error-analysis`, `trend` | bounded aggregate/analysis roots linked to inputs; shared grade roots where those commands re-grade | 5 |
+| Aggregation and analysis | `benchmark`, `aggregate`, `cost-summary`, `token-overhead`, `contamination`, `error-analysis`, `trend`, `plan-eval` | bounded aggregate/analysis roots linked to inputs; shared grade roots where those commands re-grade | 5 |
 | Publication and generated follow-up | `report`, `render-viewer`, `export-anthropic`, `suggest-cases` | publish/render commit; separate model invocation only when `--generate-cmd` is used | 5 |
 <!-- otel-command-inventory:end -->
 

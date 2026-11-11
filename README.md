@@ -590,6 +590,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-benchmark suite-run` | Allowlisted multi-skill preflight/tier with cost ceilings; writes `RUN_SCOPE.json`. |
 | `skill-benchmark aggregate` | Cross-skill report over many manifests. |
 | `skill-benchmark trend` | Append-only history: series, diffs, prevalence×severity failure ranking, prune candidates. |
+| `skill-benchmark plan-eval` | Plan an eval from a pilot `benchmark.json`: split per-case variance into repetition noise and case spread, then simulate the paired test's power over a grid of case and repetition counts (model-free). |
 | `skill-benchmark suggest-cases` | Turn saturated/no-lift flags into harder-case seeds, never from a floor case (generation opt-in, never edits a manifest). |
 | `skill-benchmark migrate` | Upgrade a v1 manifest to v2: stamp severity/oracle tiers, print the judgment-call checklist. |
 
