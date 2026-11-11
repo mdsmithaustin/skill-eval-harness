@@ -216,8 +216,12 @@ decoys unlisted, because a decoy that loads on an unrelated request is not this
 skill's failure. `distractor-catalogs.json` records the seed and which decoys
 each size holds. The command refuses a trigger case that already declares a
 scope, a case whose prompt is a private `prompt_ref`, and an `--out-dir` that
-already holds one of the requested catalogs. It checks all of that before it
-writes anything.
+already holds one of the requested catalogs. It also refuses an `--out-dir`
+inside or around a skill or the decoy directory. It checks all of that before
+it writes anything. A skill directory with a symlink that points outside
+itself is refused too, and the catalogs written so far are removed. A catalog
+case carries only `id`, `split`, `kind`, `should_trigger`, `prompt` and its
+scope, so it never refers to a fixture the catalog does not hold.
 
 Three limits apply. A catalog copies the prompt of every trigger case it
 scopes, so pass `--split tune` to keep held-out prompts out of the output
@@ -248,11 +252,14 @@ For each (agent, model) the report lists, per library size:
   where a skill under test loaded.
 - `distractor_activations`: how many should-trigger runs each decoy loaded on.
   The decoy with the highest count is the one to write the description against.
-- `incomplete`: runs with no verdict, which no rate counts.
+- `incomplete`: runs with no verdict, or marked `observation_complete: false`,
+  which no rate counts.
 
 `degradation_boundary` gives, for `expected_load_rate` and for `pass_rate`, the
 smallest library size from which the rate stays at least `--drop` (default 0.1)
-below the smallest library's rate. It is `null` when the rate never stays down.
+below the smallest library's rate. It is `null` when the rate never stays down,
+and when the cell has no rows at one of the sizes, which `missing_library_sizes`
+lists.
 A gap between the two rates means the skill still loads but a decoy loads with
 it.
 

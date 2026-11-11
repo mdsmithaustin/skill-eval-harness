@@ -2526,6 +2526,15 @@ class JudgeAlignmentTests(unittest.TestCase):
         self.assertEqual(rate["corrected_pass_rate"], 0.6154)
         self.assertEqual((rate["interval"]["lower"], rate["interval"]["upper"]), (0.4617, 0.7691))
 
+    def test_a_lift_past_the_possible_range_keeps_an_ordered_interval(self):
+        # Every judged with_skill run passes and no without_skill run does: the
+        # raw correction is 1 / 0.65, which no pass-rate difference can be.
+        lift = sb.judge_corrected_lift((300, 300), (0, 300),
+                                       confusion={"tp": 34, "fn": 6, "tn": 32, "fp": 8})
+        self.assertEqual(lift["corrected_delta"], 1.0)
+        self.assertLess(lift["interval"]["lower"], 1.0)
+        self.assertEqual(lift["interval"]["upper"], 1.0)
+
     def test_bias_correction_leaves_incomplete_verdicts_out_and_says_so(self):
         human, judge = self._labelled_population()
         judge["extra::with_skill::run-1::quality"] = {"passed": True, "returncode": 1}

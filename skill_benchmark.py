@@ -15186,14 +15186,23 @@ def build_ablation_regression_report(manifest: dict[str, Any], results: list[dic
                 per_case_sig[label] = Estimate.from_deltas(
                     paired_combined_deltas(matched),
                     unit=InferenceUnit.REPLICATE_PAIR).blocks()["significance"]
+            # The family is every measured cohort the regression cites, not
+            # only the ones that regressed: each had the chance to.
+            family_sig = {
+                (cid if cohort_model is None else f"{cid}@{cohort_model}"): (
+                    per_case_sig.get(cid if cohort_model is None else f"{cid}@{cohort_model}")
+                    or Estimate.from_deltas(
+                        paired_combined_deltas(matched),
+                        unit=InferenceUnit.REPLICATE_PAIR).blocks()["significance"])
+                for (cid, cohort_model), matched in pairs_by_case_model.items() if cid in cases}
             significance = {
                 "method": "per-case-model-paired-sign-flip",
                 "unit": InferenceUnit.REPLICATE_PAIR.value,
                 "significant_at_0_05": any(s.get("significant_at_0_05") for s in per_case_sig.values()),
                 "min_p_value": min((s["p_value"] for s in per_case_sig.values() if s.get("p_value") is not None), default=None),
                 "by_case": per_case_sig,
-                **({"multiplicity": multiplicity(per_case_sig, family="by_case")}
-                   if len(per_case_sig) > 1 else {}),
+                **({"multiplicity": multiplicity(family_sig, family="by_case")}
+                   if len(family_sig) > 1 else {}),
             } if confirmed_cohorts else None
             relevant_blocked_pairs = [
                 blocked.to_dict() for blocked in ablation_pairing.blocked
@@ -18934,6 +18943,11 @@ def _whole_number_list(raw: str, flag: str, *, minimum: int = 0) -> list[int]:
     return sorted(values)
 
 
+# What skill-trigger-matrix reads from a trigger case. A catalog carries no
+# answer-eval field, so it never references a fixture it did not copy.
+TRIGGER_ROUTING_FIELDS = ("id", "split", "kind", "should_trigger", "prompt")
+
+
 def build_distractor_catalogs(manifest_path: Path, distractors_dir: Path, sizes: list[int],
                               out_dir: Path, *, seed: int = 0, split: str | None = None) -> dict[str, Any]:
     """Write one self-contained catalog per library size for skill-trigger-matrix.
@@ -18956,6 +18970,11 @@ def build_distractor_catalogs(manifest_path: Path, distractors_dir: Path, sizes:
         die("a skill root is the repository root; move the skill into its own directory to build a catalog")
     if not distractors_dir.is_dir():
         die(f"--distractors is not a directory: {distractors_dir}")
+    out_real = out_dir.resolve()
+    for source in (*roots, distractors_dir):
+        source_real = source.resolve()
+        if out_real == source_real or source_real in out_real.parents or out_real in source_real.parents:
+            die(f"--out-dir {out_dir} overlaps {source}; choose a directory outside the skills and the decoys")
     decoys = sorted(child.name for child in distractors_dir.iterdir()
                     if (child / "SKILL.md").is_file())
     clashes = sorted(set(decoys) & set(keys))
@@ -18981,10 +19000,15 @@ def build_distractor_catalogs(manifest_path: Path, distractors_dir: Path, sizes:
     for size in sizes:
         dest = out_dir / f"library-{size}"
         chosen = sorted(order[:size])
-        for root, key in zip(roots, keys, strict=True):
-            shutil.copytree(root, dest / "skills" / key)
-        for name in chosen:
-            shutil.copytree(distractors_dir / name, dest / "skills" / name)
+        try:
+            for root, key in zip(roots, keys, strict=True):
+                _copy_skill_root(root, dest / "skills" / key)
+            for name in chosen:
+                _copy_skill_root(distractors_dir / name, dest / "skills" / name)
+        except AblationError as exc:
+            for written in sizes:
+                shutil.rmtree(out_dir / f"library-{written}", ignore_errors=True)
+            die(str(exc))
         decoy_ids = [f"skills/{name}/SKILL.md" for name in chosen]
         scoped = []
         for case in cases:
@@ -18993,7 +19017,8 @@ def build_distractor_catalogs(manifest_path: Path, distractors_dir: Path, sizes:
                          **({"forbidden_skills": decoy_ids} if decoy_ids else {})}
             else:
                 scope = {"forbidden_skills": target_ids}
-            scoped.append({**case, **scope})
+            scoped.append({**{field: case[field] for field in TRIGGER_ROUTING_FIELDS if field in case},
+                           **scope})
         catalog = {key: manifest[key] for key in ("version", "skill_name", "variants") if key in manifest}
         catalog.update({"skill_paths": target_ids + decoy_ids, "cases": scoped, "ablations": []})
         write_json(dest / "catalog.json", catalog)
@@ -19034,7 +19059,7 @@ def distractor_report(reports_by_size: dict[int, dict[str, Any]], *, drop: float
                 "should_trigger": {"runs": 0, "expected_loaded": 0, "passed": 0},
                 "should_not_trigger": {"runs": 0, "fired": 0},
                 "distractor_activations": collections.Counter()})
-            if type(row.get("pass")) is not bool:
+            if type(row.get("pass")) is not bool or row.get("observation_complete") is False:
                 entry["incomplete"] += 1
                 continue
             if row.get("should_trigger"):
@@ -19070,16 +19095,18 @@ def distractor_report(reports_by_size: dict[int, dict[str, Any]], *, drop: float
                                        "fire_rate": rate(negative["fired"], negative["runs"])},
                 "distractor_activations": dict(sorted(entry["distractor_activations"].items())),
             })
+        missing = sorted(set(reports_by_size) - set(by_size))
         boundaries: dict[str, int | None] = {}
         for metric, points in rates.items():
             first = points[0][1]
             boundaries[metric] = next(
                 (points[index][0] for index in range(1, len(points))
-                 if first is not None
+                 if not missing and first is not None
                  and all(value is not None and first - value >= drop - 1e-9
                          for _, value in points[index:])),
                 None)
         out_cells.append({"agent": agent, "model": model, "by_library_size": series,
+                          "missing_library_sizes": missing,
                           "degradation_boundary": boundaries})
     return {"drop": drop, "library_sizes": sorted(reports_by_size), "cells": out_cells}
 

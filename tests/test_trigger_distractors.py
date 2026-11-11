@@ -78,6 +78,48 @@ class CatalogTests(unittest.TestCase):
         self.assertNotIn("forbidden_skills", catalogs[0]["cases"][0])
         self.assertEqual(len(catalogs[3]["skill_paths"]), 4)
 
+    def test_a_catalog_case_carries_only_what_the_matrix_reads(self):
+        cases = [{**CASES[0], "files": ["fixtures/input.txt"], "tags": ["x"],
+                  "expected_behavior": ["loads"]}, CASES[1]]
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "repo" / "evals" / "fixtures").mkdir(parents=True)
+            (Path(td) / "repo" / "evals" / "fixtures" / "input.txt").write_text("x", encoding="utf-8")
+            code, stderr, out = self.build(Path(td), 1, cases=cases)
+            self.assertEqual((code, stderr), (0, ""))
+            catalog = json.loads((out / "library-1" / "catalog.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(catalog["cases"][0]),
+                         ["expected_skills", "forbidden_skills", "id", "kind", "prompt",
+                          "should_trigger", "split"])
+
+    def test_an_output_directory_inside_a_source_is_refused_before_any_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = make_eval_repo(root, skill_name="reviewer", skill_text=TARGET, cases=CASES)
+            decoys = write_decoys(root)
+            for out in (root / "repo" / "skills" / "reviewer" / "catalogs", decoys / "catalogs",
+                        root / "repo" / "skills"):
+                with self.subTest(out=out.name):
+                    code, _, stderr = run_cli("trigger-distractors", manifest, "--distractors", decoys,
+                                              "--sizes", "0,1", "--out-dir", out)
+                    self.assertNotEqual(code, 0)
+                    self.assertIn("overlaps", stderr)
+                    self.assertFalse((out / "library-0").exists())
+
+    def test_a_symlink_out_of_a_skill_is_refused_and_nothing_is_left(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = make_eval_repo(root, skill_name="reviewer", skill_text=TARGET, cases=CASES)
+            decoys = write_decoys(root, ("poems",))
+            secret = root / "secret.txt"
+            secret.write_text("private", encoding="utf-8")
+            (decoys / "poems" / "notes.txt").symlink_to(secret)
+            out = root / "catalogs"
+            code, _, stderr = run_cli("trigger-distractors", manifest, "--distractors", decoys,
+                                      "--sizes", "0,1", "--out-dir", out)
+            self.assertNotEqual(code, 0)
+            self.assertIn("symlink escaping the root", stderr)
+            self.assertEqual(list(out.glob("library-*")), [])
+
     def test_the_decoy_order_is_seeded(self):
         with tempfile.TemporaryDirectory() as td:
             manifest = make_eval_repo(Path(td), skill_name="reviewer", skill_text=TARGET, cases=CASES)
@@ -156,6 +198,28 @@ class LibraryReportTests(unittest.TestCase):
             with self.subTest(first=first):
                 cell = sb.distractor_report({0: at(first), 5: at(later)})["cells"][0]
                 self.assertEqual(cell["degradation_boundary"]["expected_load_rate"], 5)
+
+    def test_a_historical_incomplete_row_marked_failed_is_not_a_verdict(self):
+        stale = {**row(True, False, missing=["skills/reviewer/SKILL.md"]), "observation_complete": False}
+        cell = sb.distractor_report({0: {"results": [row(True, True), stale]},
+                                     5: {"results": [row(True, True)]}})["cells"][0]
+        first = cell["by_library_size"][0]
+        self.assertEqual((first["incomplete"], first["should_trigger"]["runs"]), (1, 1))
+        self.assertEqual(first["should_trigger"]["expected_load_rate"], 1.0)
+
+    def test_a_cell_missing_at_one_size_gets_no_boundary(self):
+        def at(passed, agent="stub"):
+            return [{**row(True, True), "agent": agent}] * passed + [
+                {**row(True, False, missing=["skills/reviewer/SKILL.md"]), "agent": agent}] * (4 - passed)
+        report = sb.distractor_report({0: {"results": at(4) + at(4, "other")},
+                                       5: {"results": at(2) + at(2, "other")},
+                                       20: {"results": at(2)}})
+        cells = {cell["agent"]: cell for cell in report["cells"]}
+        self.assertEqual(cells["stub"]["degradation_boundary"]["expected_load_rate"], 5)
+        self.assertEqual(cells["stub"]["missing_library_sizes"], [])
+        self.assertEqual(cells["other"]["missing_library_sizes"], [20])
+        self.assertEqual(cells["other"]["degradation_boundary"],
+                         {"expected_load_rate": None, "pass_rate": None})
 
     def test_a_dip_that_recovers_is_not_a_boundary(self):
         def at(passed, total=4):

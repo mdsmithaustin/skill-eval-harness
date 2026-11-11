@@ -955,12 +955,12 @@ def judge_corrected_lift(treatment: tuple[int, int], control: tuple[int, int], *
         return {**out, "corrected_delta": None, "interval": None, "reason": rates}
     sensitivity, specificity, human_pass, human_fail = rates
     youden = sensitivity + specificity - 1
-    lift = (with_rate - without_rate) / youden
+    lift = max(-1.0, min(1.0, (with_rate - without_rate) / youden))
     variance = ((with_rate * (1 - with_rate) / treatment[1]
                  + without_rate * (1 - without_rate) / control[1])
                 + lift ** 2 * (sensitivity * (1 - sensitivity) / human_pass
                                + specificity * (1 - specificity) / human_fail)) / youden ** 2
-    return {**out, "corrected_delta": round(max(-1.0, min(1.0, lift)), 4),
+    return {**out, "corrected_delta": round(lift, 4),
             "interval": _normal_interval(lift, variance, confidence, -1.0, 1.0)}
 
 
