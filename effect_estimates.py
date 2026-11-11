@@ -762,7 +762,7 @@ def _shifted_rates(with_rates: Sequence[float], without_rates: Sequence[float],
     def lift(shift: float) -> float:
         return statistics.fmean(min(1.0, max(0.0, rate + shift)) - base
                                 for rate, base in zip(with_rates, without_rates))
-    if lift(1.0) < min_lift:
+    if lift(1.0) < min_lift - _TOLERANCE:
         return None
     low, high = -1.0, 1.0
     for _ in range(_SEARCH_STEPS):
@@ -852,10 +852,11 @@ def plan_power(case_counts: Sequence[tuple[tuple[int, int], tuple[int, int]]], *
     without = _smoothed_rates(control)
     # Headroom is a fact about the pilot's baseline, so it reads the raw rates:
     # smoothing would invent room above a baseline that already passes.
-    headroom = 1 - statistics.fmean(passes / runs for runs, passes in control)
+    # Compared as reported, so a target copied from the reported headroom fits.
+    headroom = round(1 - statistics.fmean(passes / runs for runs, passes in control), _DECIMALS)
     if min_lift > headroom + _TOLERANCE:
         return {**base, "verdict": "min-lift-exceeds-headroom",
-                "headroom": round(headroom, _DECIMALS),
+                "headroom": headroom,
                 "grid": [], "recommendation": None}
     # Smoothing lifts a low baseline, which can leave the smoothed rates less
     # room than the pilot showed. The skill arm then always passes: the

@@ -526,6 +526,14 @@ class PlanningTests(unittest.TestCase):
                 edge = ee.plan_power(pilot, min_lift=lift, cases_grid=[8], repetitions_grid=[3], trials=5)
                 self.assertNotEqual(edge["verdict"], "min-lift-exceeds-headroom")
                 self.assertEqual(len(edge["grid"]), 1)
+                self.assertIsNotNone(edge["grid"][0]["power_shrunk"])
+        # A refused target names a headroom that is itself accepted.
+        thirds_pilot = [((3, 3), (3, 1))] * 6
+        refused = ee.plan_power(thirds_pilot, min_lift=0.7, cases_grid=[8], repetitions_grid=[3], trials=5)
+        self.assertEqual((refused["verdict"], refused["headroom"]), ("min-lift-exceeds-headroom", 0.666667))
+        retyped = ee.plan_power(thirds_pilot, min_lift=refused["headroom"], cases_grid=[8],
+                                repetitions_grid=[3], trials=5)
+        self.assertEqual(len(retyped["grid"]), 1)
         # A baseline that never passes leaves all the room there is, though
         # smoothing would raise it to one eighth.
         floor = ee.plan_power([((3, 3), (3, 0))] * 8, min_lift=0.9, cases_grid=[8],
