@@ -4,6 +4,11 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Extend the `audit-manifest` known-answer check with two more answers that show no
+  capability: the skill's own text pasted back and a one-line refusal. A case that passes
+  every gate check on either gets a recommended `degenerate-answer-passes` finding. See
+  [audit-manifest](docs/commands.md#audit-manifest-quality).
+
 - Add `bias_correction` to `judge-alignment`. It estimates the judge's sensitivity and
   specificity from the human labels and corrects judged pass rates, per variant, and the
   judged lift for them. See [correct a judged pass rate](docs/can-i-trust-my-judge.md#correct-a-judged-pass-rate-for-judge-error).

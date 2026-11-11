@@ -20026,8 +20026,11 @@ def reference_answer_text(case: dict[str, Any], manifest_dir: Path) -> str | Non
     return None
 
 
+REFUSAL_ANSWER = "I can't help with that request."
+
+
 def known_answer_check(manifest: dict[str, Any], manifest_path: Path, *,
-                       split: str | None = None) -> dict[str, Any]:
+                       split: str | None = None, skill_text: str | None = None) -> dict[str, Any]:
     """Grade known answers through each case's own deterministic checks (mark 2).
 
     A declared reference answer must pass every gate text check. The null
@@ -20036,11 +20039,19 @@ def known_answer_check(manifest: dict[str, Any], manifest_path: Path, *,
     answer. Only text checks that need nothing but the answer string run here;
     a case with other gate checks is not null-checked, because those checks
     fail an echo for reasons unrelated to the grader. Model-free.
+
+    Two more answers that show no capability run on the same cases: the skill's
+    own text pasted back, and a one-line refusal. A case the echo already
+    passes is not listed again. A case whose polarity is negative is skipped,
+    because declining is the right answer there.
     """
     output_path = manifest_path.parent / "known-answer-check.md"
     reference_failures: list[dict[str, Any]] = []
     null_passes: list[Any] = []
-    references_checked = nulls_checked = 0
+    degenerate_passes: list[dict[str, Any]] = []
+    references_checked = nulls_checked = degenerate_checked = 0
+    degenerate_answers = [(name, text) for name, text in
+                          (("skill-text", skill_text), ("refusal", REFUSAL_ANSWER)) if text]
     for case in iter_cases(manifest, split):
         if CaseKind.parse(case.get("kind", "behavior")).population is CasePopulation.TRIGGER:
             continue
@@ -20063,7 +20074,16 @@ def known_answer_check(manifest: dict[str, Any], manifest_path: Path, *,
         nulls_checked += 1
         if all(assertion_result(a, prompt, output_path)["passed"] is True for a in checkable):
             null_passes.append(case.get("id"))
+            continue
+        if case_polarity(case) == "negative":
+            continue
+        degenerate_checked += 1
+        degenerate_passes.extend(
+            {"case_id": case.get("id"), "answer": name} for name, text in degenerate_answers
+            if all(assertion_result(a, text, output_path)["passed"] is True for a in checkable))
     return {
+        "degenerate_answers_checked": degenerate_checked,
+        "degenerate_answer_passes": degenerate_passes,
         "references_checked": references_checked,
         "reference_failures": reference_failures,
         "null_answers_checked": nulls_checked,
@@ -20451,7 +20471,7 @@ def audit_manifest_report(
                 "every case is synthesized; add cases drawn from real requests or bug reports.")
 
     # Mark 2: the grader on known answers.
-    known = known_answer_check(manifest, manifest_path, split=split)
+    known = known_answer_check(manifest, manifest_path, split=split, skill_text=skill_text)
     if known["reference_failures"]:
         finding(FindingKind.REFERENCE_ANSWER_FAILS,
                 f"{len(known['reference_failures'])} case(s) fail their own reference answer; "
@@ -20462,6 +20482,11 @@ def audit_manifest_report(
         finding(FindingKind.NULL_ANSWER_PASSES,
                 f"{len(null_passes)} case(s) pass every gate check when the answer only echoes the "
                 "prompt; the checks cannot tell an answer from no answer.", null_passes)
+    if known["degenerate_answer_passes"]:
+        finding(FindingKind.DEGENERATE_ANSWER_PASSES,
+                f"{len(known['degenerate_answer_passes'])} case and answer pair(s) pass every gate "
+                "check with an answer that shows no capability: the skill's own text pasted back, "
+                "or a one-line refusal.", known["degenerate_answer_passes"])
 
     # Marks 3-5 on runs: only a complete benchmark can support them.
     bench_complete = bool(bench_report) and bench_report.get("availability") == "complete"
