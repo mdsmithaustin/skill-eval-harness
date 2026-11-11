@@ -122,7 +122,7 @@ Each paired lift also carries an `interval` (the sign-flip test inverted into a 
 
 ### From GitHub
 
-The fork publishes no PyPI package. Install a commit or branch from its git URL.
+The fork publishes no PyPI package. Install a release tag, a commit or a branch from its git URL. Release tags are named `ext-v<version>`, so they cannot collide with upstream's `v<version>` tags.
 
 If `uv tool list` already shows `skill-eval-harness`, remove it first. That covers the upstream PyPI package, an install from this fork before the rename, and an editable install. Both distributions provide the same scripts, so `uv tool install` exits 2 with `Executables already exist` while the old tool is present. Do not use `--force`: it leaves both tools registered, and a later `uv tool uninstall skill-eval-harness` deletes the new tool's executables.
 
@@ -131,6 +131,9 @@ uv tool uninstall skill-eval-harness   # skip when it is not installed
 uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@main
 skill-benchmark --help
 skill-pi-trigger-eval --help
+
+# Pin a release:
+uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@ext-v0.7.0
 
 # Pin a commit exactly:
 uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@<commit-sha>
@@ -195,7 +198,7 @@ Each skill repo owns a `shared-benchmark.json` manifest in one of two places. Th
   "harness": {
     "name": "skill-eval-harness-ext",
     "url": "https://github.com/mdsmithaustin/skill-eval-harness",
-    "version": ">=0.6.0"
+    "version": ">=0.7.0"
   },
   "skill_paths": ["skills/good-pr/SKILL.md"],
   "variants": ["with_skill", "without_skill"],

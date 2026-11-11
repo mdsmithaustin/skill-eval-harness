@@ -4,6 +4,10 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+## v0.7.0 — 2026-11-11
+
+The first release cut from this fork, tagged `ext-v0.7.0`. Follow [0.6.0 → 0.7.0](docs/upgrading.md#060--070) before you upgrade.
+
 - Add `trigger-distractors` and `trigger-distractor-report`. The first builds one catalog
   per library size, the manifest's skills plus N decoy skills, for `skill-trigger-matrix`
   to run unchanged. The second reads one matrix report per size and reports the load rate,
