@@ -1478,7 +1478,7 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
                 die(f"{cid}: trigger cases require an explicit boolean should_trigger; "
                     f"add \"should_trigger\": {suggested} (the polarity harness <= 0.6.0 "
                     "inferred from this case's expected_behavior/assertion text). "
-                    "See CHANGELOG.md 'Unreleased' and docs/upgrading.md")
+                    "See CHANGELOG.md 'v0.7.0' and docs/upgrading.md")
         elif "should_trigger" in case:
             die(f"{cid}: should_trigger is only valid when kind is 'trigger'")
         eval_intent = case.get("eval_intent")
@@ -1629,7 +1629,7 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
                     die(
                         f"{cid}: answer variant {variant!r} needs at least one "
                         f"applicable gate or critical grading oracle{hint}. "
-                        "See CHANGELOG.md 'Unreleased' and docs/upgrading.md")
+                        "See CHANGELOG.md 'v0.7.0' and docs/upgrading.md")
         validate_judge_assertion_ids(cid, assertions, turns or [])
 
     seen_ablation_ids: set[str] = set()

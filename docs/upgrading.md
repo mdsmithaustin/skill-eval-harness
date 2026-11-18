@@ -2,14 +2,14 @@
 
 Each section covers one released-version boundary. Follow every section after your installed version; do not skip an intermediate artifact migration.
 
-## 0.6.0 → unreleased (`main`)
+## 0.6.0 → 0.7.0
 
-These changes merged after the 0.6.0 tag. This section becomes the next release's boundary when it
-is tagged; 0.6.0 users follow it before installing from `main`. Manifests need the two edits
+0.7.0 is the first release prepared by this fork. These changes merged after
+the 0.6.0 tag; 0.6.0 users follow this section before installing 0.7.0. Manifests need the two edits
 under [Manifest migration](#manifest-migration); no telemetry migration is needed and saved runs
 stay readable. What changes is which runs count, which pairs form, how a
 few report and audit fields read, which saved trigger reports a comparison accepts, and which
-internal Python names still exist. The changelog's [Unreleased](../CHANGELOG.md#unreleased)
+internal Python names still exist. The changelog's [v0.7.0](../CHANGELOG.md#v070--2026-11-11)
 section lists every change.
 
 ### Distribution rename
@@ -29,6 +29,8 @@ uv tool uninstall skill-eval-harness
 uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@main
 ```
 
+To pin 0.7.0 once its release tag is published, replace `@main` with `@ext-v0.7.0`.
+
 Without the uninstall, `uv tool install` exits 2 with `Executables already exist`, and
 `uv tool upgrade` cannot move a tool across a name change. Do not add `--force`. It leaves both
 tools registered, and a later `uv tool uninstall skill-eval-harness` then deletes the executables
@@ -38,7 +40,7 @@ In a pip virtualenv that holds the pre-rename package, run `pip uninstall -y ski
 
 ### Manifest migration
 
-Two manifest rules on `main` reject manifests that 0.6.0 accepts. Both edits below are
+Two manifest rules in 0.7.0 reject manifests that 0.6.0 accepts. Both edits below are
 also valid on 0.6.0, so make them first, check them against your pinned 0.6.0, and only
 then upgrade.
 
