@@ -132,8 +132,8 @@ uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@main
 skill-benchmark --help
 skill-pi-trigger-eval --help
 
-# Pin a release:
-uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@ext-v0.7.0
+# Pin a published release. Replace <release-tag> with its tag.
+uv tool install "git+https://github.com/mdsmithaustin/skill-eval-harness.git@<release-tag>"
 
 # Pin a commit exactly:
 uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@<commit-sha>

@@ -4,7 +4,7 @@ Each section covers one released-version boundary. Follow every section after yo
 
 ## 0.6.0 → 0.7.0
 
-0.7.0 is the first release cut from this fork, tagged `ext-v0.7.0`. These changes merged after
+0.7.0 is the first release prepared by this fork. These changes merged after
 the 0.6.0 tag; 0.6.0 users follow this section before installing 0.7.0. Manifests need the two edits
 under [Manifest migration](#manifest-migration); no telemetry migration is needed and saved runs
 stay readable. What changes is which runs count, which pairs form, how a
@@ -26,8 +26,10 @@ editable install from a checkout. Remove it first, then install the renamed dist
 
 ```bash
 uv tool uninstall skill-eval-harness
-uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@ext-v0.7.0
+uv tool install git+https://github.com/mdsmithaustin/skill-eval-harness.git@main
 ```
+
+To pin 0.7.0 once its release tag is published, replace `@main` with `@ext-v0.7.0`.
 
 Without the uninstall, `uv tool install` exits 2 with `Executables already exist`, and
 `uv tool upgrade` cannot move a tool across a name change. Do not add `--force`. It leaves both
