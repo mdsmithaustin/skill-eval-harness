@@ -8,7 +8,7 @@ import shutil
 import sys
 import tempfile
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass as _dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -753,18 +753,37 @@ def _reject_overlapping_skill_roots(repo_root: Path, manifest: dict[str, Any]) -
     skill_root_keys_for(repo_root, manifest.get("skill_paths", []))
 
 
+def _excluded_skill_name(name: str) -> bool:
+    return name in _COPY_EXCLUDE or name.startswith(".")
+
+
+def path_copied_with_skill(path: Path, repo_root: Path, skill_paths: Iterable[str]) -> bool:
+    candidate = path.resolve()
+    for value in skill_paths:
+        source = (repo_root / value).resolve()
+        root = source if source.is_dir() else source.parent
+        if candidate.is_relative_to(root):
+            relative = candidate.relative_to(root)
+            if not any(_excluded_skill_name(part) for part in relative.parts):
+                return True
+    return False
+
+
 def _copy_skill_root(src_dir: Path, dst_dir: Path) -> None:
     src_real = src_dir.resolve()
     for root, dirs, files in os.walk(src_dir):
-        dirs[:] = [d for d in dirs if d not in _COPY_EXCLUDE and not d.startswith(".")]
+        dirs[:] = [name for name in dirs if not _excluded_skill_name(name)]
         for name in [*dirs, *files]:
             p = Path(root) / name
-            if p.is_symlink():
-                target = p.resolve()
-                if target != src_real and src_real not in target.parents:
-                    raise AblationError(f"skill root contains a symlink escaping the root: {p}")
+            if not p.is_symlink() or _excluded_skill_name(name):
+                continue
+            target = p.resolve()
+            if not target.is_relative_to(src_real):
+                raise AblationError(f"skill root contains a symlink escaping the root: {p}")
+            if any(_excluded_skill_name(part) for part in target.relative_to(src_real).parts):
+                raise AblationError(f"skill root contains a symlink into an excluded path: {p}")
     def ignore(_dir: str, names: list[str]) -> list[str]:
-        return [n for n in names if n in _COPY_EXCLUDE or n.startswith(".")]
+        return [name for name in names if _excluded_skill_name(name)]
     shutil.copytree(src_dir, dst_dir, ignore=ignore)
 
 
