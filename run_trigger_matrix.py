@@ -1297,7 +1297,8 @@ class _MatrixCell:
 
 
 def _observe_priced_cell(cell: _MatrixCell, tree_dir: Path, timeout: int,
-                         root_keys: Mapping[SkillId, str]) -> Priced[_RetainedCell]:
+                         root_keys: Mapping[SkillId, str],
+                         collect_unscoped: bool) -> Priced[_RetainedCell]:
     capture = _CellCapture(RawProcessCapture())
     token = _matrix_raw_capture.set(capture.raw)
     artifacts: list[_CellArtifacts] = []
@@ -1307,7 +1308,7 @@ def _observe_priced_cell(cell: _MatrixCell, tree_dir: Path, timeout: int,
             observation: MatrixObservation = observe_cell_query(
                 cell.adapter, tree_dir, cell.query, cell.should_trigger, cell.call.requested_model,
                 timeout, cell.trace_dir, dict(cell.metadata), cell.identity, cell.constraints,
-                root_keys, _capture=capture, _artifacts=artifacts)
+                root_keys, collect_unscoped=collect_unscoped, _capture=capture, _artifacts=artifacts)
         except BaseException as exc:
             if not isinstance(exc, Exception):
                 interruption = exc
@@ -1473,7 +1474,7 @@ def observe_cell_query(
     identity: TriggerRepetitionIdentity | None = None,
     constraints: SkillTriggerConstraints | None = None,
     root_keys: Mapping[SkillId, str] | None = None,
-    *, _capture: _CellCapture | None = None,
+    *, collect_unscoped: bool = False, _capture: _CellCapture | None = None,
     _artifacts: list[_CellArtifacts] | None = None,
 ) -> TriggerObservation:
     """Observe one cell without erasing its domain type before aggregation."""
@@ -1510,6 +1511,7 @@ def observe_cell_query(
             if _capture is not None:
                 _capture.stage = TriggerFailureStage.DISCOVERY
             secrets = cell_secret_values(adapter, workspace) + ambient_secret_values()
+            unscoped: dict[SkillId, TriggerDetection] = {}
             attribution: TriggerAttribution = LegacyAttribution()
             if constraints is not None:
                 attribution = SkillAttribution(constraints, {
@@ -1517,6 +1519,12 @@ def observe_cell_query(
                     for key in constraints.selected
                 })
                 detection = attribution.detection
+                if collect_unscoped:
+                    unscoped = {
+                        key: adapter.detect(invocation, adapter.exposed_skill_names(
+                            mounted_skill_names([path])), [path])
+                        for key, path in mounted.items() if key not in constraints.selected
+                    }
             else:
                 detection = adapter.detect(invocation, names, copied)
 
@@ -1587,6 +1595,12 @@ def observe_cell_query(
     }
     if telemetry_error:
         observation_metadata["telemetry_error"] = telemetry_error
+    if unscoped:
+        observation_metadata["unscoped_skill_detections"] = {
+            key: [{"kind": item.kind.value, "text": item.text}
+                  for item in redact_detection(detection, secrets).evidence]
+            for key, detection in unscoped.items()
+        }
     if trace_dir is not None:
         observation_metadata["trace_dir"] = str(trace_dir)
     observation = TriggerObservation(
@@ -1651,7 +1665,8 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
                backend_options: dict[str, Any] | None = None,
                trace_runs: Path | None = None, ablation: str | None = None, *,
                spend_policy: SpendPolicy | None = None,
-               spend_root: Path | None = None) -> dict[str, Any]:
+               spend_root: Path | None = None, collect_unscoped: bool = False,
+               expected_skill_tree_hash: str | None = None) -> dict[str, Any]:
     if spend_policy is not None and (not isinstance(spend_policy, SpendPolicy) or spend_root is None):
         raise ValueError("matrix spend policy requires a policy and ledger root")
     manifest = load_manifest(manifest_path)
@@ -1704,6 +1719,8 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
         # One skill tree for the whole matrix: every cell mounts the exact same
         # bytes, and the recorded hash/provenance proves which revision was measured.
         tree_dir, tree_hash, provenance = trigger_tree_for_manifest(repo_root, manifest, Path(td), ablation)
+        if expected_skill_tree_hash is not None and tree_hash != expected_skill_tree_hash:
+            raise ValueError(f"trigger matrix staged skill tree {tree_hash}, expected {expected_skill_tree_hash}")
         for adapter in adapters:
             for row in rows:
                 constraints = parse_skill_constraints(row)
@@ -1767,7 +1784,7 @@ def run_matrix(manifest_path: Path, rows: list[dict[str, Any]], agents: list[str
         spend = None
         abort: BaseException | None = None
         def invoke_cell(call: MatrixCall) -> Priced[_RetainedCell]:
-            return _observe_priced_cell(by_call[call.call_id], tree_dir, timeout, frozen_roots)
+            return _observe_priced_cell(by_call[call.call_id], tree_dir, timeout, frozen_roots, collect_unscoped)
         with SpendAdmission.open(spend_policy, population.paid_plan,
                                  root=spend_root or manifest_path.parent / "spend") as admission:
             try:

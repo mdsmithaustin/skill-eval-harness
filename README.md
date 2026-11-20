@@ -618,6 +618,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-benchmark trigger-compare` | Pair baseline and `--ablation` trigger reports of the same skill revision: declared-cell/repetition completeness, duplicate rejection, agent/model cells collapsed by stable authored-query ID, direction-aware sign-flip significance, and a causal-confirmation evidence class. |
 | `skill-benchmark trigger-distractors` | Build one self-contained catalog per library size, the manifest's skills plus N decoy skills with scoped trigger cases, for `skill-trigger-matrix` to run unchanged. |
 | `skill-benchmark trigger-distractor-report` | Read one matrix report per library size and report the expected-skill load rate, pass rate, decoy activations and degradation boundary per (agent, model). |
+| `skill-benchmark overlap-scan` / `skill-benchmark overlap-evaluate` | Rank skill pairs using description embeddings, then measure activation and four-arm task outcomes for a selected pair. See [evaluate semantic overlap](docs/commands.md#evaluate-semantic-overlap). |
 
 ## Compatibility notes
 
@@ -671,6 +672,7 @@ skill-eval-harness/
 ├── pyproject.toml
 ├── skill_benchmark.py          # the CLI, grading, reporting, and runner adapters
 ├── skill_interaction.py        # four-arm task outcome experiments
+├── skill_overlap.py            # Description embedding scan and selected-pair evaluation
 ├── run_pi_trigger_eval.py      # skill-pi-trigger-eval: the trigger matrix with the Pi adapter alone
 ├── run_trigger_matrix.py       # activation matrix across agents × models (claude/codex/pi/vibe/stub adapters)
 ├── skill_inputs.py            # manifest loading, skill materialization, and treatment identity
