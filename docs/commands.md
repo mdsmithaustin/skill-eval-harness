@@ -477,6 +477,62 @@ skill-benchmark benchmark ../repo/evals/shared-benchmark.json \
 
 Multi-model runs prepare with `--models a,b,c` (run dirs gain a model segment: `<case>/<model>/<variant>`); grading discovers both layouts and pairs lift per (case, model).
 
+### Export revision-bound evidence
+
+```bash
+skill-benchmark export-evidence benchmark.json --out published-evidence
+```
+
+This command writes `benchmark-evidence.json` and `BENCHMARK.md` from the
+saved answer benchmark. It reads only that JSON and runs no agents or graders.
+Keep the output directory outside the evaluated skill roots.
+
+Native answer runners and the subagent runner record the identity of each
+staged `with_skill` root before execution. The export uses those identities
+when every attested treatment agrees. Older benchmarks and results without
+per-root identities show an unknown revision. The export never consults a
+source checkout. Each row in a multi-skill benchmark identifies one member of
+the evaluated set. The outcomes measure the set as a whole.
+
+The dataset digest identifies the retained eval contract, including the
+manifest and its referenced grading and input bytes. The dataset digest can
+be unknown in older reports. A complete case has both arms for every planned
+repetition, with comparable, graded outcome rates. The export averages
+repetitions within each case and weights cases equally. A pair can use the
+same recorded serving model in both arms or have no serving evidence in
+either arm. Pairs with different serving models, a mix of known and unknown
+models, a mixed invocation, or a recorded request mismatch are incomplete.
+The export withholds rates and the lift interval when the cohort is
+incomplete or spans agents, requested model coordinates, or recorded serving
+models. This includes cohorts with both known and unknown model evidence.
+
+The model field names the single model that served the cohort when recorded,
+including a backend default. If serving evidence is absent throughout,
+complete comparisons retain their rates and the model is unknown. A requested
+model alone does not identify the serving model. The lift interval uses 95%
+sign-flip inversion and is unavailable when the sample cannot bound it.
+
+The JSON object has `schema_version: 1`, `skill_name` for the saved benchmark
+label and a `skills` array with `name`, `digest_scheme`, and `digest`.
+A comparable row uses the mounted `SKILL.md` frontmatter name, the scheme
+`skill-tree-sha256-v2`, and a 64-character lowercase hex digest. Null digest
+and scheme fields indicate unknown identity. The object also includes
+`dataset_digest`, `agent`, `model`, `baseline_outcome_rate`,
+`with_skill_outcome_rate`, `lift_interval`, and `coverage`. Rates are
+fractions. An available interval has `lower` and `upper` as fractional lift,
+`confidence` as a fraction, and `method`. Coverage has `complete_cases` and
+`planned_cases`. Unavailable values are null.
+
+For `skill-tree-sha256-v2`, sort regular files by their root-relative POSIX
+path components in lexicographic UTF-8 byte order. For each file, hash its
+UTF-8 relative path with slash separators, a NUL byte, the byte length as an
+unsigned 8-byte big-endian integer, and the raw contents. SHA-256 consumes the
+concatenated records. Permission bits and empty directories are outside the
+digest. An internal symlink or special file makes the tree unverifiable.
+The [shared fixture](../tests/fixtures/benchmark-evidence/materialize-demo/)
+hashes to
+`254b652604373da2e54ba8c665b0e8ae88e93819e8d6d6c428891d4f175934dc`.
+
 ### Optional verifier diagnostics
 
 `--review-diagnostics` adds `verifier_review` after grading and answer-design

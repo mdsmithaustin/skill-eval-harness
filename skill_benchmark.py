@@ -383,13 +383,20 @@ from completion_contracts import (
     EFFORT_LEVELS,
     EffortSetting,
     ServedModel,
+    ServedModelCheck,
     StopClass,
     StopObservation,
     claude_result_stop,
     completion_unscorable_reason,
     effort_identity,
 )
-from content_digests import directory_tree_sha256, file_sha256, tree_sha256
+from content_digests import (
+    SKILL_REVISION_DIGEST_SCHEME,
+    directory_tree_sha256,
+    file_sha256,
+    skill_revision_sha256,
+    tree_sha256,
+)
 from effect_estimates import (
     DiscriminationFailure,
     Estimate,
@@ -401,6 +408,7 @@ from effect_estimates import (
     minimum_units_note,
     multiplicity,
     plan_power,
+    sign_flip_interval,
     sign_flip_test,
 )
 from findings import (
@@ -6531,6 +6539,18 @@ class WorkspaceAttestation:
 
     mounted_skill_tree_hash: str | None
     fixture_tree_hash: str
+    skill_revisions: tuple[tuple[str, str], ...] = ()
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "fixture_tree_hash": self.fixture_tree_hash,
+            **({"skill_tree_hash": self.mounted_skill_tree_hash}
+               if self.mounted_skill_tree_hash is not None else {}),
+            **({"skill_revisions": [
+                {"name": name, "digest_scheme": SKILL_REVISION_DIGEST_SCHEME, "digest": digest}
+                for name, digest in self.skill_revisions
+            ]} if self.skill_revisions else {}),
+        }
 
 
 @_dataclass(frozen=True)
@@ -6577,6 +6597,7 @@ def build_skill_workspace(
         )
     ws.mkdir(parents=True, exist_ok=True)
     skill_rel: list[str] = []
+    skill_revisions: list[tuple[str, str]] = []
     if pt.variant_truth != "without_skill":
         for key, sp in zip(skill_root_keys, pt.skill_paths, strict=True):
             src = Path(sp)
@@ -6587,6 +6608,13 @@ def build_skill_workspace(
             _copy_skill_root(src_dir, dest)
             main = dest / "SKILL.md" if (src.is_dir() or src.name == "SKILL.md") else dest / src.name
             skill_rel.append(str((main if main.exists() else dest).relative_to(ws)))
+            if pt.variant_truth == "with_skill" and main.name == "SKILL.md" and main.is_file():
+                try:
+                    name = frontmatter_value(main.read_text(encoding="utf-8"), "name")
+                    if isinstance(name, str) and name.strip():
+                        skill_revisions.append((name, skill_revision_sha256(dest)))
+                except (OSError, ValueError):
+                    pass
     mounted_hash = skill_tree_hash(ws / "skills") if (ws / "skills").is_dir() else None
     expected_hash: str | None = None
     if pt.variant_truth == "with_skill":
@@ -6613,8 +6641,9 @@ def build_skill_workspace(
         if (ws / "inputs").is_dir()
         else hashlib.sha256(b"").hexdigest()
     )
+    revisions = tuple(sorted(skill_revisions)) if len(skill_revisions) == len(skill_rel) else ()
     return WorkspaceBuild(
-        skill_rel, input_rel, WorkspaceAttestation(mounted_hash, fixture_hash))
+        skill_rel, input_rel, WorkspaceAttestation(mounted_hash, fixture_hash, revisions))
 
 
 def jetty_upload_workspace(pt: PreparedTask, ws: Path) -> None:
@@ -8245,9 +8274,7 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                     budget_stopped = True
                     continue
                 outcome, attestation = execution.value
-                if attestation.mounted_skill_tree_hash is not None:
-                    prov_extra["skill_tree_hash"] = attestation.mounted_skill_tree_hash
-                prov_extra["fixture_tree_hash"] = attestation.fixture_tree_hash
+                prov_extra.update(attestation.metadata())
                 if admission.path is not None:
                     prov_extra["spend_ledger_path"] = str(admission.path)
                     prov_extra["spend_call_id"] = call.call_id
@@ -11676,9 +11703,7 @@ def run_subagent_tasks(
                                         build=functools.partial(workspace_builder, pt)) as (ws, workspace):
                     skill_rel, input_rel = workspace
                     attestation = workspace.attestation
-                    if attestation.mounted_skill_tree_hash is not None:
-                        prov_extra["skill_tree_hash"] = attestation.mounted_skill_tree_hash
-                    prov_extra["fixture_tree_hash"] = attestation.fixture_tree_hash
+                    prov_extra.update(attestation.metadata())
                     prompt = build_task_prompt(pt, skill_paths=skill_rel, input_files=input_rel)
                     started = time.time()
                     if turns:
@@ -14472,7 +14497,7 @@ def _metric_pair_construction(results: list[dict[str, Any]], key: str, *,
         value = row.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
             return False, f"missing_{key}"
-        if key in {"objective_pass_rate", "combined_pass_rate", "graded_score"} and not 0 <= float(value) <= 1:
+        if key in {"objective_pass_rate", "outcome_pass_rate", "combined_pass_rate", "graded_score"} and not 0 <= float(value) <= 1:
             return False, f"invalid_{key}"
         return True, None
 
@@ -15889,6 +15914,7 @@ def variant_summary_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
 class _AnswerDesignCoverage:
     summary: dict[str, Any]
     planned: tuple[str, ...] = ()
+    eval_contract_sha256: str | None = None
 
 
 def _answer_design_coverage(
@@ -16086,7 +16112,8 @@ def _answer_design_coverage(
         "expected_runs": len(expected), "observed_runs": len(observed),
         "missing_run_dirs": missing, "extra_run_dirs": extra,
         "attestation_errors": errors,
-    }, tuple(json.dumps(row, sort_keys=True) for row in scoped_identities))
+    }, tuple(json.dumps(row, sort_keys=True) for row in scoped_identities),
+        design["eval_contract_sha256"])
 
 
 def answer_design_coverage(
@@ -17107,6 +17134,15 @@ def build_benchmark_report(
         "availability": "partial" if incomplete_reasons else "complete",
         "incomplete_reasons": incomplete_reasons,
         "answer_design": design_coverage,
+        "evidence_plan": {
+            "dataset_digest": coverage.eval_contract_sha256,
+            "case_ids": answer_case_ids,
+            "paired_runs": [
+                {key: row[key] for key in ("case_id", "model", "run_number", "variant", "run_dir")}
+                for row in map(json.loads, coverage.planned)
+                if row["variant"] in {"with_skill", "without_skill"}
+            ] if coverage.eval_contract_sha256 else None,
+        },
         "spend_invocations": spend_invocations(runs / "spend"),
         "skipped_trigger_cases": skipped_trigger_cases,
         "deferred_judge_tasks": deferred_judge_tasks,
@@ -17154,6 +17190,179 @@ def build_benchmark_report(
 def benchmark(args: argparse.Namespace) -> int:
     report = build_benchmark_report(Path(args.manifest), Path(args.runs), args.split, args.variant, getattr(args, "judge_results", None), **grading_options(args), min_lift=getattr(args, "min_lift", None), review_diagnostics=args.review_diagnostics, max_harm=args.max_harm)
     emit_report(report, args.out)
+    return 0
+
+
+def evidence_served_model(row: Mapping[str, Any]) -> tuple[str | None, ServedModelCheck | None]:
+    metadata = row.get("metadata", {})
+    check = metadata.get("served_model_check", row.get("served_model_check"))
+    if check in {ServedModelCheck.MIXED.value, ServedModelCheck.MISMATCH.value}:
+        return None, ServedModelCheck(check)
+    observed = ServedModel.observe(None, [
+        *(metadata.get("served_models") or []),
+        metadata.get("served_model", row.get("served_model")),
+    ])
+    if len(observed.reported) > 1:
+        return None, ServedModelCheck.MIXED
+    return observed.served, None
+
+
+def benchmark_evidence(report: dict[str, Any]) -> dict[str, Any]:
+    results = report.get("results")
+    if report.get("population") != "answer" or not isinstance(results, list):
+        raise ValueError("expected a saved answer benchmark JSON with results")
+    if any(not isinstance(row, dict) or not isinstance(row.get("metadata", {}), dict)
+           for row in results):
+        raise ValueError("benchmark results must be objects with metadata objects")
+    variants = {"with_skill", "without_skill"}
+    rows = [row for row in results if row.get("variant") in variants]
+    design = report.get("answer_design") or {}
+    design_complete = design.get("complete") is True
+    plan = report.get("evidence_plan") or {}
+    planned = plan.get("paired_runs")
+    case_ids = plan.get("case_ids")
+    if planned is None and design_complete:
+        planned = rows
+        case_ids = sorted({row["case_id"] for row in rows})
+    planned_cases = len(case_ids) if case_ids is not None else None
+    rates_by_case: dict[str, list[tuple[float, float]]] = {}
+
+    observed: dict[str, dict[tuple[str | None, int], tuple[float, float]]] = collections.defaultdict(dict)
+    for pair in _metric_pair_construction(rows, "outcome_pass_rate").pairs:
+        control, treatment = pair.control.payload, pair.treatment.payload
+        control_model = evidence_served_model(control)
+        if (control.get("grading_availability") != "complete"
+                or treatment.get("grading_availability") != "complete"
+                or control.get("metadata", {}).get("provider") != treatment.get("metadata", {}).get("provider")
+                or control_model[1] is not None
+                or control_model != evidence_served_model(treatment)):
+            continue
+        observed[pair.key.case_id][pair.key.model, pair.key.run_number] = (
+            float(control["outcome_pass_rate"]), float(treatment["outcome_pass_rate"]),
+        )
+
+    complete_cases = None
+    if planned is not None and case_ids is not None:
+        expected: dict[tuple[str, str], set[tuple[str | None, int]]] = collections.defaultdict(set)
+        error_runs = {error["run_dir"] for error in design.get("attestation_errors", [])
+                      if "run_dir" in error}
+        blocked_cases = {error["case_id"] for error in design.get("attestation_errors", [])
+                         if "case_id" in error}
+        global_error = any("run_dir" not in error and "case_id" not in error
+                           for error in design.get("attestation_errors", []))
+        for row in planned:
+            if row.get("run_dir") in error_runs:
+                blocked_cases.add(row["case_id"])
+            expected[row["case_id"], row["variant"]].add((row.get("model"), row["run_number"]))
+        if not global_error:
+            for case_id in case_ids:
+                baseline = expected[case_id, "without_skill"]
+                treatment = expected[case_id, "with_skill"]
+                pairs = observed[case_id]
+                if baseline and baseline == treatment == pairs.keys() and case_id not in blocked_cases:
+                    rates_by_case[case_id] = list(pairs.values())
+        complete_cases = len(rates_by_case)
+
+    agents = {row.get("metadata", {}).get("provider") for row in rows}
+    requested_models = {row.get("model") for row in (planned if planned is not None else rows)}
+    served_models = {evidence_served_model(row) for row in rows}
+    agent = next(iter(agents)) if len(agents) == 1 else None
+    model, model_issue = next(iter(served_models)) if len(served_models) == 1 else (None, None)
+    baseline_rate = with_skill_rate = interval = None
+    if (design_complete and complete_cases and complete_cases == planned_cases
+            and len(agents) == len(requested_models) == len(served_models) == 1
+            and model_issue is None):
+        case_rates = [
+            (statistics.mean(control), statistics.mean(treatment))
+            for control, treatment in (zip(*rates) for rates in rates_by_case.values())
+        ]
+        baseline_rate = statistics.mean(control for control, _ in case_rates)
+        with_skill_rate = statistics.mean(treatment for _, treatment in case_rates)
+        estimate = sign_flip_interval([treatment - control for control, treatment in case_rates])
+        if estimate["bounded"]:
+            interval = {key: estimate[key] for key in ("lower", "upper", "confidence", "method")}
+
+    skill_name = report.get("skill_name")
+    revisions = [row.get("metadata", {}).get("skill_revisions")
+                 for row in rows if row["variant"] == "with_skill"]
+    skills = [{"name": skill_name, "digest_scheme": None, "digest": None}] if skill_name else []
+    if design_complete and revisions and revisions[0] and all(revision == revisions[0] for revision in revisions):
+        retained = revisions[0]
+        names = [skill["name"] for skill in retained]
+        if len(set(names)) == len(names) and all(
+            isinstance(skill["name"], str) and skill["name"].strip()
+            and skill["digest_scheme"] == SKILL_REVISION_DIGEST_SCHEME
+            and isinstance(skill["digest"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", skill["digest"])
+            for skill in retained
+        ):
+            skills = [{key: skill[key] for key in ("name", "digest_scheme", "digest")}
+                      for skill in retained]
+
+    return {
+        "schema_version": 1,
+        "skill_name": skill_name,
+        "skills": skills,
+        "dataset_digest": plan.get("dataset_digest"),
+        "agent": agent,
+        "model": model,
+        "baseline_outcome_rate": baseline_rate,
+        "with_skill_outcome_rate": with_skill_rate,
+        "lift_interval": interval,
+        "coverage": {"complete_cases": complete_cases, "planned_cases": planned_cases},
+    }
+
+
+def benchmark_evidence_markdown(evidence: dict[str, Any]) -> str:
+    def label(value: Any) -> str:
+        return html.escape(str(value)).replace("|", "&#124;").replace("\n", " ") if value is not None else "Unknown"
+
+    def rate(value: float | None) -> str:
+        return f"{value:.2%}" if value is not None else "Unavailable"
+
+    coverage = evidence["coverage"]
+    interval = evidence["lift_interval"]
+    bounds = "Unavailable"
+    if interval is not None:
+        bounds = (f'{interval["confidence"]:.0%} interval '
+                  f'[{interval["lower"] * 100:.2f}, {interval["upper"] * 100:.2f}] percentage points '
+                  f'({interval["method"]})')
+    lines = [
+        "# Benchmark evidence",
+        "",
+        "| Measurement | Result |",
+        "| --- | --- |",
+        f'| Benchmark | {label(evidence["skill_name"])} |',
+        f'| Dataset digest | {label(evidence["dataset_digest"])} |',
+        f'| Agent | {label(evidence["agent"])} |',
+        f'| Model | {label(evidence["model"])} |',
+        f'| Complete / planned cases | {label(coverage["complete_cases"])} / {label(coverage["planned_cases"])} |',
+        f'| Baseline outcome rate | {rate(evidence["baseline_outcome_rate"])} |',
+        f'| With-skill outcome rate | {rate(evidence["with_skill_outcome_rate"])} |',
+        f'| Lift interval | {bounds} |',
+        "",
+        "| Skill | Digest scheme | Digest |",
+        "| --- | --- | --- |",
+    ]
+    lines.extend(f'| {label(skill["name"])} | {label(skill["digest_scheme"])} | {label(skill["digest"])} |'
+                 for skill in evidence["skills"])
+    if not evidence["skills"]:
+        lines.append("| Unknown | Unknown | Unknown |")
+    return "\n".join(lines) + "\n"
+
+
+def export_evidence(args: argparse.Namespace) -> int:
+    try:
+        report = strict_json_loads(Path(args.benchmark).read_text(encoding="utf-8"))
+        evidence = benchmark_evidence(string_keyed_dict(report, "saved benchmark"))
+        out = Path(args.out).resolve()
+        if any((ancestor / "SKILL.md").is_file() for ancestor in (out, *out.parents)):
+            die("export-evidence --out must be outside any skill directory")
+        _atomic_write_text(out / "benchmark-evidence.json",
+                           json.dumps(evidence, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+        _atomic_write_text(out / "BENCHMARK.md", benchmark_evidence_markdown(evidence))
+    except (OSError, TypeError, ValueError, KeyError, AttributeError) as exc:
+        die(f"cannot export benchmark evidence: {exc}")
     return 0
 
 
@@ -21590,6 +21799,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--review-diagnostics", action="store_true", help="include optional diagnostic verifier authoring leads; grades and gates are unchanged")
 
+    p = sub.add_parser("export-evidence", help="export revision-bound evidence from a saved benchmark")
+    p.add_argument("benchmark", help="saved benchmark JSON")
+    p.add_argument("--out", required=True, help="report directory outside the skill tree")
+
     p = sub.add_parser("report", help="serialize a benchmark.json for CI: JUnit XML or GitHub job-summary markdown + annotations")
     p.add_argument("--benchmark", required=True, help="benchmark.json produced by `skill-benchmark benchmark --out`")
     p.add_argument("--format", choices=["junit", "github"], required=True)
@@ -21879,6 +22092,7 @@ def main() -> int:
         CLICommand.GRADE: grade,
         CLICommand.JUDGE: judge_command,
         CLICommand.BENCHMARK: benchmark,
+        CLICommand.EXPORT_EVIDENCE: export_evidence,
         CLICommand.REPORT: report_command,
         CLICommand.COMPARE_JUDGES: compare_judges,
         CLICommand.JUDGE_ALIGNMENT: judge_alignment_command,
