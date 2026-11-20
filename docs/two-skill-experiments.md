@@ -34,4 +34,8 @@ skill-benchmark interaction evals/shared-benchmark.json \
   --runs /tmp/pr-interaction --report-only
 ```
 
-The report command checks the current selected cases and their fixture bytes against the saved plan. It checks the built-in grader, each arm's design, and the committed artifacts for every planned run. It regrades those artifacts without making model calls. `issues` names missing or incompatible evidence. A comparison with incomplete evidence for any of its required arms reports `withheld` and a null estimate. The command exits with status 2 if any of the planned four-arm cases is incomplete. When a backend cannot verify the served model, the report records the requested model and exposes the unavailable verification in `served_model_checks`.
+Replay uses the skill revisions in the saved plan. Omit `--skill-a` and `--skill-b`. You can move the manifest and its case files together if their relative paths and contents stay the same. Replay uses the recorded skill identities and can run without the skill directories declared in the manifest.
+
+The report command checks the selected cases and their fixture bytes against the saved plan. It also checks the frozen grader inputs, each arm's design, and the committed run artifacts. It regrades the saved answers without model calls. The `builtin-outcome-v2` grader identity covers the scoring code, including reachable harness helpers and constants, as well as the Python and regex versions. A scoring change withholds comparisons from an earlier grader identity.
+
+`issues` names missing or incompatible evidence. A comparison with incomplete evidence for any of its required arms reports `withheld` and a null estimate. The command exits with status 2 if any of the planned four-arm cases is incomplete. When a backend cannot verify the served model, the report records the requested model and exposes the unavailable verification in `served_model_checks`.

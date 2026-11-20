@@ -4,6 +4,11 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add `skill-benchmark interaction` to compare task outcomes with neither, either,
+  or both of two skills. The report records both skill revisions, complete cases,
+  and the gain over the better individual skill. See
+  [two-skill outcome experiments](docs/two-skill-experiments.md).
+
 ## v0.7.0 — 2026-11-11
 
 The first release prepared by this fork. The release tag is `ext-v0.7.0`. Follow [0.6.0 → 0.7.0](docs/upgrading.md#060--070) before you upgrade.

@@ -1386,7 +1386,7 @@ def validate_case_assertion(cid: str, label: str, index: int, assertion: Any, pa
 SUPPORTED_MANIFEST_VERSIONS = {1, 2}
 
 
-def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[str, Any]:
+def validate_manifest(path: Path, allow_missing_holdback: bool = True, *, resolve_skills: bool = True) -> dict[str, Any]:
     manifest = load_manifest_source(path)
     # Version 1 stays fully supported with behavior-preserving defaults
     # (severity, oracle tiers); version 2 makes those defaults explicit. The
@@ -1650,14 +1650,14 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
             validate_ablation_removal(ablation, manifest)
         except AblationError as exc:
             die(f"ablation {aid}: {exc}")
-    require_resolvable_skill_paths(path, manifest)
-    for label in ("skill_paths", "old_skill_paths"):
-        roots = manifest.get(label) or []
-        if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
-            continue
-        for first, second, key in skill_root_key_collisions(repo_root_for_manifest(path), roots):
-            die(f"manifest.{label}: {first!r} and {second!r} both mount as skill directory {key!r}; "
-                "agents list skills by directory name, so rename one directory")
+    if resolve_skills:
+        require_resolvable_skill_paths(path, manifest)
+        for label in ("skill_paths", "old_skill_paths"):
+            roots = manifest.get(label) or []
+            if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
+                continue
+            for first, second, key in skill_root_key_collisions(repo_root_for_manifest(path), roots):
+                die(f"manifest.{label}: {first!r} and {second!r} both mount as skill directory {key!r}; agents list skills by directory name, so rename one directory")
     return manifest
 
 

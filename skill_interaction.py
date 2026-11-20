@@ -1,21 +1,20 @@
 """Four-configuration experiments on task outcomes."""
 from __future__ import annotations
 
-import inspect
+import ast
+import platform
 import shutil
 import statistics
-from collections import Counter
+from collections import Counter, defaultdict
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
-import grading_contracts
 import skill_benchmark as bench
-import text_contracts
 from ablation_model import PreparedTask, execution_valid
 from content_digests import (
     canonical_json_sha256,
     directory_tree_sha256,
-    file_sha256,
     tree_sha256,
 )
 from effect_estimates import sign_flip_interval
@@ -34,21 +33,75 @@ DIGEST_SCHEME = "skill-tree-sha256-v1"
 
 
 def _dataset(path: Path, split: str | None) -> tuple[list[dict[str, Any]], str]:
-    manifest = bench.validate_manifest(path, allow_missing_holdback=split != "holdback")
+    manifest = bench.validate_manifest(
+        path, allow_missing_holdback=split != "holdback", resolve_skills=False,
+    )
     cases = [case for case in bench.iter_cases(manifest, split) if not bench.is_trigger_case(case)]
     identity = bench.eval_contract_sha256(
         {"version": manifest["version"], "cases": cases}, path, cases=cases)
     return cases, identity
 
 
+def _module_bindings(path: Path) -> dict[str, list[ast.stmt]]:
+    bindings: dict[str, list[ast.stmt]] = defaultdict(list)
+    for node in ast.parse(path.read_bytes()).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bindings[node.name].append(node)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bindings[alias.asname or alias.name.split(".")[0]].append(node)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store):
+                        bindings[name.id].append(node)
+    return bindings
+
+
 def _grader() -> dict[str, str]:
+    """Fingerprint the reachable local bindings for the built-in outcome scorer."""
+    root = Path(__file__).resolve().parent
+    bindings: dict[str, dict[str, list[ast.stmt]]] = {}
+    pending = [(__name__, "_run_outcome")]
+    visited = set()
+    sources: dict[str, list[str]] = {}
+    while pending:
+        module_name, name = pending.pop()
+        if (module_name, name) in visited:
+            continue
+        visited.add((module_name, name))
+        if module_name not in bindings:
+            path = root / f"{module_name}.py"
+            bindings[module_name] = _module_bindings(path) if path.is_file() else {}
+        definitions = bindings[module_name]
+        for node in definitions.get(name, ()):
+            key = f"{module_name}.{name}"
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                alias = next(alias for alias in node.names
+                             if (alias.asname or alias.name.split(".")[0]) == name)
+                if isinstance(node, ast.ImportFrom) and node.module is not None:
+                    pending.append((node.module, alias.name))
+                origin = node.module if isinstance(node, ast.ImportFrom) else None
+                sources.setdefault(key, []).append(f"{origin}:{alias.name}")
+                continue
+            sources.setdefault(key, []).append(ast.dump(node))
+            for expression in ast.walk(node):
+                if isinstance(expression, ast.Name) and isinstance(expression.ctx, ast.Load):
+                    pending.append((module_name, expression.id))
+                elif isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+                    local_name = expression.value.id
+                    for declaration in definitions.get(local_name, ()):
+                        if isinstance(declaration, ast.Import):
+                            for alias in declaration.names:
+                                if (alias.asname or alias.name.split(".")[0]) == local_name:
+                                    pending.append((alias.name, expression.attr))
     return {
-        "id": "builtin-outcome-v1",
+        "id": "builtin-outcome-v2",
         "sha256": canonical_json_sha256({
-            "grading": inspect.getsource(bench.grade_case_variant),
-            "assertions": inspect.getsource(bench.assertion_result),
-            "contracts": {module.__name__: file_sha256(Path(module.__file__))
-                          for module in (grading_contracts, text_contracts)},
+            "source_bindings": sources,
+            "python": [platform.python_implementation(), platform.python_version()],
+            "regex": version("regex"),
         }),
     }
 
@@ -395,6 +448,8 @@ def run_interaction(
                 if top in {*ARMS, "_inputs", PLAN_NAME}:
                     raise ValueError("--out would overwrite retained interaction evidence")
         if report_only:
+            if any(source is not None for source in sources):
+                raise ValueError("--report-only uses retained skills; omit --skill-a and --skill-b")
             plan = _load_plan(runs)
         else:
             skill_a, skill_b = sources

@@ -1,6 +1,7 @@
 import json
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -49,7 +50,8 @@ class InteractionTests(unittest.TestCase):
         cases = [
             {"id": f"case-{n:02}", "split": "tune", "prompt": "Complete the attached case.",
              "files": [f"fixture-{n}.txt"],
-             "assertions": [{"type": "contains", "value": "outcome-verified"}]}
+             "assertions": [{"type": "contains", "value": "outcome-verified"},
+                            {"type": "regex", "value": "^outcome-verified$"}]}
             for n in range(20)
         ]
         cases.append({"id": "trigger-only", "split": "tune", "kind": "trigger",
@@ -158,5 +160,50 @@ class InteractionTests(unittest.TestCase):
         path.write_text(json.dumps(plan), encoding="utf-8")
         code, report = self.report_only(runs)
         self.assertEqual(code, 2)
+        self.assertEqual(report["issues"], [{"code": "grader_mismatch"}])
+        self.assertTrue(all(row["estimate"] is None for row in report["comparisons"].values()))
+
+    def test_replay_can_relocate_the_dataset_without_manifest_skill_roots(self):
+        relocated = self.root / "relocated" / "evals"
+        shutil.copytree(self.manifest.parent, relocated)
+        manifest = relocated / self.manifest.name
+        code, stdout, stderr = run_cli("interaction", manifest, "--runs", self.runs, "--report-only")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(json.loads(stdout), self.report)
+
+    def test_report_only_rejects_new_skill_selection(self):
+        code, stdout, stderr = run_cli(
+            "interaction", self.manifest, "--runs", self.runs, "--report-only",
+            "--skill-a", self.root / "second", "--skill-b", self.root / "first")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertIn("omit --skill-a and --skill-b", stderr)
+
+    def test_replay_detects_changes_to_grader_helpers_but_ignores_unrelated_code(self):
+        copied = self.root / "grader-source"
+        copied.mkdir()
+        for path in Path(__file__).resolve().parents[1].glob("*.py"):
+            shutil.copyfile(path, copied / path.name)
+        module = copied / "skill_benchmark.py"
+        original = module.read_text(encoding="utf-8")
+        module.write_text(
+            original + "\ndef unrelated_interaction_test_helper():\n    return 'unused'\n",
+            encoding="utf-8",
+        )
+        argv = [sys.executable, "-m", "skill_benchmark", "interaction", str(self.manifest),
+                "--runs", str(self.runs), "--report-only"]
+        control = subprocess.run(argv, cwd=copied, capture_output=True, text=True, timeout=30, check=False)
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.assertEqual(json.loads(control.stdout), self.report)
+
+        start, marker = original.index("def assertion_severity("), '    severity = assertion.get("severity")'
+        index = original.index(marker, start)
+        module.write_text(
+            original[:index] + '    if assertion.get("type") == "contains":\n        return "soft"\n' + original[index:],
+            encoding="utf-8",
+        )
+        changed = subprocess.run(argv, cwd=copied, capture_output=True, text=True, timeout=30, check=False)
+        self.assertEqual(changed.returncode, 2, changed.stderr)
+        report = json.loads(changed.stdout)
         self.assertEqual(report["issues"], [{"code": "grader_mismatch"}])
         self.assertTrue(all(row["estimate"] is None for row in report["comparisons"].values()))
