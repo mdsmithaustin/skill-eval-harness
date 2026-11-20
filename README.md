@@ -555,6 +555,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-benchmark import-case` | Draft a redacted regression case from a local Codex session. |
 | `skill-benchmark promote-case` | Add a reviewed regression case and its approved fixtures to a JSON manifest. |
 | `skill-benchmark benchmark` | Aggregate into variant summaries, paired lift + significance + `interval` + `noise_check` (`--min-lift`), by-model, cost, `run_endings`, and case flags. |
+| `skill-benchmark export-evidence BENCHMARK_JSON --out DIR` | Write revision-bound JSON and `BENCHMARK.md` from a saved benchmark. |
 | `skill-benchmark render-viewer` | Static or `--serve`d review page with embedded artifacts and iteration diffs; served mode stores pass/fail/unsure verdicts and notes in `feedback.json`. |
 
 **Runners** (every one but `import-trace` calls a model; so do `judge` and `judge-robustness` below)

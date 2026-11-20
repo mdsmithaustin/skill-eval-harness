@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 _CHUNK = 1024 * 1024
+SKILL_REVISION_DIGEST_SCHEME = "skill-tree-sha256-v2"
 
 
 def file_sha256(path: Path) -> str:
@@ -74,6 +76,24 @@ def directory_tree_sha256(root: Path, *, reject_symlinks: bool = False) -> str:
             entries.append((candidate.relative_to(root).as_posix(), candidate))
     return tree_sha256(entries)
 
+
+
+def skill_revision_sha256(root: Path) -> str:
+    entries = []
+    for candidate in root.rglob("*"):
+        mode = candidate.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            continue
+        if not stat.S_ISREG(mode):
+            raise ValueError(f"skill tree contains a symlink or special file: {candidate}")
+        entries.append(candidate)
+    digest = hashlib.sha256()
+    for candidate in sorted(entries, key=lambda path: path.relative_to(root).parts):
+        relative = candidate.relative_to(root).as_posix().encode("utf-8")
+        content = candidate.read_bytes()
+        digest.update(relative + b"\0" + len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
 
 
 def canonical_json_sha256(value: Any) -> str:

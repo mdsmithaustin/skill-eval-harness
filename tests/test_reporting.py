@@ -7,6 +7,7 @@ subject; docstrings citing finding/roadmap ids are preserved.
 """
 import copy
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,7 @@ from helpers import (
 )
 from helpers import (
     attest_answer_design,
+    claude_stream_records,
     judge_with_stub,
     make_eval_repo,
     report_fixture,
@@ -64,6 +66,158 @@ def make_two_model_runs(root: Path) -> tuple[Path, Path]:
         (base / "output.md").write_text(text, encoding="utf-8")
         (base / "metadata.json").write_text(json.dumps({"model": model, "total_tokens": 10}), encoding="utf-8")
     return path, runs
+
+
+class BenchmarkEvidenceTests(unittest.TestCase):
+    fixture = ROOT / "tests" / "fixtures" / "benchmark-evidence" / "materialize-demo"
+    digest = "254b652604373da2e54ba8c665b0e8ae88e93819e8d6d6c428891d4f175934dc"
+
+    def test_standard_pipeline_exports_frozen_skill_revisions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = [{
+                "id": f"evidence-{i}",
+                "split": "tune",
+                "prompt": "Special evidence case" if i == 5 else "Ordinary evidence case",
+                "assertions": [
+                    {"name": "alpha answer", "type": "contains", "value": "alpha"},
+                    {"name": "beta answer", "type": "contains", "value": "beta"},
+                ],
+            } for i in range(6)]
+            manifest = make_eval_repo(root, skill_name="materialize-bench", cases=cases,
+                                      skill_paths=["skills/renamed/SKILL.md", "skills/other/SKILL.md"])
+            skills = manifest.parent.parent / "skills"
+            skill = skills / "renamed"
+            shutil.copytree(self.fixture, skill, dirs_exist_ok=True)
+            (skills / "other" / "SKILL.md").write_text(
+                "---\nname: other\ndescription: A second skill.\n---\nOther text.\n", encoding="utf-8")
+            stub = root / "codex_stub.py"
+            stub.write_text(
+                "import pathlib, sys\n"
+                "prompt = sys.stdin.read()\n"
+                "out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
+                "assert not pathlib.Path('skills').exists() or pathlib.Path('skills/renamed/assets/sample.bin').exists()\n"
+                "out.write_text('alpha beta' if pathlib.Path('skills').exists() "
+                "else 'alpha' if 'Special evidence case' in prompt else 'none')\n",
+                encoding="utf-8",
+            )
+            tasks, runs, benchmark = root / "tasks.jsonl", root / "runs", root / "benchmark.json"
+            self.assertEqual(run_cli("prepare", manifest, "--runs-per-variant", "2", "--models", "offline-model", "--out", tasks)[0], 0)
+            code, _, stderr = run_cli("run-codex", "--tasks", tasks, "--runs", runs,
+                                      "--codex-cmd", f"{sys.executable} {stub}")
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(run_cli("benchmark", manifest, "--runs", runs, "--out", benchmark)[0], 0)
+
+            inside = skill / "reports"
+            code, _, stderr = run_cli("export-evidence", benchmark, "--out", inside)
+            self.assertNotEqual(code, 0)
+            self.assertIn("outside any skill directory", stderr)
+            self.assertFalse(inside.exists())
+
+            out = root / "evidence"
+            self.assertEqual(run_cli("export-evidence", benchmark, "--out", out), (0, "", ""))
+            artifact, markdown = out / "benchmark-evidence.json", out / "BENCHMARK.md"
+            original = artifact.read_bytes(), markdown.read_bytes()
+            evidence = json.loads(original[0])
+            self.assertEqual(evidence["coverage"], {"complete_cases": 6, "planned_cases": 6})
+            self.assertEqual(evidence["agent"], "codex")
+            self.assertIsNone(evidence["model"])
+            self.assertRegex(evidence["dataset_digest"], r"^sha256:[0-9a-f]{64}$")
+            self.assertAlmostEqual(evidence["baseline_outcome_rate"], 1 / 12)
+            self.assertEqual(evidence["with_skill_outcome_rate"], 1.0)
+            self.assertLess(evidence["lift_interval"]["lower"], evidence["lift_interval"]["upper"])
+            self.assertEqual(evidence["skills"][0], {
+                "name": "materialize-demo", "digest_scheme": "skill-tree-sha256-v2",
+                "digest": self.digest,
+            })
+            self.assertEqual(evidence["skills"][1]["name"], "other")
+            for required in (self.digest, evidence["dataset_digest"], "6 / 6", "8.33%",
+                             "100.00%", "95% interval", "skill-tree-sha256-v2", "| Model | Unknown |", "codex"):
+                self.assertIn(required, markdown.read_text(encoding="utf-8"))
+
+            legacy = json.loads(benchmark.read_text(encoding="utf-8"))
+            legacy.pop("evidence_plan")
+            for row in legacy["results"]:
+                row["metadata"].pop("skill_revisions", None)
+            old_benchmark = root / "old-benchmark.json"
+            old_benchmark.write_text(json.dumps(legacy), encoding="utf-8")
+            self.assertEqual(run_cli("export-evidence", old_benchmark, "--out", out), (0, "", ""))
+            old_evidence = json.loads(artifact.read_bytes())
+            self.assertEqual(old_evidence["skills"], [
+                {"name": "materialize-bench", "digest_scheme": None, "digest": None},
+            ])
+            self.assertEqual(old_evidence["baseline_outcome_rate"], evidence["baseline_outcome_rate"])
+
+            partial = root / "partial.json"
+            missing = next(runs.rglob("evidence-5/**/without_skill/run-2"))
+            shutil.rmtree(missing)
+            self.assertEqual(run_cli("benchmark", manifest, "--runs", runs, "--out", partial)[0], 0)
+            self.assertEqual(run_cli("export-evidence", partial, "--out", out), (0, "", ""))
+            incomplete = json.loads(artifact.read_bytes())
+            self.assertEqual(incomplete["coverage"], {"complete_cases": 5, "planned_cases": 6})
+            self.assertIsNone(incomplete["baseline_outcome_rate"])
+            self.assertIsNone(incomplete["with_skill_outcome_rate"])
+            self.assertIsNone(incomplete["lift_interval"])
+
+            (skill / "references" / "label.txt").write_text("changed reference\n", encoding="utf-8")
+            self.assertNotEqual(sb.skill_revision_sha256(skill), self.digest)
+            self.assertEqual(run_cli("export-evidence", benchmark, "--out", out), (0, "", ""))
+            self.assertEqual((artifact.read_bytes(), markdown.read_bytes()), original)
+
+    def test_reports_only_the_model_that_served_comparable_arms(self):
+        haiku = "claude-haiku-4-5-20251001"
+        sonnet = "claude-sonnet-4-6"
+        cases = [
+            ("different defaults", None, (haiku,), (sonnet,), "not_requested", None, False),
+            ("mixed requested", haiku, (haiku, sonnet), (haiku, sonnet), "mixed", None, False),
+            ("mixed default", None, (haiku, sonnet), (haiku, sonnet), "not_requested", None, False),
+            ("known and unknown", None, (haiku,), (), "unavailable", None, False),
+            ("mismatched request", haiku, (sonnet,), (sonnet,), "mismatch", None, False),
+            ("same default", None, (haiku,), (haiku,), "not_requested", haiku, True),
+            ("same alias target", "haiku", (haiku,), (haiku,), "match", haiku, True),
+            ("unreported", haiku, (), (), "unavailable", None, True),
+        ]
+        for label, requested, control, treatment, status, model, comparable in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest = make_eval_repo(root)
+                streams = []
+                for answer, reported in (("omitted", control), ("alpha", treatment)):
+                    records = claude_stream_records(answer=answer)
+                    messages = [row["message"] for row in records if row["type"] == "assistant"]
+                    for i, message in enumerate(messages):
+                        if reported:
+                            message["model"] = reported[min(i, len(reported) - 1)]
+                    streams.append("\n".join(map(json.dumps, records)))
+                stub = root / "claude"
+                stub.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "from pathlib import Path\n"
+                    "import sys\n"
+                    "sys.stdin.read()\n"
+                    f"print({streams!r}[Path('skills').is_dir()])\n",
+                    encoding="utf-8",
+                )
+                stub.chmod(0o755)
+                tasks, runs, saved = root / "tasks.jsonl", root / "runs", root / "benchmark.json"
+                models = ["--models", requested] if requested else []
+                self.assertEqual(run_cli("prepare", manifest, "--out", tasks, *models)[0], 0)
+                code, _, stderr = run_cli("run-claude", "--tasks", tasks, "--runs", runs, "--claude-bin", stub)
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(run_cli("benchmark", manifest, "--runs", runs, "--out", saved)[0], 0)
+                benchmark = json.loads(saved.read_bytes())
+                self.assertEqual(benchmark["answer_design"]["complete"], True)
+                with_skill = next(row for row in benchmark["results"] if row["variant"] == "with_skill")
+                self.assertEqual(with_skill["metadata"]["served_models"], list(treatment))
+                self.assertEqual(with_skill["metadata"]["served_model_check"], status)
+                out = root / "evidence"
+                self.assertEqual(run_cli("export-evidence", saved, "--out", out), (0, "", ""))
+                evidence = json.loads((out / "benchmark-evidence.json").read_bytes())
+                self.assertEqual(evidence["model"], model)
+                self.assertEqual(evidence["coverage"], {"complete_cases": int(comparable), "planned_cases": 1})
+                self.assertEqual(evidence["baseline_outcome_rate"], 0.0 if comparable else None)
+                self.assertEqual(evidence["with_skill_outcome_rate"], 1.0 if comparable else None)
+                self.assertIn(f"| Model | {model or 'Unknown'} |", (out / "BENCHMARK.md").read_text(encoding="utf-8"))
 
 
 class ReportFormatsTests(unittest.TestCase):
