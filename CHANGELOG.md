@@ -4,6 +4,10 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Add `overlap-scan` and `overlap-evaluate`. Rank skill descriptions with a local embedding
+  command. Select a pair to measure per-skill activation and four-arm task outcomes on its
+  scanned revisions. See [evaluate semantic overlap](docs/commands.md#evaluate-semantic-overlap).
+
 - Add `skill-benchmark interaction` to compare task outcomes with neither, either,
   or both of two skills. The report records both skill revisions, complete cases,
   and the gain over the better individual skill. See

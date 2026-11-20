@@ -21598,6 +21598,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     """The complete CLI surface, buildable without parsing. Split out of
     main() so tests can enumerate every subcommand and flag (e.g. the
     README-coverage doc-sync guard) without invoking anything."""
+    from agent_capabilities import surface_cli_options
+
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -21637,6 +21639,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", help="write the JSON report here instead of stdout")
     p.add_argument("--report-only", action="store_true", help="report retained evidence without running an agent")
     add_surface_cli_options(p, "answer")
+
+    p = sub.add_parser("overlap-scan", help="rank candidate skill pairs using description embeddings")
+    p.add_argument("collection", help="directory containing the skills to scan")
+    p.add_argument("--embed-cmd", required=True, help="embedding executable and arguments; receives skill descriptions on stdin")
+    p.add_argument("--embedding-model", required=True, help="record the name or revision of the embedding model")
+    p.add_argument("--timeout", type=int, default=60)
+    p.add_argument("--out", help="write the scan JSON here instead of stdout")
+
+    p = sub.add_parser("overlap-evaluate", help="run activation and outcome evaluations on a ranked skill pair")
+    p.add_argument("scan", help="JSON report from overlap-scan")
+    p.add_argument("manifest", help="reviewed manifest with trigger and answer cases")
+    p.add_argument("--pair", type=int, required=True, help="pair rank from the saved scan")
+    p.add_argument("--runs", required=True, help="new directory for the selected pair and both evaluations")
+    overlap_backends = {name: backend for name, backend in BACKENDS.items()
+                        if backend.answer is not None and backend.trigger is not None}
+    p.add_argument("--agent", choices=sorted(overlap_backends), required=True)
+    p.add_argument("--model", required=True, help="model for both evaluations")
+    p.add_argument("--split", choices=sorted(VALID_SPLITS))
+    p.add_argument("--k", dest="runs_per_variant", type=int, default=1, help="repetitions per query and per outcome arm")
+    p.add_argument("--timeout", type=int, default=DEFAULT_RUNNER_TIMEOUT_S, help="seconds per agent call")
+    add_surface_cli_options(p, "answer", registrations=overlap_backends)
+    p.set_defaults(**dict.fromkeys(option.dest for option in surface_cli_options("answer", registrations=overlap_backends)))
 
     p = sub.add_parser("export-jetty")
     p.add_argument("manifest")
@@ -22070,6 +22094,37 @@ def interaction_command(args: argparse.Namespace) -> int:
     )
 
 
+def overlap_scan_command(args: argparse.Namespace) -> int:
+    from skill_overlap import scan_overlap
+
+    out = Path(args.out) if args.out else None
+    try:
+        scan = scan_overlap(Path(args.collection).resolve(), command=args.embed_cmd,
+                            model=args.embedding_model, timeout=args.timeout, out=out)
+        emit_report(scan, out)
+    except (AblationError, OSError, ValueError) as exc:
+        die(str(exc))
+    return 0
+
+
+def overlap_evaluate_command(args: argparse.Namespace) -> int:
+    from skill_overlap import evaluate_overlap
+
+    try:
+        code, report = evaluate_overlap(
+            Path(args.scan).resolve(), rank=args.pair, manifest=Path(args.manifest).resolve(),
+            runs=Path(args.runs).resolve(), agent=args.agent, model=args.model, split=args.split,
+            repetitions=args.runs_per_variant, timeout=args.timeout,
+            options={key: value for key, value in {
+                "claude_bin": args.claude_bin, "codex_cmd": args.codex_cmd, "vibe_cmd": args.vibe_cmd,
+            }.items() if value is not None},
+        )
+        emit_report(report, None)
+    except (AblationError, OSError, TypeError, ValueError) as exc:
+        die(str(exc))
+    return code
+
+
 @stops_on_signal
 def main() -> int:
     parser = build_arg_parser()
@@ -22103,6 +22158,8 @@ def main() -> int:
         CLICommand.COMPARE_TASKS: compare_tasks,
         CLICommand.COMPARE_RESULTS: compare_results,
         CLICommand.TRIGGER_COMPARE: trigger_compare,
+        CLICommand.OVERLAP_SCAN: overlap_scan_command,
+        CLICommand.OVERLAP_EVALUATE: overlap_evaluate_command,
         CLICommand.TRIGGER_DISTRACTORS: trigger_distractors,
         CLICommand.TRIGGER_DISTRACTOR_REPORT: trigger_distractor_report,
         CLICommand.MIGRATE: migrate_command,

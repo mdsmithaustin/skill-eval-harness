@@ -46,6 +46,8 @@ class CLICommand(str, Enum):
     COMPARE_TASKS = "compare-tasks"
     COMPARE_RESULTS = "compare-results"
     TRIGGER_COMPARE = "trigger-compare"
+    OVERLAP_SCAN = "overlap-scan"
+    OVERLAP_EVALUATE = "overlap-evaluate"
     TRIGGER_DISTRACTORS = "trigger-distractors"
     TRIGGER_DISTRACTOR_REPORT = "trigger-distractor-report"
     MIGRATE = "migrate"

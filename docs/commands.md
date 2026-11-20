@@ -1115,6 +1115,46 @@ The form takes case id, model, variant, run number, an optional judge assertion 
 
 Each entry is `{case_id, variant, run_number, model?, assertion?, verdict?, note?}` and needs a verdict, a note, or both; `variant` must be a real arm (`with_skill`, `without_skill`, `old_skill`, or `ablation:<id>`), because the entry's run is the same `RunCoordinate` that judge tasks and result rows use; `run_number` defaults to 1, and the `good`/`bad` verdicts of the first form are read as `pass`/`fail`. A later entry for the same run and assertion replaces the earlier one. An invalid new entry gets HTTP 400 and leaves the file unchanged; an old entry that no longer validates is kept verbatim under `unparsed_entries` and ignored by the readers.
 
+## Evaluate semantic overlap
+
+Use `skill-benchmark overlap-scan` to rank candidate pairs by cosine similarity of their `SKILL.md` descriptions. Pass a local embedding command to scan offline. The command receives all descriptions in one JSON object on stdin, `{"texts": ["...", "..."]}`. It returns `{"embeddings": [[...], [...]]}` with one finite, nonzero vector per text in the same order. Supply an executable and its arguments as `--embed-cmd` and record the model or model revision with `--embedding-model`. Choose an encoder you trust with the descriptions. The harness sends text to that executable, which can contact a provider if you explicitly configure it to do so.
+
+```bash
+skill-benchmark overlap-scan ./skills --embed-cmd "$PWD/embed-local" \
+  --embedding-model LOCAL_MODEL_ID --out /tmp/overlap-scan.json
+```
+
+On macOS with the English sentence embedding installed, save this adapter as `embed-local.swift` and compile it with `swiftc embed-local.swift -o embed-local`. Record `macOS-NLEmbedding-en` as the model ID.
+
+```swift
+import Foundation
+import NaturalLanguage
+
+struct Request: Decodable { let texts: [String] }
+struct Response: Encodable { let embeddings: [[Double]] }
+let request = try JSONDecoder().decode(Request.self, from: FileHandle.standardInput.readDataToEndOfFile())
+guard let model = NLEmbedding.sentenceEmbedding(for: .english) else {
+    FileHandle.standardError.write(Data("Local English sentence embeddings are unavailable\n".utf8))
+    exit(1)
+}
+let vectors = request.texts.compactMap { model.vector(for: $0) }
+guard vectors.count == request.texts.count else { exit(2) }
+FileHandle.standardOutput.write(try JSONEncoder().encode(Response(embeddings: vectors)))
+```
+
+The `pairs` array gives the rank and score for each pair. Look up the pair's `skill_paths` in the report's `skills` object to read the exact descriptions and their source paths. Higher scores indicate greater similarity according to the selected model. Use them to decide which pair to measure.
+
+Use `skill-benchmark overlap-evaluate` with the chosen rank and a reviewed benchmark manifest. Declare both selected skills using the manifest's existing `skill_paths` entries. Write trigger cases with `expected_skills`, `forbidden_skills`, or both. The report lists excluded queries when they have no per-skill expectations or refer to skills outside the pair. Include answer cases suitable for the [four-arm experiment](two-skill-experiments.md).
+
+```bash
+skill-benchmark overlap-evaluate /tmp/overlap-scan.json evals/shared-benchmark.json \
+  --pair 1 --agent claude --model MODEL_ID --split tune --k 2 --runs /tmp/overlap-run
+```
+
+Choose an agent with both trigger and answer support. Choosing a hosted agent starts model calls. Use a local wrapper through the agent's normal executable option for offline evaluation. For each repetition, the command runs one agent call per included trigger query and four calls per answer case. Choose a new `--runs` directory outside both skill roots. A run directory can sit inside the scanned collection. Scans skip directories marked `.skill-overlap-run`, which the evaluator creates before staging any skills. If a skill changed since the scan, scan again before evaluating it.
+
+`overlap.json` shows the selected skill digests, activation by query and repetition, and task outcome rates for neither skill, A, B, and both. A null activation means the runner has no complete observation of that skill. The command exits `2` if either run is incomplete. The full trigger and interaction reports include the trigger evidence, the outcome comparisons, and any uncertainty or missing evidence. The trigger report's whole-tree hash binds to the staged pair under `skills/`. The interaction report records the same two staged skill digests. The workflow writes reports and run artifacts to the specified output locations.
+
 ## Trigger matrix (activation across agents and models)
 
 ```bash
