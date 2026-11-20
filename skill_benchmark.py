@@ -1386,7 +1386,7 @@ def validate_case_assertion(cid: str, label: str, index: int, assertion: Any, pa
 SUPPORTED_MANIFEST_VERSIONS = {1, 2}
 
 
-def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[str, Any]:
+def validate_manifest(path: Path, allow_missing_holdback: bool = True, *, resolve_skills: bool = True) -> dict[str, Any]:
     manifest = load_manifest_source(path)
     # Version 1 stays fully supported with behavior-preserving defaults
     # (severity, oracle tiers); version 2 makes those defaults explicit. The
@@ -1650,14 +1650,14 @@ def validate_manifest(path: Path, allow_missing_holdback: bool = True) -> dict[s
             validate_ablation_removal(ablation, manifest)
         except AblationError as exc:
             die(f"ablation {aid}: {exc}")
-    require_resolvable_skill_paths(path, manifest)
-    for label in ("skill_paths", "old_skill_paths"):
-        roots = manifest.get(label) or []
-        if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
-            continue
-        for first, second, key in skill_root_key_collisions(repo_root_for_manifest(path), roots):
-            die(f"manifest.{label}: {first!r} and {second!r} both mount as skill directory {key!r}; "
-                "agents list skills by directory name, so rename one directory")
+    if resolve_skills:
+        require_resolvable_skill_paths(path, manifest)
+        for label in ("skill_paths", "old_skill_paths"):
+            roots = manifest.get(label) or []
+            if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
+                continue
+            for first, second, key in skill_root_key_collisions(repo_root_for_manifest(path), roots):
+                die(f"manifest.{label}: {first!r} and {second!r} both mount as skill directory {key!r}; agents list skills by directory name, so rename one directory")
     return manifest
 
 
@@ -21362,6 +21362,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ablation-dir", default=None, help="materialize declared-removal ablations into this dir and point their rows at the altered tree")
     p.add_argument("--models", help="comma-separated target models; fans rows out per model (third axis beside variant and run), with run_dir gaining a model segment when two or more are given")
 
+    p = sub.add_parser("interaction", help="measure task outcomes with neither, either, or both skills")
+    p.add_argument("manifest")
+    p.add_argument("--skill-a", help="first SKILL.md or skill directory")
+    p.add_argument("--skill-b", help="second SKILL.md or skill directory")
+    p.add_argument("--agent", choices=sorted(AGENT_BACKENDS))
+    p.add_argument("--model", help="explicit model id to use in all four arms")
+    p.add_argument("--runs", required=True, help="new directory for the interaction plan and run artifacts")
+    p.add_argument("--split", choices=sorted(VALID_SPLITS))
+    p.add_argument("--k", "--runs-per-variant", dest="runs_per_variant", type=int,
+                   help="repetitions per case in each arm, default 1")
+    p.add_argument("--timeout", type=int, default=DEFAULT_RUNNER_TIMEOUT_S)
+    p.add_argument("--out", help="write the JSON report here instead of stdout")
+    p.add_argument("--report-only", action="store_true", help="report retained evidence without running an agent")
+    add_surface_cli_options(p, "answer")
+
     p = sub.add_parser("export-jetty")
     p.add_argument("manifest")
     p.add_argument("--split", choices=sorted(VALID_SPLITS))
@@ -21767,6 +21782,17 @@ def validate_cli_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def interaction_command(args: argparse.Namespace) -> int:
+    from skill_interaction import run_interaction
+
+    return run_interaction(
+        manifest=Path(args.manifest).resolve(), runs=Path(args.runs).resolve(),
+        sources=(args.skill_a, args.skill_b), model=args.model, agent=args.agent,
+        split=args.split, repetitions=args.runs_per_variant, timeout=args.timeout,
+        out=args.out, report_only=args.report_only, options=surface_option_values(args, "answer"),
+    )
+
+
 @stops_on_signal
 def main() -> int:
     parser = build_arg_parser()
@@ -21782,6 +21808,7 @@ def main() -> int:
         CLICommand.AGENT_CAPABILITIES: agent_capabilities_command,
         CLICommand.VALIDATE: validate_cli_command,
         CLICommand.PREPARE: prepare,
+        CLICommand.INTERACTION: interaction_command,
         CLICommand.IMPORT_TRACE: import_trace,
         CLICommand.GRADE: grade,
         CLICommand.JUDGE: judge_command,

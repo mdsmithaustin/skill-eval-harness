@@ -21,6 +21,7 @@ class CLICommand(str, Enum):
     AGENT_CAPABILITIES = "agent-capabilities"
     VALIDATE = "validate"
     PREPARE = "prepare"
+    INTERACTION = "interaction"
     EXPORT_JETTY = "export-jetty"
     RUN_JETTY = "run-jetty"
     IMPORT_JETTY_RESULTS = "import-jetty-results"

@@ -94,6 +94,10 @@ skill-benchmark prepare ../repo/evals/shared-benchmark.json --include-ablations 
 
 Use `--include-answer-key` only for judge/debug tasks, never for generation runs.
 
+## Run a two-skill outcome experiment
+
+`skill-benchmark interaction MANIFEST --skill-a PATH --skill-b PATH --agent AGENT --model MODEL --runs DIR` runs neither skill, A alone, B alone, and both against the same cases. Use `--split` to select cases, `--k` to repeat each case in each arm, and `--out` to save the JSON report. `--report-only` regenerates the report from an existing run directory. See the [two-skill experiment guide](two-skill-experiments.md) for dataset and report details.
+
 ## Import runner traces
 
 Normalize a raw JSONL trace into `events.json` and `metrics.json` for process and efficiency assertions:

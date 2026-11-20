@@ -549,6 +549,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-benchmark agent-capabilities` | List the unified backend registry, capability gates, trace dialect, smoke policy, and answer/trigger/judge surfaces as JSON. |
 | `skill-benchmark validate` | Check manifest shape, fixture paths, regex, oracle paths, and prompt-leakage. |
 | `skill-benchmark prepare` | Emit answer-key-safe task rows per case/variant/run (`--include-ablations` materializes ablated trees). |
+| `skill-benchmark interaction` | [Measure task outcomes with neither, either, or both skills](docs/two-skill-experiments.md). |
 | `skill-benchmark materialize-ablations` | Write the declared ablated skill trees to disk without preparing tasks — inspect or diff an ablation before spending a run on it. |
 | `skill-benchmark grade` | Score saved outputs into per-run rows; emit pending judge tasks. |
 | `skill-benchmark benchmark` | Aggregate into variant summaries, paired lift + significance + `interval` + `noise_check` (`--min-lift`), by-model, cost, `run_endings`, and case flags. |
@@ -666,6 +667,7 @@ skill-eval-harness/
 ├── TODO.md
 ├── pyproject.toml
 ├── skill_benchmark.py          # the CLI, grading, reporting, and runner adapters
+├── skill_interaction.py        # four-arm task outcome experiments
 ├── run_pi_trigger_eval.py      # skill-pi-trigger-eval: the trigger matrix with the Pi adapter alone
 ├── run_trigger_matrix.py       # activation matrix across agents × models (claude/codex/pi/vibe/stub adapters)
 ├── skill_inputs.py            # manifest loading, skill materialization, and treatment identity
