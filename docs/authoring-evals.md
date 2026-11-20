@@ -59,7 +59,8 @@ claude-api skill uses (the reasoning is in
 
 1. **Real sessions and requests** where the skill should have helped. Before a transcript becomes
    a committed fixture, check whether a retention policy will force you to delete it and whether
-   it holds PII that cannot sit in the repo.
+   it holds PII that cannot sit in the repo. For a Codex session, follow the
+   [reviewed regression case workflow](commands.md#turn-a-codex-session-into-a-regression-case).
 2. **Bug reports and manual fixes.** A correction you made by hand after the skill ran is a case
    the skill failed.
 3. **Five to ten hand-written seeds.** These lean toward what is memorable to you rather than

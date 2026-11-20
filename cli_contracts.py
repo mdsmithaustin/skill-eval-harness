@@ -26,6 +26,8 @@ class CLICommand(str, Enum):
     RUN_JETTY = "run-jetty"
     IMPORT_JETTY_RESULTS = "import-jetty-results"
     IMPORT_TRACE = "import-trace"
+    IMPORT_CASE = "import-case"
+    PROMOTE_CASE = "promote-case"
     RUN_CODEX = "run-codex"
     RUN_CLAUDE = "run-claude"
     RUN_AGENT = "run-agent"
@@ -67,6 +69,7 @@ _PATH_ARGUMENTS = frozenset({
     "truth", "results", "out_checklist", "history", "add", "workspace",
     "previous_workspace", "skill_path", "truth_out", "cost_history", "md",
     "runs_root", "runs_subdir", "suite_file", "workspace_root", "pins", "out_dir", "distractors",
+    "draft", "review", "fixture_root", "redact_file",
 })
 _PATH_SEQUENCES = frozenset({"manifests"})
 _POSITIVE_NUMBERS = frozenset({

@@ -552,6 +552,8 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-benchmark interaction` | [Measure task outcomes with neither, either, or both skills](docs/two-skill-experiments.md). |
 | `skill-benchmark materialize-ablations` | Write the declared ablated skill trees to disk without preparing tasks — inspect or diff an ablation before spending a run on it. |
 | `skill-benchmark grade` | Score saved outputs into per-run rows; emit pending judge tasks. |
+| `skill-benchmark import-case` | Draft a redacted regression case from a local Codex session. |
+| `skill-benchmark promote-case` | Add a reviewed regression case and its approved fixtures to a JSON manifest. |
 | `skill-benchmark benchmark` | Aggregate into variant summaries, paired lift + significance + `interval` + `noise_check` (`--min-lift`), by-model, cost, `run_endings`, and case flags. |
 | `skill-benchmark render-viewer` | Static or `--serve`d review page with embedded artifacts and iteration diffs; served mode stores pass/fail/unsure verdicts and notes in `feedback.json`. |
 
@@ -673,6 +675,7 @@ skill-eval-harness/
 ├── skill_inputs.py            # manifest loading, skill materialization, and treatment identity
 ├── process_runtime.py         # shared supervisor, recovery, bridge, and stop state
 ├── trace_normalization.py     # trace dialect callbacks, detection, and artifact writing
+├── trace_cases.py             # local session drafts and reviewed regression cases
 ├── agent_clis.py              # provider homes, argv, and isolation helpers
 ├── trigger_identity.py        # derived packaged trigger source identity
 ├── ablation_model.py           # typed ablation/provenance/task value objects

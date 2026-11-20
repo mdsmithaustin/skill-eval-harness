@@ -169,6 +169,7 @@ from skill_inputs import (
     mounted_skills_by_id,
     parse_frontmatter,
     patch_delete_ops,
+    path_copied_with_skill,
     preprocess_ops,
     reference_pointer_ops,
     reject_nonfinite_numbers,
@@ -183,6 +184,7 @@ from skill_inputs import (
     trigger_manifest_identity,
     validate_ablation_removal,
 )
+from trace_cases import ApprovedCase, Draft, import_case_command, lock_manifest
 from trace_normalization import (
     _RAW_TYPE_WORD_BOUNDARY,
     CLAUDE_SESSION_CONTENT_RECORD_TYPES,
@@ -1387,7 +1389,15 @@ SUPPORTED_MANIFEST_VERSIONS = {1, 2}
 
 
 def validate_manifest(path: Path, allow_missing_holdback: bool = True, *, resolve_skills: bool = True) -> dict[str, Any]:
-    manifest = load_manifest_source(path)
+    return validate_manifest_data(
+        load_manifest_source(path), path, allow_missing_holdback, resolve_skills=resolve_skills,
+    )
+
+
+def validate_manifest_data(
+    manifest: dict[str, Any], path: Path, allow_missing_holdback: bool = True,
+    *, resolve_skills: bool = True,
+) -> dict[str, Any]:
     # Version 1 stays fully supported with behavior-preserving defaults
     # (severity, oracle tiers); version 2 makes those defaults explicit. The
     # `validate` CLI points version-1 manifests at `migrate`.
@@ -6229,6 +6239,48 @@ def import_trace(args: argparse.Namespace) -> int:
         retain_invalid_provider_trace=not trace_utf8_valid,
         trace_utf8_valid=trace_utf8_valid,
     )
+    return 0
+
+
+def promote_case_command(args: argparse.Namespace) -> int:
+    path = Path(args.manifest).resolve()
+    try:
+        if path.suffix.lower() in {".yaml", ".yml"}:
+            raise ValueError("promote-case writes JSON manifests; use a JSON manifest")
+        draft = Draft.load(Path(args.draft))
+        review_path = Path(args.review)
+        approval = ApprovedCase.load(draft, review_path)
+        row = approval.manifest_row()
+        with lock_manifest(path):
+            manifest = validate_manifest(path)
+            repo_root = repo_root_for_manifest(path)
+            skill_paths = [*manifest["skill_paths"], *(manifest.get("old_skill_paths") or [])]
+            for label, candidate_path in (("manifest", path), ("draft", draft.path), ("review", review_path)):
+                if path_copied_with_skill(candidate_path, repo_root, skill_paths):
+                    raise ValueError(f"the {label} would be copied into the runner's skill directory")
+            existing = next((case for case in iter_cases(manifest) if case["id"] == draft.case_id), None)
+            if existing is not None:
+                if existing != row:
+                    raise ValueError(f"case {draft.case_id} already exists with different content")
+                approval.install_fixtures(path.parent)
+                print(f"Reused case {draft.case_id} in {path}")
+                return 0
+            candidate = {**manifest, "cases": [*manifest.get("cases", []), row]}
+            source = load_json(path)
+            source.setdefault("cases", []).append(row)
+            installed = approval.install_fixtures(path.parent)
+            try:
+                validate_manifest_data(candidate, path)
+                if prompt_assertion_leakage_findings({"cases": [row]}, path, min_chars=1):
+                    die(f"{draft.case_id}: an assertion value appears in the prompt (leakage)")
+            except (SystemExit, ValueError, TypeError, OSError):
+                if installed is not None:
+                    shutil.rmtree(installed)
+                raise
+            _atomic_write_text(path, json.dumps(source, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+    except (TypeError, ValueError, OSError) as exc:
+        die(str(exc))
+    print(f"Promoted case {draft.case_id} in {path}")
     return 0
 
 
@@ -21432,6 +21484,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-metrics")
     p.add_argument("--write-metadata", action="store_true", help="deprecated compatibility flag; metadata.json is always written with telemetry v3")
 
+    p = sub.add_parser("import-case", help="draft a regression case from a local Codex session")
+    p.add_argument("--trace", required=True, help="Codex rollout JSONL path")
+    p.add_argument("--out-dir", required=True, help="private directory for drafts")
+    p.add_argument("--fixture-root", help="directory containing the original replay files")
+    p.add_argument("--require-file", action="append", default=[], help="required replay path relative to the fixture root; repeat for each file")
+    p.add_argument("--redact-file", help="private UTF-8 file of sensitive values, one per line")
+
+    p = sub.add_parser("promote-case", help="append a reviewed regression draft to a JSON manifest")
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--draft", required=True, help="directory printed by import-case")
+    p.add_argument("--review", required=True, help="JSON with approval, fixture digests, expected behavior, and assertions")
+
     p = sub.add_parser("run-codex")
     p.add_argument("--tasks", required=True, help="prepared task JSONL from skill-benchmark prepare")
     p.add_argument("--runs", required=True, help="output runs directory")
@@ -21810,6 +21874,8 @@ def main() -> int:
         CLICommand.PREPARE: prepare,
         CLICommand.INTERACTION: interaction_command,
         CLICommand.IMPORT_TRACE: import_trace,
+        CLICommand.IMPORT_CASE: import_case_command,
+        CLICommand.PROMOTE_CASE: promote_case_command,
         CLICommand.GRADE: grade,
         CLICommand.JUDGE: judge_command,
         CLICommand.BENCHMARK: benchmark,

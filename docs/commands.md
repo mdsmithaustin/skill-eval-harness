@@ -110,6 +110,83 @@ skill-benchmark import-trace \
   --write-metadata
 ```
 
+## Turn a Codex session into a regression case
+
+Use `import-case` with a saved Codex `rollout-*.jsonl` file. The command reads the
+latest text request and its recorded final answer when available. It looks for common
+file extensions in the request, paths in structured `read_file` calls, and literal
+single-file `cat` calls. It also reads a single `await tools.exec_command(...)` call
+with a literal JSON argument from the Codex `exec` tool. It maps tool paths relative
+to the session's original working directory, accounting for each call's working directory.
+
+Shell calls outside the supported single-file form appear in `unresolved_inputs`.
+For these commands, attachments, and paths outside the original working directory,
+add replay files with repeated `--require-file` options or supply them during review.
+
+```bash
+skill-benchmark import-case --trace /private/rollout.jsonl --out-dir /private/drafts \
+  --fixture-root /private/replay --require-file logs.csv --redact-file /private/secrets.txt
+```
+
+`--fixture-root` lets the importer copy replay files from that directory. Without it,
+the importer lists the required paths as missing. The command rejects symlinks and
+parent traversal. It copies UTF-8 files after replacing common credential patterns and
+the exact values in `--redact-file`, one value per line. The same redaction covers the
+request and recorded answer. The draft includes a session digest, a trace digest, the
+request's line number, and the available and missing inputs. An identical import reuses
+the draft. If the trace, fixture root, required paths, or redaction values change, choose
+a new private `--out-dir` and review that draft. Use a new directory if the importer
+asks you to refresh an older draft. Review all draft text for sensitive details before
+promotion. Keep the raw transcript and the redaction list private.
+
+Keep the manifest, draft, and review outside the tree that the runner mounts as a skill.
+An `evals/` directory is excluded from that tree. Use the path printed by `import-case`
+as the draft directory and supply missing inputs under its `fixtures/` directory.
+Review binary files before adding them. Check `draft.json` for missing context. You
+can edit the prompt to make it stand alone and adjust `required_inputs` for incidental
+reads. The runner mounts files by basename. If two paths share a basename, give their
+replay copies distinct filenames and update `required_inputs` and the prompt.
+
+If the latest turn was interrupted, recover the failed output from that turn. Save the
+redacted text as `recorded-output.txt` in the draft before promotion. An image-only
+latest turn needs a text transcription and its reviewed attachments before it can
+become a text regression case.
+
+Write a separate `review.json` with your own expected outcome, the assertions that check it,
+and the SHA-256 digest of each approved fixture. Use fixture paths relative to the
+draft's `fixtures/` directory. The commands below use `CASE_ID` for the draft directory
+name. For example, get the digest for `logs.csv` with
+`shasum -a 256 /private/drafts/"$CASE_ID"/fixtures/logs.csv`.
+If `unresolved_inputs` lists entries, inspect them, add any required files to the draft
+and `required_inputs`, then set `"unresolved_inputs_reviewed": true` in the review.
+
+```json
+{
+  "approved": true,
+  "expected_behavior": ["Return the number of error entries."],
+  "assertions": [{"type": "contains", "value": "3 errors"}],
+  "fixtures": {"logs.csv": "REPLACE_WITH_SHA256"}
+}
+```
+
+```bash
+skill-benchmark promote-case --manifest evals/shared-benchmark.json \
+  --draft /private/drafts/"$CASE_ID" --review /private/review.json
+skill-benchmark validate evals/shared-benchmark.json --strict-leakage
+skill-benchmark prepare evals/shared-benchmark.json --split tune --out /private/tasks.jsonl
+```
+
+Promotion requires every listed input and its approved digest. It validates the case with
+the manifest and checks the prompt for leaked literal assertion values before writing.
+The manifest receives a `tune` case. It links only to copies of the reviewed
+fixtures. The expected outcome and assertions stay in the manifest for grading. A repeat
+promotion with the same review and files reuses the case.
+
+Copy `recorded-output.txt` to `RUNS/CASE_ID/with_skill/output.md` and run
+`skill-benchmark grade evals/shared-benchmark.json --runs RUNS --variant with_skill`.
+Check that the recorded failure fails your assertion. Replace the output with a corrected
+answer and run the same command to check that the assertion passes.
+
 ## Run Codex JSONL tasks
 
 The artifact descriptions in this section apply to ordinary answer rows.
