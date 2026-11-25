@@ -606,6 +606,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 
 | Command | What it does |
 |---|---|
+| `skill-benchmark export-langsmith` | [Preview or upload native and imported SCBench traces](docs/langsmith.md) for skill tuning. |
 | `skill-benchmark export-anthropic` | Emit an Anthropic-skill-creator-compatible `benchmark.json`. |
 | `skill-benchmark compare-tasks` / `skill-benchmark compare-results` | Blind A/B comparison export and scoring. |
 | `skill-benchmark export-jetty` / `skill-benchmark run-jetty` / `skill-benchmark import-jetty-results` | Jetty runbook-mode export, execute, and import (optional; see the [Jetty adapter](docs/commands.md#jetty-adapter)). |
@@ -673,6 +674,7 @@ skill-eval-harness/
 ├── pyproject.toml
 ├── skill_benchmark.py          # the CLI, grading, reporting, and runner adapters
 ├── skill_interaction.py        # four-arm task outcome experiments
+├── langsmith_export.py         # Post-run trace and feedback export
 ├── skill_overlap.py            # Description embedding scan and selected-pair evaluation
 ├── run_pi_trigger_eval.py      # skill-pi-trigger-eval: the trigger matrix with the Pi adapter alone
 ├── run_trigger_matrix.py       # activation matrix across agents × models (claude/codex/pi/vibe/stub adapters)

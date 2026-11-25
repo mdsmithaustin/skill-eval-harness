@@ -19,6 +19,9 @@ All notable public changes are listed here. Release tags are the source of truth
   session and add it to a JSON benchmark once a reviewer approves the assertions
   and replay fixtures. See [the regression workflow](docs/commands.md#turn-a-codex-session-into-a-regression-case).
 
+- Add `export-langsmith` to preview or upload native benchmark and SCBench traces.
+  See [review skill experiments in LangSmith](docs/langsmith.md).
+
 - Export revision-bound evidence as JSON and `BENCHMARK.md` from a saved answer benchmark.
 
 ## v0.7.0 — 2026-11-11

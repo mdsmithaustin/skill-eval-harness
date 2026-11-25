@@ -1293,3 +1293,7 @@ Each attempt contains its identity, run metadata, observed events, and outcomes 
 `--study` joins `checkpoints.jsonl` on arm, run ID, problem, and checkpoint. `--review-evidence` accepts a paired `review-value-replay.json` and `review-value-confirmations.json` from one review study. A replay row's lead rollout filename must match a file at the archived checkpoint before the importer attaches matching confirmation rows from that bundle. Replay outcomes identify tests gained and lost between snapshots. Source paths beginning with `study/` and `review/` resolve against the supplied directories. Other source paths resolve against the run directory.
 
 Each input must resolve inside its supplied evidence directory. The output path must be distinct from every input, including links to the same file. The index is a local analysis artifact. It can contain reviewer replies and hidden-test names. Keep it with the study's private evidence.
+
+## LangSmith export
+
+`skill-benchmark export-langsmith` previews the records from a native benchmark or imported SCBench index. Add `--upload` to publish them to your project. [Command examples and data selection](langsmith.md)
