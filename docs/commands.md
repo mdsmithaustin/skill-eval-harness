@@ -1276,11 +1276,13 @@ RUN_JETTY_SMOKE=1 JETTY_API_TOKEN=... JETTY_SMOKE_COLLECTION=<your-collection> \
 
 ## Import a SlopCodeBench run
 
+Set `SCB_RUN` to your archived `<arm>/<run_id>` directory. For a study, set `SCB_STUDY` to its directory containing `checkpoints.jsonl`. For review replay, set `SCB_REVIEW` to the matching bundle directory. Omit either optional argument when that evidence is unavailable.
+
 ```sh
 skill-benchmark import-scbench \
-  --run-dir outputs/arms/codex-pstack/20261118T132523 \
-  --study analysis/fresh-62 \
-  --review-evidence analysis/reviewer-study \
+  --run-dir "${SCB_RUN:?set SCB_RUN to the archived run directory}" \
+  --study "${SCB_STUDY:?set SCB_STUDY or omit --study}" \
+  --review-evidence "${SCB_REVIEW:?set SCB_REVIEW or omit --review-evidence}" \
   --out local/checkpoints.json
 ```
 

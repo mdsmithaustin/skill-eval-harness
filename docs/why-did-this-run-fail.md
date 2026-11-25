@@ -353,3 +353,9 @@ can appear under diagnostic `observed`, and saved validation defects affect only
 diagnostic availability. Existing grades and CI gates retain their original
 meaning. See [the command reference](commands.md#optional-verifier-diagnostics)
 for opt-ins, availability states, and reason codes.
+
+## Investigate a SlopCodeBench checkpoint
+
+[Import the archived arm](commands.md#import-a-slopcodebench-run), then select the problem and checkpoint in the index's `attempts` array. Read the tool calls and messages in order. Open the cited source line for the action you want to investigate. An explicit reviewer pass describes the code the reviewer saw. A later lead edit can change what the hidden tests evaluate.
+
+When the study includes a review replay, compare the `pre_review_passed` and `final_passed` outcomes and inspect any `test_gained` or `test_lost` records. To test a proposed skill edit, rerun the same task with the candidate revision and record the revision on import.

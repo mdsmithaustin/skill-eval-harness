@@ -4,6 +4,8 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Import an archived SlopCodeBench arm with `import-scbench` to inspect checkpoint scores, agent actions, and matching study or replay evidence. [Import a SlopCodeBench run](docs/commands.md#import-a-slopcodebench-run).
+
 - Add `overlap-scan` and `overlap-evaluate`. Rank skill descriptions with a local embedding
   command. Select a pair to measure per-skill activation and four-arm task outcomes on its
   scanned revisions. See [evaluate semantic overlap](docs/commands.md#evaluate-semantic-overlap).
