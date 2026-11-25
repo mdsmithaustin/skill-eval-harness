@@ -87,7 +87,7 @@ a more specific unit.
 | Native and in-process answers | `run-agent`, `run-codex`, `run-claude`, `run-subagent`; Pi answer smoke | one root per prepared attempt; runner invocation and artifact commit | 1, 3 |
 | Two-skill outcome experiments | `interaction` | shared case and grader design, four native answer groups, and the comparison report | 1, 3 |
 | Remote answer execution | `run-jetty` | one root per remote attempt; submit, poll, and download operations with remote links | 3 |
-| Ingestion and artifact mutation | `import-jetty-results`, `import-trace`, `migrate-telemetry`, `compare-results`, `import-case`, `promote-case` | new ingest/migration root; validate then atomic commit, linked to producer/export context | 3, 5 |
+| Ingestion and artifact mutation | `import-scbench`, `import-jetty-results`, `import-trace`, `migrate-telemetry`, `compare-results`, `import-case`, `promote-case` | new ingest/migration root; validate then atomic commit, linked to producer/export context | 3, 5 |
 | Semantic overlap | `overlap-scan`, `overlap-evaluate` | one scan root with the opt-in encoder invocation, or one selection root linked to trigger and answer runs | 3, 5 |
 | Autonomous activation | `skill-trigger-matrix`, `skill-pi-trigger-eval`, `trigger-compare`, `trigger-distractors`, `trigger-distractor-report` | one root per query repetition; bounded comparison root over completed observations | 3, 5 |
 | Deterministic evaluation and judges | `grade`, `judge`, `judge-robustness`, `compare-judges`, `judge-alignment` | one grade root per discovered run; bounded opt-in script/embed operations; judge task, invocation, result-ingest, and analysis operations | 4, 5 |

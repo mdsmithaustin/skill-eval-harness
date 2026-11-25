@@ -25,6 +25,7 @@ class CLICommand(str, Enum):
     EXPORT_JETTY = "export-jetty"
     RUN_JETTY = "run-jetty"
     IMPORT_JETTY_RESULTS = "import-jetty-results"
+    IMPORT_SCBENCH = "import-scbench"
     IMPORT_TRACE = "import-trace"
     IMPORT_CASE = "import-case"
     PROMOTE_CASE = "promote-case"
