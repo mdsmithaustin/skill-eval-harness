@@ -20,12 +20,31 @@ class LangSmithInspectionTests(unittest.TestCase):
             request.write_text(
                 '{"messages":[{"role":"user","content":"private-task"}]}'
             )
+            for uid in ("one", "two"):
+                (capture / f"{uid}.response.json").write_text(
+                    json.dumps({"id": f"msg-{uid}", "content": []})
+                )
+            other = capture / "two.request.json"
+            other.write_text('{"messages":[]}')
+            (capture / "index.jsonl").write_text(
+                "\n".join(
+                    json.dumps(
+                        {
+                            "request_id": uid,
+                            "message_id": f"msg-{uid}",
+                            "request_file": f"{uid}.request.json",
+                            "response_file": f"{uid}.response.json",
+                        }
+                    )
+                    for uid in ("one", "two")
+                )
+            )
             llm = {
                 "kind": "llm",
-                "id": "r",
+                "id": "claude-llm:one",
                 "parent_id": "a",
                 "model": "m",
-                "provider": "openai",
+                "provider": "anthropic",
                 "response_texts": ["private-response"],
                 "timestamp": "2026-11-26T18:00:00Z",
                 "usage": {"input_tokens": 4, "output_tokens": 2},
@@ -93,6 +112,14 @@ class LangSmithInspectionTests(unittest.TestCase):
                 model["dotted_order"].startswith(agent["dotted_order"] + ".")
             )
             self.assertEqual(model["inputs"], json.loads(request.read_bytes()))
+            limited = next(
+                r
+                for r in export(model_content_from=root, model_content_side="response")
+                if r["run_type"] == "llm"
+            )
+            self.assertEqual(limited["inputs"], {})
+            with self.assertRaisesRegex(ValueError, "--model-content-from"):
+                export(model_content_side="request")
             self.assertEqual(model["outputs"]["usage_metadata"], llm["usage"])
             self.assertEqual([r["id"] for r in enriched], [r["id"] for r in baseline])
             index = root / "index.json"
@@ -116,9 +143,23 @@ class LangSmithInspectionTests(unittest.TestCase):
             )
             self.assertEqual(code, 0, error)
             self.assertIn("private-task", output)
+            archived_index = capture / "index.jsonl"
+            saved_index = archived_index.read_bytes()
+            archived_index.unlink()
+            with self.assertRaisesRegex(ValueError, "provider observation"):
+                export(model_content_from=root)
+            archived_index.write_bytes(saved_index)
+            llm["request_body_source"] = other.relative_to(root).as_posix()
+            llm["request_body_digest"] = hashlib.sha256(other.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(ValueError, "provider observation"):
+                export(model_content_from=root)
+            llm["request_body_source"] = request.relative_to(root).as_posix()
+            llm["request_body_digest"] = hashlib.sha256(
+                request.read_bytes()
+            ).hexdigest()
             request.write_text("{}")
             with self.assertRaisesRegex(ValueError, "digest"):
                 export(model_content_from=root)
-            spans[1]["parent_id"] = "r"
+            spans[1]["parent_id"] = llm["id"]
             with self.assertRaisesRegex(ValueError, "cyclic"):
                 export()

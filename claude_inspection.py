@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from datetime import datetime
 from pathlib import Path
 
 Rows = Iterable[tuple[int, dict]]
@@ -358,11 +359,22 @@ class _Inspector:
 
 
 def inspect_stdout(
-    rows: Rows, *, source: str = "trace.jsonl"
+    rows: Rows, *, source: str = "trace.jsonl", capture_root: Path | None = None
 ) -> tuple[list[dict], list[dict]]:
     inspector = _Inspector()
     inspector.read(rows, source)
-    return inspector.finish()
+    events, spans = inspector.finish()
+    if capture_root is not None:
+
+        def checked(path: Path) -> Path:
+            if path.resolve() != path or not path.is_relative_to(capture_root):
+                raise ValueError("Claude capture outside native run")
+            return path
+
+        _bind_capture_files(
+            inspector, spans, capture_root, capture_root / "claude-api", checked
+        )
+    return events, spans
 
 
 def inspect_archive(
@@ -396,66 +408,163 @@ def inspect_archive(
             "prompt_text": payload.decode("utf-8"),
         }
     events, spans = inspector.finish()
-    indexes = sorted(archive.input(workspace / "raw-api").glob("*/index.jsonl"))
-    if indexes:
-        for span in inspector.spans.values():
-            if span["kind"] == "llm":
-                span.update(request_body_available=False, response_body_available=False)
-    for index in indexes:
-        index = archive.input(index)
-        for _, row in read_rows(index):
-            request = inspector.request_ids.get(row.get("request_id"))
-            message = inspector.message_ids.get(row.get("message_id"))
-            if request and message and request != message:
-                continue
-            mid = request or message
-            if mid:
-                _bind_bodies(archive, index, row, inspector.spans[mid])
+    _bind_capture_files(
+        inspector,
+        spans,
+        archive.root,
+        archive.input(workspace / "raw-api"),
+        archive.input,
+    )
     return events, spans
 
 
-def _bind_bodies(archive, index: Path, row: dict, span: dict) -> None:
-    for kind in ("request", "response"):
-        recorded = row.get(f"{kind}_file")
-        if not isinstance(recorded, str):
-            continue
-        filename = Path(recorded)
-        if filename.name != recorded and not (
-            filename.is_absolute()
-            and ".." not in filename.parts
-            and filename.parts[-3:-1] == ("raw-api", index.parent.name)
+def _bind_capture_files(
+    inspector: _Inspector,
+    spans: list[dict],
+    root: Path,
+    capture: Path,
+    checked: Callable[[Path], Path],
+) -> None:
+    if not checked(capture).is_dir():
+        return
+    for span in spans:
+        if span["kind"] == "llm":
+            span.update(request_body_available=False, response_body_available=False)
+    linked = set()
+    for index in sorted(capture.glob("*/index.jsonl")):
+        with checked(index).open("rb") as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                req, msg = row.get("request_id"), row.get("message_id")
+                if not isinstance(req, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", req):
+                    continue
+                if not isinstance(msg, str):
+                    continue
+                request = inspector.request_ids.get(req)
+                message = inspector.message_ids.get(msg)
+                if message and (
+                    (request and request != message)
+                    or (not request and message in inspector.request_ids.values())
+                ):
+                    continue
+                mid = request or message or f"claude-llm:{req}"
+                existing = inspector.spans.get(mid)
+                span = (
+                    existing
+                    if existing is not None
+                    else {
+                        "id": mid,
+                        "kind": "llm",
+                        "name": "Claude request",
+                        "provider": "anthropic",
+                        "evidence": "captured_response",
+                        "ancestry": "unknown",
+                        "request_body_available": False,
+                        "response_body_available": False,
+                        "source": index.relative_to(root).as_posix(),
+                    }
+                )
+                bodies = {}
+                for kind in ("request", "response"):
+                    recorded = row.get(f"{kind}_file")
+                    if not isinstance(recorded, str):
+                        continue
+                    filename = Path(recorded)
+                    if filename.name != recorded and not (
+                        filename.is_absolute()
+                        and ".." not in filename.parts
+                        and filename.parts[-3:-1] == (capture.name, index.parent.name)
+                    ):
+                        continue
+                    if not re.fullmatch(
+                        rf"[a-zA-Z0-9_-]+\.{kind}\.json", filename.name
+                    ):
+                        continue
+                    if kind == "response" and filename.name != f"{req}.response.json":
+                        continue
+                    path = checked(index.parent / filename.name)
+                    payload = _captured_body(path, kind)
+                    if payload is None:
+                        continue
+                    body, digest = payload
+                    if kind == "response" and body.get("id") != msg:
+                        continue
+                    bodies[kind] = body
+                    span.update(
+                        {
+                            f"{kind}_body_available": True,
+                            f"{kind}_body_source": path.relative_to(root).as_posix(),
+                            f"{kind}_body_digest": digest,
+                        }
+                    )
+                if "request" in bodies and (
+                    existing is not None or "response" in bodies
+                ):
+                    linked.add(root / span["request_body_source"])
+                if existing is None and "response" in bodies:
+                    response = bodies["response"]
+                    span["model"] = response.get("model") or row.get("model")
+                    stamp = str(row.get("timestamp", ""))
+                    if re.fullmatch(r"\d{10}(?:\.\d+)?|\d{13}", stamp):
+                        span["timestamp"] = stamp
+                    else:
+                        try:
+                            datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                        except ValueError:
+                            pass
+                        else:
+                            span["timestamp"] = stamp
+                    if isinstance(usage := response.get("usage"), dict):
+                        span["usage"] = _usage(usage)
+                    group = "claude-agent:" + str(row.get("session_id"))
+                    if group in inspector.spans:
+                        span["parent_id"] = group
+                        span["ancestry"] = "recorded_session"
+                    inspector.spans[mid] = span
+                    spans.append(span)
+    for path in sorted(capture.glob("*/*.request.json")):
+        if path in linked or not re.fullmatch(
+            r"[A-Za-z0-9_-]+\.request\.json", path.name
         ):
             continue
-        if not re.fullmatch(rf"[A-Za-z0-9_-]+\.{kind}\.json", filename.name):
+        data = _captured_body(checked(path), "request")
+        if data is None:
             continue
-        if (
-            kind == "response"
-            and row.get("request_id")
-            and filename.name != f"{row['request_id']}.response.json"
-        ):
-            continue
-        path = archive.input(index.parent / filename.name)
-        if not path.is_file() or path.resolve().parent != index.parent.resolve():
-            continue
-        payload = path.read_bytes()
-        try:
-            body = json.loads(payload)
-        except (ValueError, UnicodeDecodeError):
-            continue
-        if not isinstance(body, dict) or not isinstance(
-            body.get("messages" if kind == "request" else "content"), list
-        ):
-            continue
-        if (
-            kind == "response"
-            and row.get("message_id")
-            and body.get("id") != row["message_id"]
-        ):
-            continue
-        span.update(
+        body, digest = data
+        source = path.relative_to(root).as_posix()
+        spans.append(
             {
-                f"{kind}_body_available": True,
-                f"{kind}_body_source": str(path.relative_to(archive.root)),
-                f"{kind}_body_digest": hashlib.sha256(payload).hexdigest(),
+                "id": f"claude-attempt:{source}",
+                "kind": "model_request_attempt",
+                "name": "Claude request attempt",
+                "provider": "anthropic",
+                "model": body.get("model"),
+                "source": source,
+                "evidence": "unmatched_request_file",
+                "ancestry": "unknown",
+                "request_body_available": True,
+                "response_body_available": False,
+                "request_body_source": source,
+                "request_body_digest": digest,
             }
         )
+
+
+def _captured_body(path: Path, kind: str) -> tuple[dict, str] | None:
+    if not path.is_file() or path.resolve() != path:
+        return None
+    payload = path.read_bytes()
+    try:
+        body = json.loads(payload)
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(body, dict) or not isinstance(
+        body.get("messages" if kind == "request" else "content"), list
+    ):
+        return None
+    return body, hashlib.sha256(payload).hexdigest()

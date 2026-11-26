@@ -11,7 +11,7 @@ from claude_inspection import _digest as claude_digest
 from claude_inspection import inspect_archive
 from json_contracts import stream_json_loads, strict_json_loads
 from scbench_codex import _digest as codex_digest
-from scbench_codex import inspect_rollouts
+from scbench_codex import attach_inference_payloads, inspect_rollouts
 
 _CHECKPOINT_SCORES = (
     "strict_pass_rate", "core_pass_rate", "isolated_pass_rate", "total_tests",
@@ -76,14 +76,30 @@ def _scores(row: dict, keys: tuple[str, ...], basis: str, source: str) -> list[d
 
 def _codex_events(archive: _Archive, checkpoint: Path) -> tuple[list[dict], list[dict]]:
     paths = sorted(archive.input(checkpoint / "agent").glob("rollout-*.jsonl"))
-    return inspect_rollouts(
+    events, spans = inspect_rollouts(
         (path.relative_to(archive.root).as_posix(), _rows(archive.input(path), agent_stream=True))
         for path in paths
     )
+    attach_inference_payloads(spans, archive.input(checkpoint / "agent/workspace/codex-api"),
+                              archive.root, input_path=archive.input, events=events)
+    return events, spans
 
 
 def _claude_events(archive: _Archive, checkpoint: Path) -> tuple[list[dict], list[dict]]:
     return inspect_archive(archive, checkpoint, _rows)
+
+
+def verify_claude_bindings(nodes: list[dict], checkpoint: Path, root: Path) -> None:
+    _, spans = _claude_events(_Archive(root, None), checkpoint)
+    recorded = {span["id"]: span for span in spans}
+    for node in nodes:
+        span = recorded.get(node.get("id"))
+        if span is None or node.get("kind") != span["kind"]:
+            raise ValueError("Claude model body has no matching provider observation")
+        for side in ("request", "response"):
+            source, digest = f"{side}_body_source", f"{side}_body_digest"
+            if source in node and (node[source] != span.get(source) or node.get(digest) != span.get(digest)):
+                raise ValueError("Claude model body source or digest disagrees with its provider observation")
 
 
 def _tool_value(row: dict, event: dict, side: str, ref: str):
@@ -100,6 +116,14 @@ def _tool_value(row: dict, event: dict, side: str, ref: str):
                 if (block.get("type") == ("tool_use" if incoming else "tool_result")
                     and block.get("id" if incoming else "tool_use_id") == call_id):
                     return block["input" if incoming else "content"], claude_digest
+    item = row.get("item")
+    if uid.startswith("exec:") and isinstance(item, dict) and row.get("type") in ("item.started", "item.updated", "item.completed"):
+        if not uid.endswith(f":{item.get('type')}:{item.get('id')}"):
+            raise ValueError("native tool source does not match the observation ID")
+        if item.get("type") == "command_execution":
+            return item["command" if side == "input" else "aggregated_output"], codex_digest
+        if item.get("type") == "collab_tool_call":
+            return item["prompt" if side == "input" else "agents_states"], codex_digest
     p = row.get("payload")
     if isinstance(p, dict):
         if kind == "command" and row.get("type") == "event_msg" and p.get("type") == "item_completed":
@@ -117,16 +141,18 @@ def _tool_value(row: dict, event: dict, side: str, ref: str):
     raise ValueError("SCBench tool source does not match the observation ID")
 
 
-def attach_tool_content(attempt: dict, run_root: Path) -> None:
+def attach_tool_content(attempt: dict, run_root: Path, *, native: bool = False) -> None:
     """Resolve selected tool inputs and outputs against verified archive rows."""
     archive = _Archive(run_root.resolve(), None)
-    identity = attempt["identity"]
-    problem, index = _identity(identity, identity["checkpoint"])
-    if (identity["arm"], identity["run_id"]) != (archive.root.parent.name, archive.root.name):
-        raise ValueError("tool-content archive does not match the SCBench attempt")
-    agent = archive.input(Path(problem) / f"checkpoint_{index}" / "agent")
-    if agent != agent.resolve():
-        raise ValueError("tool-content checkpoint directory is a symlink")
+    agent = archive.root
+    if not native:
+        identity = attempt["identity"]
+        problem, index = _identity(identity, identity["checkpoint"])
+        if (identity["arm"], identity["run_id"]) != (archive.root.parent.name, archive.root.name):
+            raise ValueError("tool-content archive does not match the SCBench attempt")
+        agent = archive.input(Path(problem) / f"checkpoint_{index}" / "agent")
+        if agent != agent.resolve():
+            raise ValueError("tool-content checkpoint directory is a symlink")
     reads: dict[Path, dict[int, list]] = {}
     for event in [*attempt["events"], *attempt.get("spans", [])]:
         event.pop("tool_input", None)
@@ -136,8 +162,10 @@ def attach_tool_content(attempt: dict, run_root: Path) -> None:
         for side in ("input", "output"):
             if not event.get(f"{side}_digest"):
                 continue
-            key = "source" if side == "input" or event["kind"] == "command" else "result_source"
-            ref = event.get(key)
+            key = "source" if side == "input" else "result_source"
+            if key == "result_source" and event["kind"] == "command" and not event.get(key):
+                key = "source"
+            ref = event.get("input_source", event.get(key)) if native and side == "input" else event.get(key)
             if not isinstance(ref, str):
                 raise TypeError("missing tool source")
             name, _, number = ref.rpartition(":")
@@ -145,10 +173,15 @@ def attach_tool_content(attempt: dict, run_root: Path) -> None:
                 raise ValueError("invalid tool source")
             path = archive.input(name).resolve()
             relative = path.relative_to(agent.resolve())
-            if not (relative.match("*.jsonl") and (
+            if native:
+                allowed = relative.as_posix() == "trace.jsonl" or (
+                    relative.parent == Path("codex-rollouts") and relative.match("rollout-*.jsonl"))
+            else:
+                allowed = relative.match("*.jsonl") and (
                 len(relative.parts) == 1 and (relative.name == "stdout.jsonl" or relative.match("rollout-*.jsonl"))
                 or relative.parts[:2] == ("workspace", "projects")
-            )):
+                )
+            if not allowed:
                 raise ValueError("invalid tool source file")
             reads.setdefault(path, {}).setdefault(int(number), []).append((event, side, ref))
     for path, wanted in reads.items():

@@ -76,13 +76,13 @@ class NativeInspectionTests(unittest.TestCase):
 
         cmd = {"id": "a", "type": "command_execution", "command": "example"}
         spawn = {"id": "b", "type": "collab_tool_call", "tool": "spawn_agent",
-                 "sender_thread_id": "lead", "prompt": "private brief"}
+                 "sender_thread_id": "lead"}
         rows = [
             {"type": "thread.started", "thread_id": "lead"},
             {"type": "item.started", "item": cmd},
             {"type": "item.completed", "item": {**cmd, "exit_code": 1, "aggregated_output": "private result"}},
             {"type": "item.started", "item": spawn},
-            {"type": "item.completed", "item": {**spawn, "receiver_thread_ids": ["child"]}},
+            {"type": "item.completed", "item": {**spawn, "prompt": "private brief", "receiver_thread_ids": ["child"]}},
             {"type": "turn.completed", "usage": {"input_tokens": 123}},
         ]
         events, spans = inspect_exec(list(enumerate(rows, 1)), [
@@ -95,6 +95,18 @@ class NativeInspectionTests(unittest.TestCase):
         self.assertEqual([s["kind"] for s in spans], ["agent", "prompt"])
         self.assertEqual(spans[1]["parent_id"], events[1]["id"])
         self.assertEqual(spans[1]["prompt_text"], "private brief")
+
+        from scbench_results import attach_tool_content
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "trace.jsonl").write_text("\n".join(json.dumps(row) for row in rows))
+            attach_tool_content({"events": events, "spans": spans}, root, native=True)
+            self.assertEqual(events[0]["tool_output"], "private result")
+            self.assertEqual(events[1]["tool_input"], "private brief")
+            events[1]["input_source"] = "other.jsonl:5"
+            with self.assertRaisesRegex(ValueError, "invalid tool source"):
+                attach_tool_content({"events": events, "spans": spans}, root, native=True)
 
     def test_opt_in_codex_answer_captures_only_observed_thread_tree(self):
         with tempfile.TemporaryDirectory() as directory:
