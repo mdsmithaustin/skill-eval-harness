@@ -861,8 +861,8 @@ def export_langsmith(args: argparse.Namespace) -> int:
             study=args.study,
             runs=Path(args.runs) if args.runs else None,
             include_prompts=args.include_prompts,
-            tool_content_from=args.tool_content_from,
-            model_content_from=args.model_content_from,
+            tool_content_from=Path(args.tool_content_from) if args.tool_content_from else None,
+            model_content_from=Path(args.model_content_from) if args.model_content_from else None,
         )
         if args.upload:
             key = os.environ.get("LANGSMITH_API_KEY")

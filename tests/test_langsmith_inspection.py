@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from helpers import run_cli
+
 from langsmith_export import build_export
 
 
@@ -88,6 +90,27 @@ class LangSmithInspectionTests(unittest.TestCase):
             self.assertEqual(model["inputs"], json.loads(request.read_bytes()))
             self.assertEqual(model["outputs"]["usage_metadata"], llm["usage"])
             self.assertEqual([r["id"] for r in enriched], [r["id"] for r in baseline])
+            index = root / "index.json"
+            index.write_text(
+                json.dumps(
+                    {"source": "scbench", "schema_version": 1, "attempts": [attempt]}
+                )
+            )
+            code, output, error = run_cli(
+                "export-langsmith",
+                index,
+                "--project",
+                project,
+                "--study",
+                "cli",
+                "--include-prompts",
+                "--tool-content-from",
+                root,
+                "--model-content-from",
+                root,
+            )
+            self.assertEqual(code, 0, error)
+            self.assertIn("private-task", output)
             request.write_text("{}")
             with self.assertRaisesRegex(ValueError, "digest"):
                 export(model_content_from=root)
