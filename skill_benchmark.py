@@ -72,6 +72,7 @@ from agent_clis import (
     _rust_debug_escape,
     _walk_codex_host_skills,
     build_vibe_cli_argv,
+    capture_codex_rollouts,
     codex_env_for_home,
     codex_host_path_redactor,
     codex_host_skill_paths,
@@ -258,6 +259,7 @@ from trace_normalization import (
     normalize_trace_record,
     normalize_trace_records,
     normalize_usage,
+    observed_skill_name,
     otel_attributes_for_event,
     parse_trace_jsonl_text,
     parse_trace_jsonl_text_with_lines,
@@ -5993,8 +5995,10 @@ def process_or_efficiency_assertion_result(
         evidence: list[str] = []
         if events is not None:
             skill_events = [e for e in events
-                            if event_is_completed(e)
-                            and (e.get("type") == "skill_load" or event_mentions_skill_file(e))]
+                            if event_mentions_skill_file(e)]
+            if isinstance(metrics.get("target_skill_names"), list):
+                skill_events = [event for event in skill_events
+                               if observed_skill_name(event) in metrics["target_skill_names"]]
             if skill_events:
                 invoked = True
                 evidence.extend(command_text(e) or str(e.get("path", "skill_load")) for e in skill_events[:5])
@@ -7867,6 +7871,7 @@ class CodexBackend(AgentBackend):
             config_overrides=(
                 [f"model_reasoning_effort={request.effort}"] if request.effort else None),
             recovery_capture=request.recovery_capture,
+            rollout_directory=options.get("rollout_directory"),
         )
         return RunnerOutcome(
             provider="codex", answer=result.get("answer"),
@@ -8222,6 +8227,7 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                 "population": "answer",
                 "case_id": pt.case_id,
                 "run_number": pt.run_number,
+                "target_skill_names": sorted({pt.skill_name, *pt.skill_root_keys}),
                 "variant": pt.variant_truth,
                 "billing_scope": "run",
                 "answer_design_sha256": design["design_sha256"],
@@ -8249,9 +8255,13 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                             build=functools.partial(workspace_builder, pt)))
                         skill_rel, input_rel = workspace
                         prompt = build_task_prompt(pt, skill_paths=skill_rel, input_files=input_rel)
+                        (changes / "task-prompt.txt").write_bytes(pt.prompt.encode("utf-8"))
+                        capture_options = ({"rollout_directory": changes / "codex-rollouts"}
+                                           if backend.name == "codex" and os.environ.get("SKILL_HARNESS_CODEX_ROLLOUTS") == "1"
+                                           else {})
                         outcome = backend.invoke_answer(InvocationRequest.parse(
                             prompt=prompt, workspace=ws, model=row_model,
-                            timeout_s=timeout, effort=effort), **options)
+                            timeout_s=timeout, effort=effort), **options, **capture_options)
                         context = outcome_context(outcome)
                         if context.cost_usd is not None:
                             cost = telemetry_domain.Measurement.available(
@@ -8826,7 +8836,8 @@ def codex_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | N
                       output_schema: dict[str, Any] | None = None, cwd: str | Path | None = None,
                       sandbox: str = "read-only", json_events: bool = True,
                       config_overrides: list[str] | None = None,
-                      recovery_capture: RecoveryCapture | None = None) -> dict[str, Any]:
+                      recovery_capture: RecoveryCapture | None = None,
+                      rollout_directory: Path | None = None) -> dict[str, Any]:
     """Native Codex invocation for judge-style calls.
 
     Codex's event stream is useful for telemetry, but the verdict/answer should
@@ -8848,7 +8859,7 @@ def codex_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | N
         argv += ["--model", model]
     if "--skip-git-repo-check" not in argv:
         argv.append("--skip-git-repo-check")
-    if "--ephemeral" not in argv:
+    if rollout_directory is None and "--ephemeral" not in argv:
         argv.append("--ephemeral")
     if "--ignore-user-config" not in argv:
         argv.append("--ignore-user-config")
@@ -8898,6 +8909,13 @@ def codex_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | N
             redact_stdout=False,
             recovery_capture=recovery_capture,
         ))
+        if rollout_directory is not None:
+            try:
+                env_meta["captured_rollout_count"] = capture_codex_rollouts(
+                    result.stdout, tmp / "codex-home", rollout_directory)
+            except OSError as exc:
+                shutil.rmtree(rollout_directory, ignore_errors=True)
+                env_meta["rollout_capture_error"] = type(exc).__name__
         last_message_found = last_message.exists()
         last_message_utf8_valid = True
         if last_message_found:
@@ -16234,9 +16252,13 @@ def build_trajectory_diff(results: list[dict[str, Any]]) -> dict[str, Any]:
             return True, None
         if not events:
             return False, "missing_trace_evidence"
-        if read_metrics_base(base_path).get("trace_observation_complete") is False:
+        metrics = read_metrics_base(base_path)
+        if metrics.get("trace_observation_complete") is False:
             return False, "incomplete_trace_evidence"
         profiles[base] = _trajectory_profile(events)
+        if isinstance(metrics.get("target_skill_names"), list):
+            profiles[base]["skill_invoked"] = any(
+                observed_skill_name(event) in metrics["target_skill_names"] for event in events)
         return True, None
 
     construction = pair_domain.pairs_from_rows(
@@ -21835,6 +21857,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--project", required=True, help="LangSmith tracing project UUID")
     p.add_argument("--study", required=True, help="stable ID for this collection of attempts")
     p.add_argument("--runs", help="native runs root containing the benchmark's recorded event files")
+    p.add_argument("--tool-content-from", metavar="SCBENCH_RUN", help="resolve recorded tool arguments and results from the original archive")
+    p.add_argument("--model-content-from", metavar="SCBENCH_RUN", help="include digest-verified captured Claude API request and response bodies")
+    p.add_argument("--include-responses", action="store_true", help="include observed assistant replies, reviewer reports and saved native answers")
+    p.add_argument("--include-prompts", action="store_true", help="include observed user or delegation prompt text in the export")
     p.add_argument("--upload", action="store_true", help="send the previewed records to LangSmith")
 
     p = sub.add_parser("export-evidence", help="export revision-bound evidence from a saved benchmark")

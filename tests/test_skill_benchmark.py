@@ -1149,7 +1149,7 @@ class SkillBenchmarkTests(unittest.TestCase):
             self.assertEqual(sorted(path.relative_to(base).as_posix() for path in base.rglob("*")), [
                 "artifact-commit.json", "candidate-files", f"candidate-files/{logo_sha}",
                 "candidate.patch", "environment.json", "events.json", "metadata.json",
-                "metrics.json", "output.md", "workspace-changes.json",
+                "metrics.json", "output.md", "task-prompt.txt", "workspace-changes.json",
             ])
             self.assertEqual((base / f"candidate-files/{logo_sha}").read_bytes(), logo)
             changes = json.loads((base / "workspace-changes.json").read_text(encoding="utf-8"))

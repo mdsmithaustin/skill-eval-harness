@@ -520,7 +520,9 @@ class RunClaudeAdapterTests(unittest.TestCase):
             {key: meta["usage_normalized"][key]
              for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")},
             {"input_tokens": 4, "output_tokens": 246, "cache_read_tokens": 29905, "cache_write_tokens": 9537})
-        self.assertEqual(meta["skill_invocation_evidence"], ["probe-plugin:tidy-commit Skill"])
+        self.assertEqual(meta["target_skill_names"], ["demo"])
+        self.assertFalse(meta["skill_invoked"])
+        self.assertEqual(meta["skill_invocation_evidence"], [])
         # Every recording that continues after `result` reads the same way; its
         # expected values come from its own terminal event.
         for source, text in claude_streams_ending_after_result():

@@ -681,6 +681,8 @@ skill-eval-harness/
 ├── skill_inputs.py            # manifest loading, skill materialization, and treatment identity
 ├── process_runtime.py         # shared supervisor, recovery, bridge, and stop state
 ├── trace_normalization.py     # trace dialect callbacks, detection, and artifact writing
+├── claude_inspection.py       # Claude request, session and tool evidence
+├── scbench_codex.py           # Codex rollout request and session evidence
 ├── scbench_results.py         # SlopCodeBench checkpoint and replay reader
 ├── trace_cases.py             # local session drafts and reviewed regression cases
 ├── agent_clis.py              # provider homes, argv, and isolation helpers
