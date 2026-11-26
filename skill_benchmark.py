@@ -21708,6 +21708,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--jetty-runs", required=True)
     p.add_argument("--runs", required=True)
 
+    p = sub.add_parser("import-scbench", help="index an archived SCBench run")
+    p.add_argument("--run-dir", required=True, help="SCBench <arm>/<run_id> directory")
+    p.add_argument("--study", help="optional study directory containing checkpoints.jsonl")
+    p.add_argument("--skill-revision", help="known skill revision applied to this arm")
+    p.add_argument("--review-evidence", help="directory containing the matching review-value replay and confirmations bundle")
+    p.add_argument("--out", required=True, help="destination for the local result index")
+
     p = sub.add_parser("import-trace")
     p.add_argument("--source", default="generic", choices=sorted(TRACE_DIALECTS),
                    help="runner trace dialect to normalize")
@@ -22125,6 +22132,18 @@ def overlap_evaluate_command(args: argparse.Namespace) -> int:
     return code
 
 
+def import_scbench(args: argparse.Namespace) -> int:
+    from scbench_results import import_run
+
+    try:
+        index = import_run(Path(args.run_dir), Path(args.study) if args.study else None,
+                           Path(args.review_evidence) if args.review_evidence else None, args.skill_revision, output=Path(args.out))
+        _atomic_write_text(Path(args.out), json.dumps(index, ensure_ascii=False, allow_nan=False) + "\n")
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+        die(str(exc))
+    return 0
+
+
 @stops_on_signal
 def main() -> int:
     parser = build_arg_parser()
@@ -22141,6 +22160,7 @@ def main() -> int:
         CLICommand.VALIDATE: validate_cli_command,
         CLICommand.PREPARE: prepare,
         CLICommand.INTERACTION: interaction_command,
+        CLICommand.IMPORT_SCBENCH: import_scbench,
         CLICommand.IMPORT_TRACE: import_trace,
         CLICommand.IMPORT_CASE: import_case_command,
         CLICommand.PROMOTE_CASE: promote_case_command,

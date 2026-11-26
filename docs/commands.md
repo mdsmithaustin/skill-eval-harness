@@ -1273,3 +1273,23 @@ Opt-in live smoke (five real sandbox runs — fixture-free, fixture-backed, and 
 RUN_JETTY_SMOKE=1 JETTY_API_TOKEN=... JETTY_SMOKE_COLLECTION=<your-collection> \
   python3 -m unittest discover tests -k smoke_jetty -v
 ```
+
+## Import a SlopCodeBench run
+
+Set `SCB_RUN` to your archived `<arm>/<run_id>` directory. For a study, set `SCB_STUDY` to its directory containing `checkpoints.jsonl`. For review replay, set `SCB_REVIEW` to the matching bundle directory. Omit either optional argument when that evidence is unavailable.
+
+```sh
+skill-benchmark import-scbench \
+  --run-dir "${SCB_RUN:?set SCB_RUN to the archived run directory}" \
+  --study "${SCB_STUDY:?set SCB_STUDY or omit --study}" \
+  --review-evidence "${SCB_REVIEW:?set SCB_REVIEW or omit --review-evidence}" \
+  --out local/checkpoints.json
+```
+
+Only `--run-dir` and `--out` are required. Supply `--skill-revision` to attach the known treatment revision to the arm. The index labels it as operator-supplied. Keep the archive's `<arm>/<run_id>` directory names. The importer reads `checkpoint_results.jsonl` and emits a schema-version 1 JSON object with `source: "scbench"` and one attempt per problem and checkpoint. Compare arms within a study. Their code can diverge at earlier checkpoints.
+
+Each attempt contains its identity, run metadata, observed events, and outcomes with source references. Costs retain the archive's recorded pricing. Codex rollout tool calls and messages received by the lead are ordered by timestamp. A tool-call event records an attempt to use the tool. For a Codex call, read its source line for the input and look for an output record in the same rollout with the same `call_id`. Claude Code contributes assistant tool calls in stream order. Runs without supported transcripts still contribute checkpoint scores.
+
+`--study` joins `checkpoints.jsonl` on arm, run ID, problem, and checkpoint. `--review-evidence` accepts a paired `review-value-replay.json` and `review-value-confirmations.json` from one review study. A replay row's lead rollout filename must match a file at the archived checkpoint before the importer attaches matching confirmation rows from that bundle. Replay outcomes identify tests gained and lost between snapshots. Source paths beginning with `study/` and `review/` resolve against the supplied directories. Other source paths resolve against the run directory.
+
+Each input must resolve inside its supplied evidence directory. The output path must be distinct from every input, including links to the same file. The index is a local analysis artifact. It can contain reviewer replies and hidden-test names. Keep it with the study's private evidence.

@@ -558,7 +558,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-benchmark export-evidence BENCHMARK_JSON --out DIR` | Write revision-bound JSON and `BENCHMARK.md` from a saved benchmark. |
 | `skill-benchmark render-viewer` | Static or `--serve`d review page with embedded artifacts and iteration diffs; served mode stores pass/fail/unsure verdicts and notes in `feedback.json`. |
 
-**Runners** (every one but `import-trace` calls a model; so do `judge` and `judge-robustness` below)
+**Runners and offline importers** (the `run-*` commands call a model)
 
 | Command | What it does |
 |---|---|
@@ -566,6 +566,7 @@ above is the five commands you need first (`validate`, `prepare`, `benchmark`,
 | `skill-benchmark run-claude` | Drive `claude -p --output-format stream-json`, capturing real per-run cost + token usage AND the full tool-use stream as the run's trace (`trace.jsonl`/`events.json`), so process assertions have evidence on Claude answer runs. Records the stop reason and served model; `--effort` passes `claude --effort`. |
 | `skill-benchmark run-agent` | Provider-neutral native runner over registered backends (`--agent claude`, `--agent codex`, `--agent gemini`, or `--agent vibe`); compatibility wrappers delegate here. `--effort` is refused for Gemini and Vibe, and for a level the backend's CLI does not accept (`minimal` on Claude). |
 | `skill-benchmark run-subagent` | In-process backend seam: any provider via `--agent-cmd`, tool replay, multi-turn `turns`. |
+| `skill-benchmark import-scbench` | Index a SlopCodeBench run and its optional study or review-replay evidence. |
 | `skill-benchmark import-trace` | Normalize a raw JSONL trace into `events.json`/`metrics.json` for process/efficiency checks. |
 
 **Measurement trust** (model-free unless noted)
@@ -678,6 +679,7 @@ skill-eval-harness/
 ├── skill_inputs.py            # manifest loading, skill materialization, and treatment identity
 ├── process_runtime.py         # shared supervisor, recovery, bridge, and stop state
 ├── trace_normalization.py     # trace dialect callbacks, detection, and artifact writing
+├── scbench_results.py         # SlopCodeBench checkpoint and replay reader
 ├── trace_cases.py             # local session drafts and reviewed regression cases
 ├── agent_clis.py              # provider homes, argv, and isolation helpers
 ├── trigger_identity.py        # derived packaged trigger source identity
