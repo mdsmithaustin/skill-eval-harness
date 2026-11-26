@@ -173,7 +173,9 @@ def native_inspection(
     return observations, spans, normalized, "partial_raw_trace" if partial else basis
 
 
-def native_attempts(report: dict, runs: Path | None) -> list[dict]:
+def native_attempts(
+    report: dict, runs: Path | None, include_responses: bool = False
+) -> list[dict]:
     attempts = []
     for row in report["results"]:
         if row["split"] != "tune":
@@ -234,12 +236,18 @@ def native_attempts(report: dict, runs: Path | None) -> list[dict]:
                 ("provider", "billing_scope", "pricing_model", "pricing_table_version"),
             )
         events, spans = [], []
+        answer = {}
         details["model_evidence"] = "report_only"
         if runs:
             events, spans, normalized, details["model_evidence"] = native_inspection(
                 runs, row
             )
             artifact = native_event_file(runs, row)
+            output = artifact.with_name("output.md")
+            if include_responses and output.is_file() and not row.get("missing_output"):
+                if output.resolve() != output:
+                    raise ValueError("native answer falls outside its run")
+                answer["answer"] = output.read_text(encoding="utf-8")
             prompt = artifact.with_name("task-prompt.txt")
             if prompt.is_file():
                 if prompt.resolve() != prompt:
@@ -335,6 +343,7 @@ def native_attempts(report: dict, runs: Path | None) -> list[dict]:
                 "events": events,
                 "spans": spans,
                 "outcomes": outcomes,
+                "answer": answer,
             }
         )
     return attempts
@@ -459,6 +468,7 @@ def build_export(
     study: str,
     runs: Path | None = None,
     include_prompts: bool = False,
+    include_responses: bool = False,
     tool_content_from: Path | None = None,
     model_content_from: Path | None = None,
 ) -> list[dict]:
@@ -481,7 +491,10 @@ def build_export(
             )
         if model_content_from or tool_content_from:
             raise ValueError("content archive options require an SCBench index")
-        source, attempts = "skill-harness", native_attempts(document, runs)
+        source, attempts = (
+            "skill-harness",
+            native_attempts(document, runs, include_responses),
+        )
 
     requests: list[dict] = []
     root_ids = set()
@@ -590,7 +603,7 @@ def build_export(
             "end_time": moment(ended, start).isoformat(),
             "dotted_order": root_order,
             "inputs": identity,
-            "outputs": {},
+            "outputs": attempt["answer"] if source == "skill-harness" else {},
             "extra": {"metadata": details},
         }
         requests.append({"path": "runs", "body": root})
@@ -737,6 +750,23 @@ def build_export(
                         info[target] = value
                 if usage := token_usage(event.get("usage")):
                     outputs["usage_metadata"] = usage
+            if include_responses and "content" not in outputs:
+                texts = event.get("response_texts", [])
+                if kind == "agent_message" and isinstance(event.get("text"), str):
+                    texts = [event["text"]]
+                if kind in (
+                    "llm",
+                    "message",
+                    "assistant_message",
+                    "agent_message",
+                ) and isinstance(texts, list):
+                    visible = [
+                        {"type": "text", "text": text}
+                        for text in texts
+                        if isinstance(text, str) and text
+                    ]
+                    if visible:
+                        outputs.update(role="assistant", content=visible)
             body = {
                 **common,
                 "id": uid,
@@ -861,8 +891,13 @@ def export_langsmith(args: argparse.Namespace) -> int:
             study=args.study,
             runs=Path(args.runs) if args.runs else None,
             include_prompts=args.include_prompts,
-            tool_content_from=Path(args.tool_content_from) if args.tool_content_from else None,
-            model_content_from=Path(args.model_content_from) if args.model_content_from else None,
+            include_responses=args.include_responses,
+            tool_content_from=Path(args.tool_content_from)
+            if args.tool_content_from
+            else None,
+            model_content_from=Path(args.model_content_from)
+            if args.model_content_from
+            else None,
         )
         if args.upload:
             key = os.environ.get("LANGSMITH_API_KEY")

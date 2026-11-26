@@ -21859,6 +21859,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--runs", help="native runs root containing the benchmark's recorded event files")
     p.add_argument("--tool-content-from", metavar="SCBENCH_RUN", help="resolve recorded tool arguments and results from the original archive")
     p.add_argument("--model-content-from", metavar="SCBENCH_RUN", help="include digest-verified captured Claude API request and response bodies")
+    p.add_argument("--include-responses", action="store_true", help="include observed assistant replies, reviewer reports and saved native answers")
     p.add_argument("--include-prompts", action="store_true", help="include observed user or delegation prompt text in the export")
     p.add_argument("--upload", action="store_true", help="send the previewed records to LangSmith")
 

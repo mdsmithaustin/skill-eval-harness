@@ -26,6 +26,7 @@ class LangSmithInspectionTests(unittest.TestCase):
                 "parent_id": "a",
                 "model": "m",
                 "provider": "openai",
+                "response_texts": ["private-response"],
                 "timestamp": "2026-11-26T18:00:00Z",
                 "usage": {"input_tokens": 4, "output_tokens": 2},
                 "request_body_source": request.relative_to(root).as_posix(),
@@ -78,6 +79,10 @@ class LangSmithInspectionTests(unittest.TestCase):
 
             baseline = export()
             self.assertNotIn("private-task", json.dumps(baseline))
+            self.assertNotIn("private-response", json.dumps(baseline))
+            self.assertIn(
+                "private-response", json.dumps(export(include_responses=True))
+            )
             enriched = export(include_prompts=True, model_content_from=root)
             self.assertNotIn("injection", json.dumps(enriched))
             self.assertNotIn(str(root), json.dumps(enriched))

@@ -34,6 +34,7 @@ The default preview includes names, timing, result status, evidence labels, avai
 | Option | Content |
 | --- | --- |
 | `--include-prompts` | Recorded user tasks and delegation briefs that the importer identified. Injected instruction bodies stay in the local archive. |
+| `--include-responses` | Visible assistant text blocks, reviewer reports and the saved native answer. Transcript fragments can be partial. |
 | `--tool-content-from "$SCBENCH_RUN"` | Recorded tool arguments and results that match the original checkpoint, source record and digest. Commands and file contents may appear here. |
 | `--model-content-from "$SCBENCH_RUN"` | Captured Claude Messages request and response objects with matching digests. They can include system instructions, conversation history and tool results. |
 

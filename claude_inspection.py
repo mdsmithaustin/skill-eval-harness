@@ -131,6 +131,15 @@ class _Inspector:
                     },
                 )
                 span["response_source"] = ref
+                for block in content:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and isinstance(block.get("text"), str)
+                    ):
+                        texts = span.setdefault("response_texts", [])
+                        if block["text"] not in texts:
+                            texts.append(block["text"])
                 skill = row.get("attributionSkill")
                 if isinstance(skill, str) and re.fullmatch(r"[\w.:-]{1,160}", skill):
                     span["skill_name"] = skill
@@ -312,6 +321,15 @@ class _Inspector:
                     original = self.spans.pop(fallback)
                     richer = self.spans[chosen]
                     self.spans[chosen] = {**original, **richer}
+                    if "response_texts" in original:
+                        self.spans[chosen]["response_texts"] = list(
+                            dict.fromkeys(
+                                [
+                                    *original["response_texts"],
+                                    *richer.get("response_texts", []),
+                                ]
+                            )
+                        )
                     aliases[fallback] = chosen
             elif fallback in self.spans and fallback not in candidates:
                 self.spans[fallback].update(

@@ -90,7 +90,18 @@ def _message(common: dict, payload: dict) -> dict:
                 node["prompt_text"] = text
         return node
     if role == "assistant":
-        return {**node, "kind": "message", "name": "assistant_message", "role": role}
+        return {
+            **node,
+            "kind": "message",
+            "name": "assistant_message",
+            "role": role,
+            "response_texts": [
+                b["text"]
+                for b in blocks
+                if b.get("type") in {"output_text", "text"}
+                and isinstance(b.get("text"), str)
+            ],
+        }
     node.update(kind="prompt", role=role, name="prompt", synthetic=role != "user")
     if role != "user":
         return node
@@ -114,7 +125,11 @@ def _message(common: dict, payload: dict) -> dict:
             node["prompt_text"] = text
         names = explicit_skill_names(text)
         if names:
-            node.update(skill_name=names[0], skill_names=names, evidence="explicit_skill_request")
+            node.update(
+                skill_name=names[0],
+                skill_names=names,
+                evidence="explicit_skill_request",
+            )
     return node
 
 
@@ -132,8 +147,10 @@ def _read_session(
     parent = meta.get("parent_thread_id") or spawn.get("parent_thread_id")
     thread = meta.get("id") or meta.get("session_id") or path
     session_id = f"session:{thread}"
-    role = meta.get("agent_role") or spawn.get("agent_role") or (
-        "subagent" if parent else "lead" if meta else "unknown"
+    role = (
+        meta.get("agent_role")
+        or spawn.get("agent_role")
+        or ("subagent" if parent else "lead" if meta else "unknown")
     )
     session = {
         "id": session_id,
@@ -356,7 +373,8 @@ def inspect_rollouts(
 
 
 def inspect_exec(
-    rows: list[tuple[int, dict]], events: list[dict],
+    rows: list[tuple[int, dict]],
+    events: list[dict],
 ) -> tuple[list[dict], list[dict]]:
     """Pair Codex exec item lifecycles while retaining other normalized observations."""
     retained = {}
@@ -372,8 +390,15 @@ def inspect_exec(
         stamp = row.get("timestamp")
         if typ == "thread.started" and isinstance(uid := row.get("thread_id"), str):
             thread = _digest(uid)
-            agents[thread] = {"id": f"exec-thread:{thread}", "kind": "agent", "name": "Codex thread",
-                              "actor": "lead", "timestamp": stamp, "source": ref, "sender_thread": thread}
+            agents[thread] = {
+                "id": f"exec-thread:{thread}",
+                "kind": "agent",
+                "name": "Codex thread",
+                "actor": "lead",
+                "timestamp": stamp,
+                "source": ref,
+                "sender_thread": thread,
+            }
             replaced.add(ref)
             turn = 0
             continue
@@ -384,20 +409,38 @@ def inspect_exec(
         if typ == "turn.started":
             turn += 1
         item = row.get("item")
-        if typ not in {"item.started", "item.updated", "item.completed"} or not isinstance(item, dict):
+        if typ not in {
+            "item.started",
+            "item.updated",
+            "item.completed",
+        } or not isinstance(item, dict):
             continue
         kind = item.get("type")
         uid = item.get("id")
-        if kind not in {"command_execution", "collab_tool_call"} or not isinstance(uid, str) or not uid:
+        if (
+            kind not in {"command_execution", "collab_tool_call"}
+            or not isinstance(uid, str)
+            or not uid
+        ):
             continue
-        sender = _digest(item["sender_thread_id"]) if isinstance(item.get("sender_thread_id"), str) else thread
+        sender = (
+            _digest(item["sender_thread_id"])
+            if isinstance(item.get("sender_thread_id"), str)
+            else thread
+        )
         key = f"exec:{sender}:{turn}:{kind}:{uid}"
         collab = kind == "collab_tool_call"
-        node = retained.setdefault(key, {
-            "id": key, "kind": "tool_call" if collab else "command",
-            "name": (item.get("tool") or "collaboration") if collab else "command",
-            "source": ref, "timestamp": stamp, "result_observed": False,
-        })
+        node = retained.setdefault(
+            key,
+            {
+                "id": key,
+                "kind": "tool_call" if collab else "command",
+                "name": (item.get("tool") or "collaboration") if collab else "command",
+                "source": ref,
+                "timestamp": stamp,
+                "result_observed": False,
+            },
+        )
         replaced.add(ref)
         if sender:
             node["sender_thread"] = sender
@@ -405,19 +448,38 @@ def inspect_exec(
                 node["parent_id"] = agents[sender]["id"]
         if collab:
             if isinstance(targets := item.get("receiver_thread_ids"), list):
-                node["receiver_threads"] = sorted(set(node.get("receiver_threads", [])) | {
-                    _digest(value) for value in targets if isinstance(value, str) and value})
+                node["receiver_threads"] = sorted(
+                    set(node.get("receiver_threads", []))
+                    | {
+                        _digest(value)
+                        for value in targets
+                        if isinstance(value, str) and value
+                    }
+                )
             if isinstance(prompt := item.get("prompt"), str) and prompt:
                 digest = _digest(prompt)
                 brief_id = f"{key}:prompt:{digest}"
-                briefs.setdefault(brief_id, {"id": brief_id, "parent_id": key, "kind": "prompt",
-                                             "name": "Delegation brief", "evidence": "collab_tool_call",
-                                             "role": "agent_brief", "prompt_text": prompt, "digest": digest,
-                                             "source": ref, "timestamp": stamp})
+                briefs.setdefault(
+                    brief_id,
+                    {
+                        "id": brief_id,
+                        "parent_id": key,
+                        "kind": "prompt",
+                        "name": "Delegation brief",
+                        "evidence": "collab_tool_call",
+                        "role": "agent_brief",
+                        "prompt_text": prompt,
+                        "digest": digest,
+                        "source": ref,
+                        "timestamp": stamp,
+                    },
+                )
                 node["input_digest"] = digest
         elif isinstance(command := item.get("command"), str):
             node["input_digest"] = _digest(command)
-        node["status"] = item.get("status") or ("completed" if typ == "item.completed" else "in_progress")
+        node["status"] = item.get("status") or (
+            "completed" if typ == "item.completed" else "in_progress"
+        )
         if typ == "item.completed":
             node.update(result_observed=True, result_source=ref, end_time=stamp)
             if isinstance(output := item.get("aggregated_output"), str):
