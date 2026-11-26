@@ -21830,6 +21830,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--review-diagnostics", action="store_true", help="include optional diagnostic verifier authoring leads; grades and gates are unchanged")
 
+    p = sub.add_parser("export-langsmith", help="preview or upload a saved benchmark or SCBench index")
+    p.add_argument("source", help="benchmark.json, its directory, or an imported SCBench index")
+    p.add_argument("--project", required=True, help="LangSmith tracing project UUID")
+    p.add_argument("--study", required=True, help="stable ID for this collection of attempts")
+    p.add_argument("--runs", help="native runs root containing the benchmark's recorded event files")
+    p.add_argument("--upload", action="store_true", help="send the previewed records to LangSmith")
+
     p = sub.add_parser("export-evidence", help="export revision-bound evidence from a saved benchmark")
     p.add_argument("benchmark", help="saved benchmark JSON")
     p.add_argument("--out", required=True, help="report directory outside the skill tree")
@@ -22144,6 +22151,9 @@ def import_scbench(args: argparse.Namespace) -> int:
     return 0
 
 
+from langsmith_export import export_langsmith
+
+
 @stops_on_signal
 def main() -> int:
     parser = build_arg_parser()
@@ -22167,6 +22177,7 @@ def main() -> int:
         CLICommand.GRADE: grade,
         CLICommand.JUDGE: judge_command,
         CLICommand.BENCHMARK: benchmark,
+        CLICommand.EXPORT_LANGSMITH: export_langsmith,
         CLICommand.EXPORT_EVIDENCE: export_evidence,
         CLICommand.REPORT: report_command,
         CLICommand.COMPARE_JUDGES: compare_judges,

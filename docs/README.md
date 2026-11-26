@@ -12,6 +12,7 @@ title is the question; the body is the loop that answers it, runnable on
 
 | Question | Doc |
 |---|---|
+| How do I investigate a skill change in LangSmith? | [LangSmith export](langsmith.md) |
 | How do I replay tool responses through a local child? | [`offline-tool-dialogue.md`](offline-tool-dialogue.md) |
 | How do I write an eval suite for my skill? | [`authoring-evals.md`](authoring-evals.md) |
 | How do I grade files an agent edits? | [`Edited-file demo`](../examples/edited-file-demo/README.md) |

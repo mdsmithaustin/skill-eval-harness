@@ -36,6 +36,7 @@ class CLICommand(str, Enum):
     GRADE = "grade"
     JUDGE = "judge"
     BENCHMARK = "benchmark"
+    EXPORT_LANGSMITH = "export-langsmith"
     EXPORT_EVIDENCE = "export-evidence"
     REPORT = "report"
     COMPARE_JUDGES = "compare-judges"
