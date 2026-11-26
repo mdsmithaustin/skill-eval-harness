@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ablation_model import scorable_run
+from artifact_contracts import artifact_commit_valid
 from claude_inspection import inspect_stdout
 from cli_contracts import die
 from experimental_pairs import ExperimentalPairKey, ExperimentalPopulation
@@ -135,6 +136,13 @@ def native_inspection(
         )
         return list(zip(lines, records, strict=True)), bool(errors)
 
+    capture_dir = artifact.parent / f"{dialect}-api"
+    if (
+        capture_dir.exists()
+        and (artifact.parent / "artifact-commit.json").exists()
+        and not artifact_commit_valid(artifact.parent)
+    ):
+        raise ValueError("native capture fails artifact inventory verification")
     paths = (
         sorted((artifact.parent / "codex-rollouts").glob("rollout-*.jsonl"))
         if dialect == "codex"
@@ -150,21 +158,30 @@ def native_inspection(
         observations, spans = inspect_rollouts(files)
     else:
         path = artifact.with_name("trace.jsonl")
-        if not path.exists():
+        if not path.exists() and not capture_dir.is_dir():
             return events, [], normalized, "normalized_events_only"
-        rows, partial = read(path)
+        rows, partial = read(path) if path.exists() else ([], True)
         if dialect == "claude":
-            observations, spans = inspect_stdout(rows, source="trace.jsonl")
+            observations, spans = inspect_stdout(
+                rows, source="trace.jsonl", capture_root=artifact.parent
+            )
         elif any(record.get("type") == "session_meta" for _, record in rows):
             observations, spans = inspect_rollouts([("trace.jsonl", rows)])
         else:
             observations, spans = inspect_exec(rows, events)
-            return (
-                observations,
-                spans,
-                normalized,
-                "partial_raw_trace" if partial else "turn_aggregate_only",
-            )
+            if not capture_dir.is_dir():
+                return (
+                    observations,
+                    spans,
+                    normalized,
+                    "partial_raw_trace" if partial else "turn_aggregate_only",
+                )
+    if dialect == "codex" and capture_dir.is_dir():
+        from scbench_codex import attach_inference_payloads
+
+        attach_inference_payloads(
+            spans, capture_dir, artifact.parent, events=observations
+        )
     basis = (
         "provider_requests"
         if any(s["kind"] == "llm" for s in [*observations, *spans])
@@ -344,6 +361,11 @@ def native_attempts(
                 "spans": spans,
                 "outcomes": outcomes,
                 "answer": answer,
+                **(
+                    {"artifact_dir": native_event_file(runs, row).parent}
+                    if runs
+                    else {}
+                ),
             }
         )
     return attempts
@@ -380,26 +402,52 @@ def token_usage(value: Any) -> dict:
     return result
 
 
-def model_content(event: dict, directory: Path, identity: dict) -> tuple[dict, dict]:
-    root = directory.resolve()
-    if (identity["arm"], identity["run_id"]) != (root.parent.name, root.name):
-        raise ValueError("model-content archive does not match the SCBench attempt")
-    checkpoint = (
-        root
-        / identity["problem"]
-        / f"checkpoint_{identity['checkpoint']}"
-        / "agent/workspace/raw-api"
-    ).resolve()
-    if not checkpoint.is_relative_to(root):
-        raise ValueError("model capture directory escapes archive")
+def nodes_with_bodies_in(nodes: list[dict], root: Path, directory: Path) -> list[dict]:
+    return [
+        node
+        for node in nodes
+        if any(
+            isinstance(ref := node.get(key), str)
+            and (root / ref).is_relative_to(directory)
+            for key in ("request_body_source", "response_body_source")
+        )
+    ]
+
+
+def model_content(
+    event: dict, root: Path, capture: Path, *, native: bool, selected_side: str
+) -> tuple[dict, dict]:
     bodies = []
     for side in ("request", "response"):
         location = event.get(f"{side}_body_source")
-        if location is None:
+        if location is None or selected_side not in ("both", side):
             bodies.append({})
             continue
-        path = (root / location).resolve()
-        if path.parent.parent != checkpoint or not path.name.endswith(f".{side}.json"):
+        if not isinstance(location, str) or Path(location).is_absolute():
+            raise ValueError("invalid archived model body reference")
+        path = root / location
+        if path != path.resolve() or not path.is_relative_to(capture):
+            raise ValueError("model body reference escapes capture directory")
+        parts = path.relative_to(capture).parts
+        claude = (
+            len(parts) == 3
+            and parts[0] == ("claude-api" if native else "raw-api")
+            and parts[-1].endswith(f".{side}.json")
+        )
+        codex = (
+            len(parts) == 4
+            and parts[0] == "codex-api"
+            and parts[1].startswith("trace-")
+            and parts[2] == "payloads"
+            and re.fullmatch(r"[0-9]+\.json", parts[3])
+            and event.get(f"{side}_body_format")
+            in (
+                {"codex_inference_request"}
+                if side == "request"
+                else {"codex_observed_output_items", "codex_partial_output_items"}
+            )
+        )
+        if not (claude or codex):
             raise ValueError("invalid archived model body reference")
         data = path.read_bytes()
         if hashlib.sha256(data).hexdigest() != event.get(f"{side}_body_digest"):
@@ -407,6 +455,12 @@ def model_content(event: dict, directory: Path, identity: dict) -> tuple[dict, d
         value = strict_json_loads(data)
         if not isinstance(value, dict):
             raise TypeError("expected archived model body object")
+        if codex:
+            field = "input" if side == "request" else "output_items"
+        else:
+            field = "messages" if side == "request" else "content"
+        if not isinstance(value.get(field), list):
+            raise TypeError("captured model body does not match its declared format")
         bodies.append(value)
     return bodies[0], bodies[1]
 
@@ -448,7 +502,9 @@ def nested_run_requests(
         body = bodies[i]
         if parent is root or parent["extra"]["metadata"]["kind"] == "agent":
             parent["start_time"] = min(parent["start_time"], body["start_time"])
-            parent["end_time"] = max(parent["end_time"], body["end_time"])
+            parent["end_time"] = max(
+                parent["end_time"], body.get("end_time", body["start_time"])
+            )
     orders = {root["id"]: root["dotted_order"]}
     for i in ordered:
         body = bodies[i]
@@ -471,9 +527,16 @@ def build_export(
     include_responses: bool = False,
     tool_content_from: Path | None = None,
     model_content_from: Path | None = None,
+    model_content_side: str = "both",
 ) -> list[dict]:
     if not isinstance(document, dict):
         raise TypeError("expected a result document")
+    if model_content_side not in {"both", "request", "response"} or (
+        model_content_side != "both" and model_content_from is None
+    ):
+        raise ValueError(
+            "select model content with --model-content-from when choosing a side"
+        )
     project = str(uuid.UUID(project))
     if document.get("source") == "scbench":
         if (
@@ -489,8 +552,13 @@ def build_export(
             raise ValueError(
                 "expected a native answer benchmark or a v1 SCBench result index"
             )
-        if model_content_from or tool_content_from:
-            raise ValueError("content archive options require an SCBench index")
+        for directory in (model_content_from, tool_content_from):
+            if directory is not None and (
+                runs is None or directory.resolve() != runs.resolve()
+            ):
+                raise ValueError(
+                    "native content options must point to the same directory as --runs"
+                )
         source, attempts = (
             "skill-harness",
             native_attempts(document, runs, include_responses),
@@ -557,7 +625,34 @@ def build_export(
         root_ids.add(trace_id)
         details.update({"source": source, "study": study, **identity})
         events = attempt["events"]
+        archive_root = capture = None
+        if model_content_from and source == "scbench":
+            archive_root = model_content_from.resolve()
+            if (identity["arm"], identity["run_id"]) != (
+                archive_root.parent.name,
+                archive_root.name,
+            ):
+                raise ValueError(
+                    "model-content archive does not match the SCBench attempt"
+                )
+            if Path(identity["problem"]).name != identity["problem"] or identity[
+                "problem"
+            ] in {".", ".."}:
+                raise ValueError("invalid SCBench problem")
+            capture = (
+                archive_root
+                / identity["problem"]
+                / f"checkpoint_{identity['checkpoint']}"
+                / "agent/workspace"
+            )
+        elif model_content_from and source == "skill-harness":
+            archive_root = capture = attempt["artifact_dir"]
         if tool_content_from:
+            tool_root = (
+                attempt["artifact_dir"]
+                if source == "skill-harness"
+                else tool_content_from
+            )
             from scbench_results import attach_tool_content
 
             attempt = {
@@ -565,9 +660,25 @@ def build_export(
                 "events": [dict(e) for e in events],
                 "spans": [dict(e) for e in attempt.get("spans", [])],
             }
-            attach_tool_content(attempt, tool_content_from)
+            attach_tool_content(attempt, tool_root, native=source == "skill-harness")
             events = attempt["events"]
         nodes = [*events, *attempt.get("spans", [])]
+        if archive_root is not None and capture is not None and source == "scbench":
+            from scbench_codex import verify_inference_bindings
+            from scbench_results import verify_claude_bindings
+
+            if codex_nodes := nodes_with_bodies_in(
+                nodes, archive_root, capture / "codex-api"
+            ):
+                verify_inference_bindings(
+                    codex_nodes, capture / "codex-api", archive_root
+                )
+            if claude_nodes := nodes_with_bodies_in(
+                nodes, archive_root, capture / "raw-api"
+            ):
+                verify_claude_bindings(
+                    claude_nodes, capture.parent.parent, archive_root
+                )
         fallback = datetime.fromtimestamp(document.get("generated_at", 0), timezone.utc)
         observed = [
             moment(e["timestamp"], fallback) for e in nodes if e.get("timestamp")
@@ -590,6 +701,10 @@ def build_export(
             )
         details["captured_request_bodies"] = sum(
             e.get("request_body_available") is True for e in nodes
+        )
+
+        details["captured_response_bodies"] = sum(
+            e.get("response_body_available") is True for e in nodes
         )
 
         root_order = order(start, trace_id)
@@ -649,6 +764,8 @@ def build_export(
                     "skill_evidence",
                     "request_body_digest",
                     "response_body_digest",
+                    "request_body_format",
+                    "response_body_format",
                 ),
             )
             if isinstance(sender := event.get("sender_thread"), str) and re.fullmatch(
@@ -736,9 +853,15 @@ def build_export(
                     inputs["arguments"] = event["tool_input"]
                 if "tool_output" in event:
                     outputs["result"] = event["tool_output"]
-            if kind == "llm":
-                if model_content_from:
-                    inputs, outputs = model_content(event, model_content_from, identity)
+            if kind in ("llm", "model_request_attempt"):
+                if archive_root is not None and capture is not None:
+                    inputs, outputs = model_content(
+                        event,
+                        archive_root,
+                        capture,
+                        native=source == "skill-harness",
+                        selected_side=model_content_side,
+                    )
                 for field, target in (
                     ("model", "ls_model_name"),
                     ("provider", "ls_provider"),
@@ -778,6 +901,14 @@ def build_export(
                 "outputs": outputs,
                 "extra": {"metadata": info},
             }
+            if (
+                kind == "llm"
+                and event.get("status") == "in_progress"
+                and not event.get("end_time")
+            ):
+                del body["end_time"]
+            if event.get("status") == "cancelled":
+                body["error"] = "Recorded operation cancelled"
             if info.get("status") == "failed" or info.get("is_error") is True:
                 body["error"] = "Recorded operation failed"
             bodies[i] = body
@@ -895,6 +1026,7 @@ def export_langsmith(args: argparse.Namespace) -> int:
             tool_content_from=Path(args.tool_content_from)
             if args.tool_content_from
             else None,
+            model_content_side=args.model_content_side,
             model_content_from=Path(args.model_content_from)
             if args.model_content_from
             else None,

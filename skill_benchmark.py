@@ -81,6 +81,7 @@ from agent_clis import (
     codex_thread_id,
     codex_trigger_context_isolation_args,
     locate_codex_rollout,
+    model_body_capture,
     redact_vibe_prompt_arg,
     seed_codex_home,
     seed_vibe_home,
@@ -7872,6 +7873,7 @@ class CodexBackend(AgentBackend):
                 [f"model_reasoning_effort={request.effort}"] if request.effort else None),
             recovery_capture=request.recovery_capture,
             rollout_directory=options.get("rollout_directory"),
+            model_body_directory=options.get("model_body_directory"),
         )
         return RunnerOutcome(
             provider="codex", answer=result.get("answer"),
@@ -7900,7 +7902,8 @@ class ClaudeBackend(AgentBackend):
         result = claude_cli_invoke(request.prompt, isolation=ContextIsolation.WORKSPACE, model=request.model, claude_bin=str(options.get("claude_bin") or "claude"),
                                    timeout=request.timeout_s, cwd=str(request.workspace), output_format="stream-json",
                                    extra_args=["--effort", request.effort] if request.effort else None,
-                                   recovery_capture=request.recovery_capture)
+                                   recovery_capture=request.recovery_capture,
+                                   model_body_directory=options.get("model_body_directory"))
         stop = result.get("stop")
         completion = {
             **(stop.as_metadata() if isinstance(stop, StopObservation)
@@ -8256,9 +8259,14 @@ def run_agent_tasks(tasks: list[dict[str, Any]], runs: Path, backend: AgentBacke
                         skill_rel, input_rel = workspace
                         prompt = build_task_prompt(pt, skill_paths=skill_rel, input_files=input_rel)
                         (changes / "task-prompt.txt").write_bytes(pt.prompt.encode("utf-8"))
-                        capture_options = ({"rollout_directory": changes / "codex-rollouts"}
-                                           if backend.name == "codex" and os.environ.get("SKILL_HARNESS_CODEX_ROLLOUTS") == "1"
-                                           else {})
+                        capture_options = {}
+                        body_capture = os.environ.get("SKILL_HARNESS_MODEL_BODIES") == "1"
+                        if body_capture and backend.name in {"claude", "codex"}:
+                            capture_options["model_body_directory"] = changes / f"{backend.name}-api"
+                        if backend.name == "codex" and (
+                            body_capture or os.environ.get("SKILL_HARNESS_CODEX_ROLLOUTS") == "1"
+                        ):
+                            capture_options["rollout_directory"] = changes / "codex-rollouts"
                         outcome = backend.invoke_answer(InvocationRequest.parse(
                             prompt=prompt, workspace=ws, model=row_model,
                             timeout_s=timeout, effort=effort), **options, **capture_options)
@@ -8507,7 +8515,8 @@ def require_clean_workspace_context(workspace: Path) -> None:
 
 def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | None = None, claude_bin: str = "claude",
                       timeout: int = DEFAULT_RUNNER_TIMEOUT_S, extra_args: list[str] | None = None, cwd: str | Path | None = None,
-                      output_format: str = "json", recovery_capture: RecoveryCapture | None = None) -> dict[str, Any]:
+                      output_format: str = "json", recovery_capture: RecoveryCapture | None = None,
+                      model_body_directory: Path | None = None) -> dict[str, Any]:
     """Single owner for invoking Claude via `claude -p`.
 
     Returns the parsed envelope plus returncode/elapsed_ms/stderr/raw_response.
@@ -8536,13 +8545,15 @@ def claude_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | 
     def invoke(cwd_path: Path | str) -> InvocationResult:
         if isolation is ContextIsolation.WORKSPACE:
             require_clean_workspace_context(Path(cwd_path))
-        return run_argv_capture(ProcessInvocationPlan.from_values(
-            argv,
-            input_text=prompt,
-            cwd=cwd_path,
-            timeout_s=timeout,
-            recovery_capture=recovery_capture,
-        ))
+        with model_body_capture("claude", model_body_directory) as capture_env:
+            return run_argv_capture(ProcessInvocationPlan.from_values(
+                argv,
+                input_text=prompt,
+                cwd=cwd_path,
+                timeout_s=timeout,
+                recovery_capture=recovery_capture,
+                environment={**os.environ, **capture_env} if capture_env else None,
+            ))
 
     if cwd is None:
         with tempfile.TemporaryDirectory(prefix="claude-invoke-cwd-") as td:
@@ -8837,7 +8848,8 @@ def codex_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | N
                       sandbox: str = "read-only", json_events: bool = True,
                       config_overrides: list[str] | None = None,
                       recovery_capture: RecoveryCapture | None = None,
-                      rollout_directory: Path | None = None) -> dict[str, Any]:
+                      rollout_directory: Path | None = None,
+                      model_body_directory: Path | None = None) -> dict[str, Any]:
     """Native Codex invocation for judge-style calls.
 
     Codex's event stream is useful for telemetry, but the verdict/answer should
@@ -8899,16 +8911,17 @@ def codex_cli_invoke(prompt: str, *, isolation: ContextIsolation, model: str | N
                 argv += ["--output-schema", str(schema_path)]
         if "-" not in argv:
             argv.append("-")
-        result = run_argv_capture(ProcessInvocationPlan.from_values(
-            argv,
-            input_text=prompt,
-            cwd=invoke_cwd,
-            environment=env,
-            timeout_s=timeout,
-            redact_output=redact_host_paths,
-            redact_stdout=False,
-            recovery_capture=recovery_capture,
-        ))
+        with model_body_capture("codex", model_body_directory) as capture_env:
+            result = run_argv_capture(ProcessInvocationPlan.from_values(
+                argv,
+                input_text=prompt,
+                cwd=invoke_cwd,
+                environment={**env, **capture_env},
+                timeout_s=timeout,
+                redact_output=redact_host_paths,
+                redact_stdout=False,
+                recovery_capture=recovery_capture,
+            ))
         if rollout_directory is not None:
             try:
                 env_meta["captured_rollout_count"] = capture_codex_rollouts(
@@ -21857,9 +21870,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--project", required=True, help="LangSmith tracing project UUID")
     p.add_argument("--study", required=True, help="stable ID for this collection of attempts")
     p.add_argument("--runs", help="native runs root containing the benchmark's recorded event files")
-    p.add_argument("--tool-content-from", metavar="SCBENCH_RUN", help="resolve recorded tool arguments and results from the original archive")
-    p.add_argument("--model-content-from", metavar="SCBENCH_RUN", help="include digest-verified captured Claude API request and response bodies")
+    p.add_argument("--tool-content-from", metavar="RUN_ROOT", help="resolve verified tool arguments and results from an SCBench archive or native --runs root")
+    p.add_argument("--model-content-from", metavar="RUN_ROOT", help="include verified Claude or Codex model payloads from an SCBench archive or native --runs root")
     p.add_argument("--include-responses", action="store_true", help="include observed assistant replies, reviewer reports and saved native answers")
+    p.add_argument("--model-content-side", choices=("both", "request", "response"), default="both", help="choose which model payloads to include from the capture directory")
     p.add_argument("--include-prompts", action="store_true", help="include observed user or delegation prompt text in the export")
     p.add_argument("--upload", action="store_true", help="send the previewed records to LangSmith")
 

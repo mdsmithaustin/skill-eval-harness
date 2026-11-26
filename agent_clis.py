@@ -5,8 +5,11 @@ import os
 import re
 import shlex
 import shutil
+import tempfile
 import urllib.parse
-from collections.abc import Iterable
+import uuid
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass as _dataclass
 from pathlib import Path
 from typing import Any
@@ -107,6 +110,40 @@ def codex_rollout_path(codex_home: Path, thread_id: str) -> Path | None:
         path for path in sessions.rglob("rollout-*.jsonl")
         if path.is_file() and path.name.endswith(suffix))
     return matches[0] if matches else None
+
+
+@contextmanager
+def model_body_capture(provider: str, destination: Path | None) -> Iterator[dict[str, str]]:
+    """Give one CLI invocation a private capture directory, then archive its provider files."""
+    if destination is None:
+        yield {}
+        return
+    with tempfile.TemporaryDirectory(prefix=f"{provider}-api-") as tmp:
+        root = Path(tmp).resolve() / f"{provider}-api"
+        if provider == "claude":
+            invocation = root / str(uuid.uuid4())
+            invocation.mkdir(parents=True, mode=0o700)
+            env = {"OTEL_LOG_RAW_API_BODIES": f"file:{invocation}"}
+            pattern = r"[0-9a-f-]{36}/(?:index\.jsonl|[a-zA-Z0-9_-]+\.(?:request|response)\.json)"
+        elif provider == "codex":
+            root.mkdir(mode=0o700)
+            env = {"CODEX_ROLLOUT_TRACE_ROOT": str(root)}
+            pattern = r"trace-[a-zA-Z0-9_-]+/(?:trace\.jsonl|manifest\.json|payloads/[0-9]+\.json)"
+        else:
+            raise ValueError(f"unsupported model body capture provider {provider!r}")
+        yield env
+        destination.mkdir(mode=0o700)
+        for path in root.rglob("*"):
+            relative = path.relative_to(root)
+            if not re.fullmatch(pattern, relative.as_posix()):
+                continue
+            if path.resolve() != path or not path.is_file() or path.stat().st_nlink != 1:
+                continue
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("rb") as source, target.open("xb") as output:
+                target.chmod(0o600)
+                shutil.copyfileobj(source, output)
 
 
 def capture_codex_rollouts(stdout: str, isolated_home: Path, destination: Path) -> int:

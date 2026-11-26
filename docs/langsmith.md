@@ -35,10 +35,29 @@ The default preview includes names, timing, result status, evidence labels, avai
 | --- | --- |
 | `--include-prompts` | Recorded user tasks and delegation briefs that the importer identified. Injected instruction bodies stay in the local archive. |
 | `--include-responses` | Visible assistant text blocks, reviewer reports and the saved native answer. Transcript fragments can be partial. |
-| `--tool-content-from "$SCBENCH_RUN"` | Recorded tool arguments and results that match the original checkpoint, source record and digest. Commands and file contents may appear here. |
-| `--model-content-from "$SCBENCH_RUN"` | Captured Claude Messages request and response objects with matching digests. They can include system instructions, conversation history and tool results. |
+| `--tool-content-from RUN_ROOT` | Recorded tool arguments and results that match the original checkpoint, source record and digest. Commands and file contents may appear here. |
+| `--model-content-from RUN_ROOT` | Recorded Claude Messages bodies or Codex inference payloads with verified digests. These can contain instructions, conversation history, tool data, and account or session identifiers. |
+| `--model-content-side` | Select `request`, `response`, or `both`. The default with `--model-content-from` is `both`. |
 
-For future Docker runs on the SCBench fork, set `capture_api_bodies: true` in the Claude Code agent configuration to record file-mode bodies. Successful responses have a local index linking them to the corresponding request. Old archives typically have transcript evidence only. The model-content option exports the bodies available for each matched request. Use a separate study when changing which raw content you publish. [Claude Code capture format](https://code.claude.com/docs/en/monitoring-usage#api-request-body-event) · [LangSmith LLM trace format](https://docs.langchain.com/langsmith/log-llm-trace)
+Use the original SCBench run directory for `RUN_ROOT`. For a native answer benchmark, supply its original runs directory to both `--runs` and the content option.
+
+### Capture during a new run
+
+For a native `run-claude` or `run-codex` answer run, set `SKILL_HARNESS_MODEL_BODIES=1` in the runner environment. On the SCBench fork, set `capture_api_bodies: true` on the Claude Code or Codex agent configuration. Capture increases the amount of private data stored in the local run archive. Upload is a separate step.
+
+Claude Code writes Messages request and response objects in file mode. The harness matches successful responses to recorded requests using Claude’s index. A request file without a linked response remains an attempt with unknown outcome. [Claude Code capture format](https://code.claude.com/docs/en/monitoring-usage#api-request-body-event)
+
+Codex writes an inference trace when its CLI supports `CODEX_ROLLOUT_TRACE_ROOT` (verified with 0.170.0). The importer uses the thread, inference and response IDs to match the recorded request parameters, returned output items, and token usage to the model run. Codex serializes the response as an envelope containing its observed output items. HTTP headers, SSE framing, and transport bytes are outside that format. Existing rollouts still supply whatever evidence they recorded. The root’s `captured_request_bodies` and `captured_response_bodies` show actual coverage for each attempt.
+
+To preview recorded responses from a native run:
+
+```sh
+skill-benchmark export-langsmith benchmark.json --runs "$RUN_ROOT" \
+  --project "$PROJECT_UUID" --study response-review \
+  --model-content-from "$RUN_ROOT" --model-content-side response > preview.json
+```
+
+Use a separate study name when changing which content you publish. [LangSmith LLM trace format](https://docs.langchain.com/langsmith/log-llm-trace)
 
 ## Upload and retry
 
