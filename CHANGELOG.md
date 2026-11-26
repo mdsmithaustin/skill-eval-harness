@@ -4,6 +4,8 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+- Inspect individual model calls, subagents, skill evidence and tool outcomes from native and SCBench runs. Raw prompt, tool and captured Claude API content are opt-in. [LangSmith export](docs/langsmith.md).
+
 - Import an archived SlopCodeBench arm with `import-scbench` to inspect checkpoint scores, agent actions, and matching study or replay evidence. [Import a SlopCodeBench run](docs/commands.md#import-a-slopcodebench-run).
 
 - Add `overlap-scan` and `overlap-evaluate`. Rank skill descriptions with a local embedding

@@ -109,6 +109,52 @@ def codex_rollout_path(codex_home: Path, thread_id: str) -> Path | None:
     return matches[0] if matches else None
 
 
+def capture_codex_rollouts(stdout: str, isolated_home: Path, destination: Path) -> int:
+    root = codex_thread_id(stdout)
+    sessions = isolated_home / CODEX_SESSIONS_DIRNAME
+    if not root or sessions.is_symlink():
+        return 0
+    candidates = {}
+    for path in sorted(sessions.rglob("rollout-*.jsonl")):
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(sessions.resolve()):
+            continue
+        try:
+            with path.open(encoding="utf-8") as stream:
+                header = json.loads(stream.readline())
+        except (UnicodeError, ValueError):
+            continue
+        if not isinstance(header, dict) or header.get("type") != "session_meta":
+            continue
+        meta = header.get("payload")
+        if not isinstance(meta, dict):
+            continue
+        uid = meta.get("id") or meta.get("session_id")
+        if not isinstance(uid, str) or not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", uid):
+            continue
+        if not path.name.endswith(f"-{uid}.jsonl"):
+            continue
+        parent = meta.get("parent_thread_id")
+        source = meta.get("source")
+        if parent is None and isinstance(source, dict):
+            subagent = source.get("subagent")
+            spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+            parent = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+        candidates.setdefault(uid, []).append((path, parent))
+    selected = set()
+    frontier = {root}
+    while frontier:
+        thread = frontier.pop()
+        if len(candidates.get(thread, [])) != 1 or thread in selected:
+            continue
+        selected.add(thread)
+        frontier.update(uid for uid, rows in candidates.items() if len(rows) == 1 and rows[0][1] == thread)
+    if selected:
+        destination.mkdir(parents=True)
+        for uid in sorted(selected):
+            shutil.copyfile(candidates[uid][0][0], destination / f"rollout-{uid}.jsonl")
+    return len(selected)
+
+
 def locate_codex_rollout(stdout: str, isolated_home: Path | None = None) -> CodexRollout:
     """Find the rollout for the thread `stdout` announces. The run's isolated
     CODEX_HOME is searched first, then the ambient `$CODEX_HOME` (default

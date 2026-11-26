@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shlex
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass as _dataclass
 from pathlib import Path
@@ -95,8 +96,62 @@ def command_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [e for e in events if e.get("type") == "command" and event_is_completed(e)]
 
 
+def _read_command_files(command: str) -> list[str]:
+    """Recognize simple, successful file-display commands without executing shell text."""
+    if "\n" in command:
+        return []
+    try:
+        args = shlex.split(command)
+        if (len(args) >= 3 and Path(args[0]).name in {"bash", "sh", "zsh"}
+                and args[1] in {"-c", "-lc"}):
+            args = shlex.split(args[2]) if len(args) == 3 else args[2:]
+    except ValueError:
+        return []
+    if not args or any(re.search(r"[;&|`$<>\n]", arg) for arg in args):
+        return []
+    program, operands = Path(args[0]).name, args[1:]
+    if program == "sed" and len(operands) >= 3 and operands[0] == "-n" and re.fullmatch(
+            r"\d+(?:,\d+)?p", operands[1]):
+        return operands[2:]
+    if program in {"head", "tail"} and len(operands) >= 2 and operands[0] == "-n" and operands[1].isdigit():
+        operands = operands[2:]
+    if operands[:1] == ["--"]:
+        operands = operands[1:]
+    if program in {"cat", "head", "tail"} and all(not arg.startswith("-") for arg in operands):
+        return operands
+    return []
+
+
+def successful_operation(event: dict[str, Any]) -> bool:
+    code = event.get("exit_code")
+    return (event_is_completed(event) and event.get("is_error") is not True
+            and (code is None or type(code) is int and code == 0))
+
+
+def observed_skill_name(event: dict[str, Any]) -> str | None:
+    """Identify one observed skill by a successful named load or SKILL.md read."""
+    if not successful_operation(event):
+        return None
+    text = str(event.get("input_summary") or "")
+    if event.get("type") == "skill_load" and str(event.get("name") or "").lower() == "skill":
+        return text or None
+    paths = _read_command_files(text) if event.get("type") == "command" else [text]
+    if event.get("type") in {"command", "file_read", "skill_load"}:
+        for path in paths:
+            parts = path.replace("\\", "/").split("/")
+            if len(parts) >= 2 and parts[-1] == "SKILL.md":
+                return parts[-2]
+    return None
+
+
 def event_mentions_skill_file(event: dict[str, Any]) -> bool:
-    if event.get("type") not in {"skill_load", "file_read", "tool_call", "command"}:
+    if not successful_operation(event):
+        return False
+    if event.get("type") == "command":
+        return observed_skill_name(event) is not None
+    if event.get("type") == "skill_load":
+        return True
+    if event.get("type") not in {"file_read", "tool_call"}:
         return False
     if str(event.get("name") or "").casefold() in {
             "glob", "grep_search", "list_directory", "read_many_files"}:
@@ -130,7 +185,7 @@ def trace_event_counts(events: list[dict[str, Any]], *, mediated_tools: tool_fau
         "file_reads": sum(1 for e in completed if e.get("type") in {"file_read", "skill_load"}),
         "file_writes": sum(1 for e in completed if e.get("type") == "file_write"),
         "errors": sum(1 for e in events if e.get("type") == "error" or e.get("is_error") is True),
-        "skill_events": [e for e in completed if e.get("type") == "skill_load" or event_mentions_skill_file(e)],
+        "skill_events": [e for e in completed if event_mentions_skill_file(e)],
     }
 
 
@@ -189,19 +244,24 @@ def detect_trigger_records(records: Iterable[dict[str, Any]], copied_paths: list
 
 def detect_trigger_events(events: Iterable[dict[str, Any]], copied_paths: list[Path]) -> TriggerDetection:
     """Derive mounted-path evidence from normalized completed operations."""
-    evidence: list[str] = []
+    evidence = []
+    target_names = {(p.parent if p.name == "SKILL.md" else p).name for p in copied_paths}
     for event in events:
-        if not event_is_completed(event) or event.get("is_error") is True:
+        if not successful_operation(event):
             continue
-        exit_code = event.get("exit_code")
-        if exit_code is not None and (type(exit_code) is not int or exit_code != 0):
+        kind = event.get("type")
+        if kind not in {"skill_load", "file_read", "command"}:
             continue
-        if event.get("type") not in {"skill_load", "file_read", "command"}:
-            continue
-        for text in event_texts_for_tool_input(event):
-            if text_mentions_mounted_skill(text, copied_paths):
-                evidence.append(text[:500])
-    return TriggerDetection.from_texts(TriggerEvidenceKind.MOUNTED_PATH, evidence[:5])
+        if kind == "skill_load" and str(event.get("name") or "").casefold() == "skill":
+            name = str(event.get("input_summary") or "")
+            if name in target_names:
+                evidence.extend(TriggerDetection.from_texts(TriggerEvidenceKind.SKILL_TOOL, [name]).evidence)
+        else:
+            for text in event_texts_for_tool_input(event):
+                paths = _read_command_files(text) if kind == "command" else [text]
+                if any(text_mentions_mounted_skill(path, copied_paths) for path in paths):
+                    evidence.extend(TriggerDetection.from_texts(TriggerEvidenceKind.MOUNTED_PATH, [text[:500]]).evidence)
+    return TriggerDetection(tuple(evidence[:5]))
 
 
 def detect_trigger_detection(stdout: str, copied_paths: list[Path],
@@ -561,6 +621,8 @@ def normalize_trace_record(record: dict[str, Any], *, source: str, index: int, l
     raw_result_line = record.get("_raw_result_line")
     if isinstance(raw_result_line, int) and not isinstance(raw_result_line, bool) and raw_result_line > 0:
         event["raw_result_ref"] = {"file": "trace.jsonl", "line": raw_result_line}
+    if record.get("synthetic") is True:
+        event["synthetic"] = True
     if record.get("is_error") is True:
         event["is_error"] = True
     if isinstance(raw_status, str) and raw_status.casefold() != status:
@@ -785,7 +847,17 @@ def claude_stream_flat_records(records: list[dict[str, Any]], *,
     for call_id, (call_line, _) in sorted(open_calls.items()):
         flat.append((call_line, _claude_protocol_error(
             f"Claude tool_use call id {call_id!r} has no matching tool_result")))
-    return flat
+    observations = dict(identity_flat_records(records, record_lines=record_lines))
+    enriched = []
+    for line, event in flat:
+        envelope = observations[line]
+        context = {}
+        if isinstance(envelope.get("timestamp"), str):
+            context["timestamp"] = envelope["timestamp"]
+        if envelope.get("isSynthetic") is True:
+            context["synthetic"] = True
+        enriched.append((line, {**event, **context}))
+    return enriched
 
 
 def identity_flat_records(records: list[dict[str, Any]], *,
@@ -1698,6 +1770,12 @@ def write_trace_artifacts(
         records = retained_records
     events, metrics = normalize_trace_records(
         records, source=source, pi_stream=pi_stream, record_lines=record_lines)
+    targets = (metadata or {}).get("target_skill_names")
+    if isinstance(targets, (tuple, list)) and all(isinstance(name, str) for name in targets):
+        matches = [event for event in events["events"] if observed_skill_name(event) in targets]
+        metrics["skill_invoked"] = bool(matches)
+        metrics["skill_invocation_evidence"] = [event.get("input_summary", "") for event in matches[:10]]
+        metrics["target_skill_names"] = list(targets)
     semantic_protocol_error = trace_dialect_for(source).protocol_error(records, pi_stream)
     if semantic_protocol_error:
         existing_protocol_errors = metrics.get("trace_protocol_errors")

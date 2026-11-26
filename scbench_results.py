@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +7,11 @@ from typing import Any
 
 import yaml
 
+from claude_inspection import _digest as claude_digest
+from claude_inspection import inspect_archive
 from json_contracts import stream_json_loads, strict_json_loads
+from scbench_codex import _digest as codex_digest
+from scbench_codex import inspect_rollouts
 
 _CHECKPOINT_SCORES = (
     "strict_pass_rate", "core_pass_rate", "isolated_pass_rate", "total_tests",
@@ -71,60 +74,94 @@ def _scores(row: dict, keys: tuple[str, ...], basis: str, source: str) -> list[d
     return result
 
 
-def _codex_events(archive: _Archive, checkpoint: Path) -> list[dict]:
-    events = []
-    for path in sorted(archive.input(checkpoint / "agent").glob("rollout-*.jsonl")):
-        path = archive.input(path)
-        actor = "unknown"
-        for number, row in _rows(path, agent_stream=True):
-            payload = row.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            if row.get("type") == "session_meta":
-                actor = payload.get("agent_role") or ("lead" if isinstance(payload.get("source"), str) else "subagent")
-            if row.get("type") != "response_item":
-                continue
-            kind = payload.get("type")
-            if kind in {"function_call", "custom_tool_call"}:
-                name = payload.get("name")
-                if name == "exec" and "tools.apply_patch(" in str(payload.get("input", "")):
-                    name = "exec_with_apply_patch"
-                event = {"kind": "tool_call", "name": name}
-            elif kind == "agent_message" and payload.get("recipient") == "/root":
-                event = {"kind": "agent_message", "name": "message_to_lead", "author": payload.get("author")}
-                event["text"] = "\n".join(
-                    block["text"] for block in payload.get("content", [])
-                    if isinstance(block, dict) and isinstance(block.get("text"), str)
-                )
-                verdicts = {
-                    match.group(1).lower() for match in re.finditer(
-                        r"(?im)^(?:- )?(?:\*\*)?(?:spec verdict: |specification )(pass|fail)(?:ed)?(?:[.!](?:\*\*)?(?=\s|$)|\*\*(?=\s|$)|$)",
-                        event["text"],
-                    )
-                }
-                if len(verdicts) == 1:
-                    event["spec_verdict"] = verdicts.pop()
-            else:
-                continue
-            events.append({**event, "actor": actor, "timestamp": row.get("timestamp"),
-                           "source": f"{path.relative_to(archive.root)}:{number}"})
-    return sorted(events, key=lambda item: item["timestamp"] or "")
+def _codex_events(archive: _Archive, checkpoint: Path) -> tuple[list[dict], list[dict]]:
+    paths = sorted(archive.input(checkpoint / "agent").glob("rollout-*.jsonl"))
+    return inspect_rollouts(
+        (path.relative_to(archive.root).as_posix(), _rows(archive.input(path), agent_stream=True))
+        for path in paths
+    )
 
 
-def _claude_events(archive: _Archive, checkpoint: Path) -> list[dict]:
-    path = archive.input(checkpoint / "agent" / "stdout.jsonl")
-    if not path.is_file():
-        return []
-    events = []
-    for number, row in _rows(path, agent_stream=True):
-        if row.get("type") != "assistant":
+def _claude_events(archive: _Archive, checkpoint: Path) -> tuple[list[dict], list[dict]]:
+    return inspect_archive(archive, checkpoint, _rows)
+
+
+def _tool_value(row: dict, event: dict, side: str, ref: str):
+    uid, kind = event.get("id"), event.get("kind")
+    if not isinstance(uid, str):
+        raise TypeError("missing tool observation ID")
+    if uid.startswith("claude-tool:") and kind == "tool_call":
+        call_id = uid.removeprefix("claude-tool:")
+        incoming = side == "input"
+        if row.get("type") == ("assistant" if incoming else "user"):
+            for block in row.get("message", {}).get("content", []):
+                if not isinstance(block, dict):
+                    continue
+                if (block.get("type") == ("tool_use" if incoming else "tool_result")
+                    and block.get("id" if incoming else "tool_use_id") == call_id):
+                    return block["input" if incoming else "content"], claude_digest
+    p = row.get("payload")
+    if isinstance(p, dict):
+        if kind == "command" and row.get("type") == "event_msg" and p.get("type") == "item_completed":
+            item = p.get("item", {})
+            if item.get("type") == "CommandExecution" and uid.endswith(f":command:{item.get('id') or ref}"):
+                return item["command" if side == "input" else "aggregated_output"], codex_digest
+        if kind == "tool_call" and row.get("type") == "response_item":
+            key = p.get("call_id") or p.get("id") or ref
+            if uid.endswith(f":tool:{key}"):
+                packet = p.get("type")
+                if side == "input" and packet in ("custom_tool_call", "function_call"):
+                    return p["input" if packet == "custom_tool_call" else "arguments"], codex_digest
+                if side == "output" and packet in ("custom_tool_call_output", "function_call_output"):
+                    return p["output"], codex_digest
+    raise ValueError("SCBench tool source does not match the observation ID")
+
+
+def attach_tool_content(attempt: dict, run_root: Path) -> None:
+    """Resolve selected tool inputs and outputs against verified archive rows."""
+    archive = _Archive(run_root.resolve(), None)
+    identity = attempt["identity"]
+    problem, index = _identity(identity, identity["checkpoint"])
+    if (identity["arm"], identity["run_id"]) != (archive.root.parent.name, archive.root.name):
+        raise ValueError("tool-content archive does not match the SCBench attempt")
+    agent = archive.input(Path(problem) / f"checkpoint_{index}" / "agent")
+    if agent != agent.resolve():
+        raise ValueError("tool-content checkpoint directory is a symlink")
+    reads: dict[Path, dict[int, list]] = {}
+    for event in [*attempt["events"], *attempt.get("spans", [])]:
+        event.pop("tool_input", None)
+        event.pop("tool_output", None)
+        if event.get("kind") not in ("tool_call", "command"):
             continue
-        for block in row.get("message", {}).get("content", []):
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                events.append({"kind": "tool_call", "name": block["name"],
-                               "actor": "subagent" if row.get("parent_tool_use_id") else "lead",
-                               "timestamp": row.get("timestamp"), "source": f"{path.relative_to(archive.root)}:{number}"})
-    return events
+        for side in ("input", "output"):
+            if not event.get(f"{side}_digest"):
+                continue
+            key = "source" if side == "input" or event["kind"] == "command" else "result_source"
+            ref = event.get(key)
+            if not isinstance(ref, str):
+                raise TypeError("missing tool source")
+            name, _, number = ref.rpartition(":")
+            if Path(name).is_absolute() or not number.isdecimal() or int(number) < 1:
+                raise ValueError("invalid tool source")
+            path = archive.input(name).resolve()
+            relative = path.relative_to(agent.resolve())
+            if not (relative.match("*.jsonl") and (
+                len(relative.parts) == 1 and (relative.name == "stdout.jsonl" or relative.match("rollout-*.jsonl"))
+                or relative.parts[:2] == ("workspace", "projects")
+            )):
+                raise ValueError("invalid tool source file")
+            reads.setdefault(path, {}).setdefault(int(number), []).append((event, side, ref))
+    for path, wanted in reads.items():
+        for line, row in _rows(path, agent_stream=True):
+            for event, side, ref in wanted.pop(line, []):
+                value, digest = _tool_value(row, event, side, ref)
+                if digest(value) != event[f"{side}_digest"]:
+                    raise ValueError("SCBench tool content digest mismatch")
+                event[f"tool_{side}"] = value
+            if not wanted:
+                break
+        if wanted:
+            raise ValueError("SCBench tool source line missing")
 
 
 def _join_study(study: _Archive, root: Path, attempts: dict) -> None:
@@ -231,14 +268,13 @@ def import_run(root: Path, study: Path | None = None, review: Path | None = None
         ) if row.get(k) is not None})
         if "cost" in metadata:
             metadata["cost_basis"] = "as_recorded_by_scbench"
+        reader = _claude_events if metadata.get("agent_type") == "claude_code" else _codex_events
+        events, spans = reader(archive, Path(problem) / checkpoint)
         attempts[key] = {
             "identity": {"arm": root.parent.name, "run_id": root.name, "problem": problem, "checkpoint": idx},
             "metadata": metadata,
-            "events": (
-                _claude_events(archive, Path(problem) / checkpoint)
-                if metadata.get("agent_type") == "claude_code"
-                else _codex_events(archive, Path(problem) / checkpoint)
-            ),
+            "events": events,
+            "spans": spans,
             "outcomes": _scores(row, _CHECKPOINT_SCORES, "checkpoint_results", source),
         }
     if not attempts:
