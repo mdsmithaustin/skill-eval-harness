@@ -352,6 +352,18 @@ def upload(requests: list[dict], endpoint: str, api_key: str) -> None:
     url = urlsplit(endpoint)
     if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
         raise ValueError("LANGSMITH_ENDPOINT must be an HTTPS API base URL")
+    host = url.hostname.rstrip(".")
+    if host == "api.smith.langchain.com" or host.endswith(".api.smith.langchain.com"):
+        now = datetime.now(timezone.utc)
+        for request in requests:
+            if request["path"] == "runs":
+                run = request["body"]
+                if abs(datetime.fromisoformat(run["start_time"]) - now) > timedelta(hours=24):
+                    raise ValueError(
+                        f"Run {run['id']} starts at {run['start_time']}, outside the hosted LangSmith "
+                        "24-hour ingestion window. No records sent. Upload fresh runs as they finish, "
+                        "or omit --upload to inspect the archive locally."
+                    )
     connection = http.client.HTTPSConnection(url.hostname, url.port, timeout=30)
     try:
         for request in requests:

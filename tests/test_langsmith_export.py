@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -63,6 +64,27 @@ class LangSmithTests(unittest.TestCase):
                 {r["id"] for r in parents}, {r["parent_run_id"] for r in payloads if "parent_run_id" in r}
             )
             self.assertIn("benchmark.combined_pass_rate", output)
+
+    def test_hosted_window_checks_all_runs_before_upload(self):
+        now = datetime(2026, 11, 26, 12, tzinfo=timezone.utc)
+
+        def run(hour):
+            return {"path": "runs", "body": {"id": "fixture", "start_time": (now + hour).isoformat()}}
+
+        with patch("langsmith_export.datetime", wraps=datetime) as clock:
+            clock.now.return_value = now
+            with patch("http.client.HTTPSConnection") as connection:
+                connection.return_value.getresponse.return_value.status = 202
+                for hours, host in ((-24, "api"), (24, "eu.api")):
+                    bound = timedelta(hours=hours)
+                    outside = bound + timedelta(microseconds=-1 if hours < 0 else 1)
+                    endpoint = f"https://{host}.smith.langchain.com"
+                    with self.assertRaisesRegex(ValueError, "24-hour ingestion window. No records sent"):
+                        upload([run(timedelta()), run(outside)], endpoint, "fixture")
+                    connection.assert_not_called()
+                    upload([run(bound)], endpoint, "fixture")
+                    connection.return_value.request.assert_called_once()
+                    connection.reset_mock()
 
     def test_invalid_api_key_never_reaches_header_or_diagnostic(self):
         with patch("http.client.HTTPSConnection", side_effect=AssertionError("network before validation")):
