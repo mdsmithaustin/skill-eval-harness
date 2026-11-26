@@ -71,10 +71,38 @@ class NativeInspectionTests(unittest.TestCase):
                 self.assertEqual(len(llms), 2)
                 self.assertTrue(all(r["extra"]["metadata"]["ls_model_name"] == "claude-sonnet-5" for r in llms))
 
+    def test_codex_stdout_item_lifecycles_with_receiver_evidence(self):
+        from scbench_codex import inspect_exec
+
+        cmd = {"id": "a", "type": "command_execution", "command": "example"}
+        spawn = {"id": "b", "type": "collab_tool_call", "tool": "spawn_agent",
+                 "sender_thread_id": "lead", "prompt": "private brief"}
+        rows = [
+            {"type": "thread.started", "thread_id": "lead"},
+            {"type": "item.started", "item": cmd},
+            {"type": "item.completed", "item": {**cmd, "exit_code": 1, "aggregated_output": "private result"}},
+            {"type": "item.started", "item": spawn},
+            {"type": "item.completed", "item": {**spawn, "receiver_thread_ids": ["child"]}},
+            {"type": "turn.completed", "usage": {"input_tokens": 123}},
+        ]
+        events, spans = inspect_exec(list(enumerate(rows, 1)), [
+            {"source": f"trace.jsonl:{i}", "kind": "metric" if i == 6 else "event"} for i in range(1, 7)])
+        self.assertEqual([e["kind"] for e in events], ["command", "tool_call", "metric"])
+        self.assertEqual((events[0]["exit_code"], events[0]["status"], events[0]["result_source"]),
+                         (1, "failed", "trace.jsonl:3"))
+        self.assertEqual(len(events[0]["output_digest"]), 64)
+        self.assertEqual(len(events[1]["receiver_threads"]), 1)
+        self.assertEqual([s["kind"] for s in spans], ["agent", "prompt"])
+        self.assertEqual(spans[1]["parent_id"], events[1]["id"])
+        self.assertEqual(spans[1]["prompt_text"], "private brief")
+
     def test_opt_in_codex_answer_captures_only_observed_thread_tree(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest = make_eval_repo(root)
+            spec = json.loads(manifest.read_text())
+            spec["cases"][0]["prompt"] = "Use [$other](/skills/other/SKILL.md) and [$demo](/skills/demo/SKILL.md)."
+            manifest.write_text(json.dumps(spec))
             tasks, runs = root / "tasks.jsonl", root / "runs"
             self.assertEqual(run_cli("prepare", manifest, "--out", tasks)[0], 0)
             provider = root / "codex.py"
@@ -112,6 +140,7 @@ for r in [{'type':'thread.started','thread_id':ids[0]},{'type':'turn.started'},
             self.assertEqual(runs_out[0]["extra"]["metadata"]["model_evidence"], "provider_requests")
             tasks_out = [r for r in runs_out if r["name"] == "Task prompt"]
             self.assertEqual(len(tasks_out), 2)
+            self.assertTrue(runs_out[0]["extra"]["metadata"]["skill_requested"])
             self.assertTrue(all(r["inputs"] == {} for r in tasks_out))
             prompt_text = next(runs.rglob("task-prompt.txt")).read_text()
             explicit = build_export(json.loads(report.read_text()), project=PROJECT, study="capture",

@@ -19,7 +19,7 @@ from claude_inspection import inspect_stdout
 from cli_contracts import die
 from experimental_pairs import ExperimentalPairKey, ExperimentalPopulation
 from json_contracts import strict_json_loads
-from scbench_codex import inspect_rollouts
+from scbench_codex import explicit_skill_names, inspect_exec, inspect_rollouts
 from telemetry import (
     measurement_from_envelope_or_cost,
     measurement_from_envelope_or_nonnegative,
@@ -158,9 +158,10 @@ def native_inspection(
         elif any(record.get("type") == "session_meta" for _, record in rows):
             observations, spans = inspect_rollouts([("trace.jsonl", rows)])
         else:
+            observations, spans = inspect_exec(rows, events)
             return (
-                events,
-                [],
+                observations,
+                spans,
                 normalized,
                 "partial_raw_trace" if partial else "turn_aggregate_only",
             )
@@ -244,28 +245,46 @@ def native_attempts(report: dict, runs: Path | None) -> list[dict]:
                 if prompt.resolve() != prompt:
                     raise ValueError("native task prompt falls outside its run")
                 contents = prompt.read_bytes()
-                spans.append({
-                    "id": "prepared-task-prompt", "kind": "prompt", "name": "Task prompt",
-                    "evidence": "prepared_task_prompt", "role": "user",
-                    "digest": hashlib.sha256(contents).hexdigest(), "prompt_text": contents.decode("utf-8"),
-                })
-            targets = {r.get("name") for r in details["skill_revisions"]} | {report.get("skill_name")}
+                text = contents.decode("utf-8")
+                task = {
+                    "id": "prepared-task-prompt",
+                    "kind": "prompt",
+                    "name": "Task prompt",
+                    "evidence": "prepared_task_prompt",
+                    "role": "user",
+                    "digest": hashlib.sha256(contents).hexdigest(),
+                    "prompt_text": text,
+                }
+                if requested := explicit_skill_names(text):
+                    task.update(
+                        skill_name=requested[0],
+                        skill_names=requested,
+                        evidence="explicit_skill_request",
+                    )
+                spans.append(task)
+            targets = {r.get("name") for r in details["skill_revisions"]} | {
+                report.get("skill_name")
+            }
             if isinstance(names := metadata.get("target_skill_names"), list):
                 targets.update(name for name in names if isinstance(name, str))
             targets.discard(None)
             if targets and details["model_evidence"] != "report_only":
                 skill_observations = {
-                    item.get("evidence") for item in [*events, *spans]
-                    if item.get("skill_name") in targets or any(
-                        isinstance(name, str) and name in targets for name in item.get("skill_names", [])
+                    item.get("evidence")
+                    for item in [*events, *spans]
+                    if item.get("skill_name") in targets
+                    or any(
+                        isinstance(name, str) and name in targets
+                        for name in item.get("skill_names", [])
                     )
                 }
                 if skill_observations & {"explicit_skill_request", "explicit_command"}:
                     details["skill_requested"] = True
                 if skill_observations & {"injected_skill", "skill_directory_injection"}:
                     details["skill_injected"] = True
-                matched = (any(observed_skill_name(event) in targets for event in normalized)
-                           or bool(skill_observations & {"skill_completed", "skill_file_read"}))
+                matched = any(
+                    observed_skill_name(event) in targets for event in normalized
+                ) or bool(skill_observations & {"skill_completed", "skill_file_read"})
                 if matched or (
                     metadata.get("operation_observation_complete") is True
                     and details["model_evidence"] != "partial_raw_trace"
@@ -550,6 +569,15 @@ def build_export(
         start = min([moment(started, min(observed, default=fallback)), *observed])
         details["time_basis"] = "recorded" if started or observed else "report_time"
         details["observed_model_calls"] = sum(e["kind"] == "llm" for e in nodes)
+        if source == "scbench":
+            details["model_evidence"] = (
+                "provider_requests"
+                if details["observed_model_calls"]
+                else "no_observed_requests"
+            )
+        details["captured_request_bodies"] = sum(
+            e.get("request_body_available") is True for e in nodes
+        )
 
         root_order = order(start, trace_id)
         common = {"session_id": project, "trace_id": trace_id}
@@ -610,8 +638,31 @@ def build_export(
                     "response_body_digest",
                 ),
             )
+            if isinstance(sender := event.get("sender_thread"), str) and re.fullmatch(
+                r"[a-f0-9]{64}", sender
+            ):
+                info["sender_thread"] = sender
+            if isinstance(receivers := event.get("receiver_threads"), list):
+                info["receiver_threads"] = [
+                    v
+                    for v in receivers
+                    if isinstance(v, str) and re.fullmatch(r"[a-f0-9]{64}", v)
+                ]
+            if (
+                source == "skill-harness"
+                and isinstance(result_ref := event.get("result_source"), str)
+                and re.fullmatch(r"trace\.jsonl:[1-9][0-9]*", result_ref)
+            ):
+                info["raw_result_ref"] = result_ref
             if isinstance(names := event.get("skill_names"), list):
-                info["skill_names"] = [name for name in names if isinstance(name, str) and re.fullmatch(r"[\w.:-]{1,160}", name)]
+                info["skill_names"] = [
+                    name
+                    for name in names
+                    if isinstance(name, str) and re.fullmatch(r"[\w.:-]{1,160}", name)
+                ]
+            info["time_basis"] = (
+                "recorded" if event.get("timestamp") else "attempt_fallback"
+            )
             ref = event.get("source")
             if (
                 source == "skill-harness"
@@ -648,10 +699,7 @@ def build_export(
                 info["event_number"] = i
             kind = info["kind"]
             name = event.get("name")
-            if (
-                not isinstance(name, str)
-                or not re.fullmatch(r"[\w. :-]{1,120}", name)
-            ):
+            if not isinstance(name, str) or not re.fullmatch(r"[\w. :-]{1,120}", name):
                 name = kind
             run_type = {
                 "llm": "llm",

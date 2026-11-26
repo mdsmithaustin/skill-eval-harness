@@ -46,6 +46,17 @@ def _usage(raw: dict) -> dict:
     return result
 
 
+def explicit_skill_names(text: str) -> list[str]:
+    names = []
+    if invoked := re.match(r"^\s*\$([\w-]+)\b", text):
+        names.append(invoked[1])
+    for link in re.finditer(r"\[\$([\w.-]+)\]\(([^)\n]+)\)", text):
+        path = link[2].strip("<>").replace("\\", "/")
+        if path.endswith(f"/{link[1]}/SKILL.md") and link[1] not in names:
+            names.append(link[1])
+    return names
+
+
 def _message(common: dict, payload: dict) -> dict:
     content = payload.get("content", [])
     blocks = [b for b in content if isinstance(b, dict)]
@@ -101,13 +112,7 @@ def _message(common: dict, payload: dict) -> dict:
     else:
         if complete:
             node["prompt_text"] = text
-        names = []
-        if invoked := re.match(r"^\s*\$([\w-]+)\b", text):
-            names.append(invoked[1])
-        for link in re.finditer(r"\[\$([\w.-]+)\]\(([^)\n]+)\)", text):
-            path = link[2].strip("<>").replace("\\", "/")
-            if path.endswith(f"/{link[1]}/SKILL.md") and link[1] not in names:
-                names.append(link[1])
+        names = explicit_skill_names(text)
         if names:
             node.update(skill_name=names[0], skill_names=names, evidence="explicit_skill_request")
     return node
@@ -120,10 +125,15 @@ def _read_session(
         ((n, row) for n, row in rows if row.get("type") == "session_meta"), (1, {})
     )
     meta = meta_row.get("payload", {})
-    thread = meta.get("id") or path
+    source = meta.get("source")
+    subagent = source.get("subagent") if isinstance(source, dict) else None
+    spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+    spawn = spawn if isinstance(spawn, dict) else {}
+    parent = meta.get("parent_thread_id") or spawn.get("parent_thread_id")
+    thread = meta.get("id") or meta.get("session_id") or path
     session_id = f"session:{thread}"
-    role = meta.get("agent_role") or (
-        "subagent" if meta.get("parent_thread_id") else "lead" if meta else "unknown"
+    role = meta.get("agent_role") or spawn.get("agent_role") or (
+        "subagent" if parent else "lead" if meta else "unknown"
     )
     session = {
         "id": session_id,
@@ -322,7 +332,7 @@ def _read_session(
                 else:
                     spans.append(node)
     spans.extend(recorded.values() if recorded else fallback)
-    return session, meta.get("parent_thread_id")
+    return session, parent
 
 
 def inspect_rollouts(
@@ -343,3 +353,86 @@ def inspect_rollouts(
             session["evidence"] = "parent_rollout_missing"
     events.sort(key=lambda e: e["timestamp"] or "")
     return events, spans
+
+
+def inspect_exec(
+    rows: list[tuple[int, dict]], events: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Pair Codex exec item lifecycles while retaining other normalized observations."""
+    retained = {}
+    replaced = set()
+    agents = {}
+    briefs = {}
+    by_ref = {}
+    thread = None
+    turn = 0
+    for line, row in rows:
+        ref = f"trace.jsonl:{line}"
+        typ = row.get("type")
+        stamp = row.get("timestamp")
+        if typ == "thread.started" and isinstance(uid := row.get("thread_id"), str):
+            thread = _digest(uid)
+            agents[thread] = {"id": f"exec-thread:{thread}", "kind": "agent", "name": "Codex thread",
+                              "actor": "lead", "timestamp": stamp, "source": ref, "sender_thread": thread}
+            replaced.add(ref)
+            turn = 0
+            continue
+        if thread is not None:
+            by_ref[ref] = agents[thread]["id"]
+            if stamp:
+                agents[thread]["end_time"] = stamp
+        if typ == "turn.started":
+            turn += 1
+        item = row.get("item")
+        if typ not in {"item.started", "item.updated", "item.completed"} or not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        uid = item.get("id")
+        if kind not in {"command_execution", "collab_tool_call"} or not isinstance(uid, str) or not uid:
+            continue
+        sender = _digest(item["sender_thread_id"]) if isinstance(item.get("sender_thread_id"), str) else thread
+        key = f"exec:{sender}:{turn}:{kind}:{uid}"
+        collab = kind == "collab_tool_call"
+        node = retained.setdefault(key, {
+            "id": key, "kind": "tool_call" if collab else "command",
+            "name": (item.get("tool") or "collaboration") if collab else "command",
+            "source": ref, "timestamp": stamp, "result_observed": False,
+        })
+        replaced.add(ref)
+        if sender:
+            node["sender_thread"] = sender
+            if sender in agents:
+                node["parent_id"] = agents[sender]["id"]
+        if collab:
+            if isinstance(targets := item.get("receiver_thread_ids"), list):
+                node["receiver_threads"] = sorted(set(node.get("receiver_threads", [])) | {
+                    _digest(value) for value in targets if isinstance(value, str) and value})
+            if isinstance(prompt := item.get("prompt"), str) and prompt:
+                digest = _digest(prompt)
+                brief_id = f"{key}:prompt:{digest}"
+                briefs.setdefault(brief_id, {"id": brief_id, "parent_id": key, "kind": "prompt",
+                                             "name": "Delegation brief", "evidence": "collab_tool_call",
+                                             "role": "agent_brief", "prompt_text": prompt, "digest": digest,
+                                             "source": ref, "timestamp": stamp})
+                node["input_digest"] = digest
+        elif isinstance(command := item.get("command"), str):
+            node["input_digest"] = _digest(command)
+        node["status"] = item.get("status") or ("completed" if typ == "item.completed" else "in_progress")
+        if typ == "item.completed":
+            node.update(result_observed=True, result_source=ref, end_time=stamp)
+            if isinstance(output := item.get("aggregated_output"), str):
+                node["output_digest"] = _digest(output)
+            elif collab and isinstance(states := item.get("agents_states"), dict):
+                node["output_digest"] = _digest(states)
+            if type(code := item.get("exit_code")) is int:
+                node.update(exit_code=code, is_error=code != 0)
+                if code != 0:
+                    node["status"] = "failed"
+    result = list(retained.values())
+    for event in events:
+        ref = event.get("source")
+        if ref not in replaced:
+            if ref in by_ref:
+                event = {**event, "parent_id": by_ref[ref]}
+            result.append(event)
+    return result, [*agents.values(), *briefs.values()]
