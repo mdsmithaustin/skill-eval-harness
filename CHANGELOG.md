@@ -4,6 +4,8 @@ All notable public changes are listed here. Release tags are the source of truth
 
 ## Unreleased
 
+## v0.8.0 — 2026-11-26
+
 - Capture Claude and Codex model payloads in native answer runs and SCBench archives. Choose request or response content when exporting. [Capture and inspection](docs/langsmith.md#capture-during-a-new-run).
 
 - Inspect individual model calls, subagents, skill evidence and tool outcomes from native and SCBench runs. Raw prompt, tool and captured Claude API content are opt-in. [LangSmith export](docs/langsmith.md).

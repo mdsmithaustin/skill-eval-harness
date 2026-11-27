@@ -2,6 +2,10 @@
 
 Each section covers one released-version boundary. Follow every section after your installed version; do not skip an intermediate artifact migration.
 
+## 0.7.0 → 0.8.0
+
+Install the fork at `ext-v0.8.0`. Existing manifests and saved benchmark reports work with this version. To inspect an older SCBench run in LangSmith, run `import-scbench` again against its original archive. New runs can capture model request and response bodies when you enable recording. See [capture and export options](langsmith.md#capture-during-a-new-run).
+
 ## 0.6.0 → 0.7.0
 
 0.7.0 is the first release prepared by this fork. These changes merged after
